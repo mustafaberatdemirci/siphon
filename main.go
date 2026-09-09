@@ -103,9 +103,19 @@ func run() int {
 	log.debugf("config: %s (%d site)", src, len(cfgs))
 
 	reg := site.NewRegistry()
-	if err := reg.Register(site.PixeldrainName, site.NewPixeldrain); err != nil {
-		log.errorf("registry: %v", err)
-		return exitUsage
+	for name, factory := range map[string]site.Factory{
+		site.PixeldrainName: site.NewPixeldrain,
+		site.BunkrName:      site.NewBunkr,
+	} {
+		if err := reg.Register(name, factory); err != nil {
+			log.errorf("registry: %v", err)
+			return exitUsage
+		}
+	}
+	// Teşhis satırları -v ile görünür olsun: domain rotasyonu sessizce olursa
+	// "neden başka bir domaine gitti" sorusu cevaplanamaz.
+	for i := range cfgs {
+		cfgs[i].Logf = log.debugf
 	}
 	resolvers, err := reg.Build(cfgs)
 	if err != nil {
@@ -153,6 +163,11 @@ func run() int {
 		// her 403 "imzalı URL süresi doldu" sayılır ve rate limit derinleşir.
 		if c, ok := r.(site.StatusClassifier); ok {
 			down.Classify = c.ClassifyStatus
+		}
+		// bunkr 200 ile bakım placeholder'ı döndürebiliyor; durum kodu yeterli
+		// sinyal değil.
+		if v, ok := r.(site.ResponseValidator); ok {
+			down.Validate = v.ValidateResponse
 		}
 
 		// Sınır HOST başına: bir albüm birden fazla CDN host'una yayılabiliyor

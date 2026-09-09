@@ -103,6 +103,13 @@ type Downloader struct {
 	Reresolve Reresolver
 	// Classify nil olabilir.
 	Classify Classifier
+	// Validate nil olabilir. Basarili bir yanitin GERCEKTEN istenen icerik
+	// olup olmadigini siteye ozgu bicimde dogrular.
+	//
+	// Neden durum kodu yetmiyor: bunkr, bakimdaki veya silinmis dosyalar icin
+	// 404 degil 200 ile bir placeholder video donduruyor. Durum kodu temiz,
+	// icerik cop. Bu kanca olmadan arac copu "basariyla indirdim" sayar.
+	Validate func(resp *http.Response) error
 	// UserAgent, transfer isteklerine de uygulanır. Resolver'ın User-Agent'ı
 	// yalnızca API çağrılarını kapsadığı için burada ayrıca verilmesi gerekiyor.
 	UserAgent string
@@ -121,6 +128,16 @@ func (d *Downloader) logf(format string, a ...any) {
 	if d.Logf != nil {
 		d.Logf(format, a...)
 	}
+}
+
+// validate, siteye özgü yanıt doğrulamasını uygular.
+// Hata KALICI: bakım modu saatler sürüyor, 10 dakikalık deneme bütçesi içinde
+// çözülmez; tekrar denemek bant genişliği harcamaktan başka bir şey yapmaz.
+func (d *Downloader) validate(resp *http.Response) error {
+	if d.Validate == nil {
+		return nil
+	}
+	return d.Validate(resp)
 }
 
 func (d *Downloader) client() *http.Client {
@@ -373,6 +390,9 @@ func (d *Downloader) attempt(
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		if verr := d.validate(resp); verr != nil {
+			return false, st, verr
+		}
 		// Kaynak değişmiş ya da sunucu Range desteklemiyor: baştan yaz.
 		if st.Offset > 0 {
 			d.logf("sunucu 200 döndü, kaynak değişmiş olabilir: baştan indiriliyor")
@@ -386,6 +406,9 @@ func (d *Downloader) attempt(
 		return d.stream(ctx, part, statePath, resp.Body, st, hasher)
 
 	case http.StatusPartialContent:
+		if verr := d.validate(resp); verr != nil {
+			return false, st, verr
+		}
 		start, total, perr := parseContentRange(resp.Header.Get("Content-Range"))
 		if perr != nil {
 			return false, st, fmt.Errorf("Content-Range ayrıştırılamadı: %w", perr)

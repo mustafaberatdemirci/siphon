@@ -143,6 +143,15 @@ type SiteConfig struct {
 	// linki tanımak gerekir, o domain'e istek atmak gerekmez.
 	LegacyDomains []string
 
+	// MatchPatterns, yalnızca TANIMA için joker desenler ("bunkr.*").
+	// LegacyDomains ile aynı semantik: eşleşmeyi sağlar, fetch havuzuna girmez.
+	//
+	// Neden ayrı: domain rotasyonu somut bir listeye ihtiyaç duyuyor (jokerle
+	// rastgele bir domain seçemezsin), ama liste her zaman bayat olacak. İkisi
+	// birlikte: yeni bir TLD çıktığında link tanınır, istek bilinen bir domaine
+	// gider. gallery-dl de aynı ikiliyi kullanıyor (BASE_PATTERN + DOMAINS).
+	MatchPatterns []string
+
 	CDNPatterns   []string // gate değil, sinyal
 	UserAgent     string
 	RefererPolicy string // none | item_page | origin
@@ -166,9 +175,40 @@ type SiteConfig struct {
 	MaxDelay   time.Duration
 	MaxElapsed time.Duration // item başına
 
+	// Extra, siteye özgü ayarlardır (bunkr'ın API endpoint'i gibi).
+	//
+	// Paylaşılan SiteConfig'e site'a özgü alan eklemek yerine burada
+	// tutuluyor: bunkr'ın endpoint'i üç kez değişmiş bir değer ve tam olarak
+	// "config = değişkenler" kategorisine giriyor, ama pixeldrain'i
+	// ilgilendirmiyor.
+	Extra map[string]string
+
+	// Logf, resolver'ın teşhis satırları için. nil olabilir.
+	//
+	// Config'e bir logger koymak ilk bakışta yersiz duruyor, ama bu aracın
+	// manşet özelliği teşhis edilebilirlik: domain rotasyonu sessizce olursa
+	// kullanıcı "neden yavaş" veya "neden başka bir domaine gitti" sorusunu
+	// cevaplayamaz. HTTPClient de aynı gerekçeyle burada.
+	Logf func(format string, a ...any)
+
 	// Test enjeksiyonunun TEK mekanizması. httptest.Server'a yönlendirme,
 	// bu client'a takılan rewriting RoundTripper ile yapılır.
 	HTTPClient *http.Client
+}
+
+// Logln, cfg.Logf varsa yazar.
+func (c SiteConfig) Logln(format string, a ...any) {
+	if c.Logf != nil {
+		c.Logf(format, a...)
+	}
+}
+
+// ExtraOr, Extra'dan bir değer okur; yoksa varsayılanı döndürür.
+func (c SiteConfig) ExtraOr(key, def string) string {
+	if v, ok := c.Extra[key]; ok && v != "" {
+		return v
+	}
+	return def
 }
 
 // WithDefaults, sıfır değerli alanları varsayılanlarıyla doldurur.
@@ -221,6 +261,19 @@ type Resolver interface {
 // nil dönmek "tanımadım, varsayılanı uygula" demektir.
 type StatusClassifier interface {
 	ClassifyStatus(resp *http.Response, body []byte) error
+}
+
+// ResponseValidator, bir resolver'ın indirme yanıtını siteye özgü biçimde
+// doğrulamasını sağlar. İndirici bunu opsiyonel olarak kullanır.
+//
+// Neden gerekli: bunkr silinen veya bakımdaki dosyalar için 404 yerine 200 ile
+// bir placeholder video servis ediyor (maint.mp4). Durum kodu temiz, içerik
+// çöp. Bu kanca olmadan araç çöpü "başarıyla indirdim" sayar ve bu, sessiz
+// veri bozulmasının en kötü türü.
+//
+// nil dönmek "yanıt geçerli" demektir.
+type ResponseValidator interface {
+	ValidateResponse(resp *http.Response) error
 }
 
 // Factory, config'i resolver'a enjekte eder.

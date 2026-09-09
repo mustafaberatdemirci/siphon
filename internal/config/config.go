@@ -37,6 +37,7 @@ type rawSite struct {
 
 	Domains       []string `toml:"domains"`
 	LegacyDomains []string `toml:"legacy_domains"`
+	MatchPatterns []string `toml:"match_patterns"`
 	CDNPatterns   []string `toml:"cdn_patterns"`
 	CanaryURLs    []string `toml:"canary_urls"`
 
@@ -54,6 +55,9 @@ type rawSite struct {
 	BaseDelay  string `toml:"base_delay"`
 	MaxDelay   string `toml:"max_delay"`
 	MaxElapsed string `toml:"max_elapsed"`
+
+	// Extra, siteye özgü anahtar/değer ayarları (bunkr'ın api_endpoint'i gibi).
+	Extra map[string]string `toml:"extra"`
 }
 
 // Source, konfigürasyonun nereden geldiğini söyler. -v çıktısında basılır;
@@ -177,7 +181,19 @@ func mergeSite(b, e rawSite) rawSite {
 	b.Domains = union(b.Domains, e.Domains)
 	b.CDNPatterns = union(b.CDNPatterns, e.CDNPatterns)
 	b.LegacyDomains = union(b.LegacyDomains, e.LegacyDomains)
+	b.MatchPatterns = union(b.MatchPatterns, e.MatchPatterns)
 	b.CanaryURLs = union(b.CanaryURLs, e.CanaryURLs)
+
+	// Extra anahtar bazında eziliyor: dış dosya yalnızca değiştirmek istediği
+	// anahtarı yazsın, tüm haritayı yeniden yazmak zorunda kalmasın.
+	if len(e.Extra) > 0 {
+		if b.Extra == nil {
+			b.Extra = map[string]string{}
+		}
+		for k, v := range e.Extra {
+			b.Extra[k] = v
+		}
+	}
 	b.DomainsRemove = union(b.DomainsRemove, e.DomainsRemove)
 	b.CDNPatternsRemove = union(b.CDNPatternsRemove, e.CDNPatternsRemove)
 
@@ -299,7 +315,9 @@ func build(f file) ([]site.SiteConfig, error) {
 			Name:          r.Name,
 			Domains:       domains,
 			LegacyDomains: r.LegacyDomains,
+			MatchPatterns: r.MatchPatterns,
 			CDNPatterns:   cdn,
+			Extra:         r.Extra,
 			CanaryURLs:    r.CanaryURLs,
 			UserAgent:     r.UserAgent,
 			RefererPolicy: r.RefererPolicy,

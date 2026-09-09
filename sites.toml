@@ -56,7 +56,83 @@ base_delay = "1s"
 max_delay = "60s"
 max_elapsed = "10m"
 
-# bunkr girdisi kasıtlı olarak YOK: internal/site/bunkr.go henüz yazılmadı ve
-# resolver'ı olmayan bir site tanımı açılışta hard fail üretir. Ölçülmüş bunkr
-# domain verisi tasarım dokümanının Assignment Findings bölümünde duruyor,
-# adım 7'de buraya taşınacak.
+[[site]]
+name = "bunkr"
+
+# SIRA ÖNEMLİ: rotasyon listenin başından başlıyor. 2026-09-09 ölçümüne göre
+# bunkr.ws bu ağdan temiz 200 dönen tek domain, o yüzden başta.
+#
+# Ölçüm sonuçları:
+#   bunkr.ws     -> 200, challenge yok          (çalışıyor)
+#   bunkr.black  -> 403, CF-Mitigated: challenge (Cloudflare)
+#   bunkr.cr     -> 2a01:358:... blok sayfası    (operatör engeli)
+#   bunkr.si     -> aynı                          (operatör engeli)
+#   bunkr.ph     -> bağlantı zaman aşımı          (operatör engeli)
+#   bunkr.fi     -> bağlantı zaman aşımı          (operatör engeli)
+#
+# Bilinen kötüler listeden ÇIKARILMADI: engel ağa göre değişiyor, başka bir
+# bağlantıda çalışabilirler. Sadece sona alındılar; ilk denemede elenip
+# rotasyon devam ediyor.
+domains = [
+  "bunkr.ws",
+  "bunkr.ac",
+  "bunkr.ci",
+  "bunkr.pk",
+  "bunkr.ps",
+  "bunkr.sk",
+  "bunkr.red",
+  "bunkr.media",
+  "bunkr.site",
+  "bunkr.black",
+  "bunkr.cr",
+  "bunkr.si",
+  "bunkr.ph",
+  "bunkr.fi",
+]
+
+# Ölü domainler: URL'de TANINIR ama istek atılmaz.
+legacy_domains = [
+  "bunkr.ax", "bunkr.cat", "bunkr.ru", "bunkrr.ru",
+  "bunkr.su", "bunkrr.su", "bunkr.la", "bunkr.is", "bunkr.to",
+]
+
+# Joker yalnızca TANIMA için. Rotasyon somut listeyi kullanıyor çünkü jokerle
+# rastgele bir domain seçemezsin. İkisi birlikte: yeni bir TLD çıktığında link
+# tanınır, istek bilinen bir domaine gider.
+match_patterns = ["bunkr.*", "bunkrr.*"]
+
+# bunkr CDN host'ları dönüyor; bu liste bir kapı değil SİNYAL. Listede olmayan
+# bir host indirmeyi durdurmaz, doctor WARN basar ve "sites.toml'a ekle" der.
+cdn_patterns = []
+
+# Sayfa isteklerinde Referer YOK. İndirme isteğinin Referer'ı ise politikadan
+# değil PROTOKOLDEN geliyor: API endpoint'i get.bunkrr.su/file/<id> Referer'ını
+# ve Origin'ini zorunlu kılıyor, bu yüzden Item.Headers'a açıkça yazılıyor.
+referer_policy = "none"
+
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+# bunkr CDN'i pixeldrain'den toleranslı ama abartmanın anlamı yok.
+max_concurrent = 4
+
+# Canary site kökü. Bir ALBÜM adresi eklersen doctor'ın Parse katmanı da
+# doğrulanır; kök sayfa albumFiles taşımadığı için şu an Parse WARN basıyor.
+canary_urls = [
+  "https://bunkr.ws/",
+  "https://bunkr.ac/",
+  "https://bunkr.ci/",
+]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+# bunkr'ın en çok değişen üç değeri. 2025-02'de indirme adresi HTML'deki
+# <source src> alanındaydı; 2025-03'te get.bunkrr.su/api/vs oldu; 2026
+# itibarıyla apidl.bunkr.ru/api/_001_v2. Kod değiştirmeden güncellenebilmeleri
+# için config'te.
+[site.extra]
+api_endpoint = "https://apidl.bunkr.ru/api/_001_v2"
+dl_origin = "https://get.bunkrr.su"
+xor_key_prefix = "SECRET_KEY_"
