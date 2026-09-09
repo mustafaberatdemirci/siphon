@@ -1,7 +1,8 @@
 // Siphon: pixeldrain ve bunkr linklerini toplu indirir.
 //
 // Bu dosya orkestrasyondur: bayraklar, girdi okuma, registry dispatch ve çıkış
-// kodu sözleşmesi. İndirme mantığı internal/dl'de.
+// kodu sözleşmesi. İndirme mantığı internal/dl'de, eşzamanlılık sınırı ve
+// backoff internal/net'te.
 package main
 
 import (
@@ -9,17 +10,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
-	"time"
+	"sync/atomic"
 
 	_ "embed"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
@@ -34,6 +37,11 @@ const (
 	exitNoneOK  = 2 // hiçbir URL çözümlenemedi
 	exitUsage   = 3 // geçersiz TOML, schema_version uyuşmazlığı, okunamayan -i
 )
+
+// maxInFlight, aynı anda canlı tutulacak indirme goroutine'i sayısının üst
+// sınırıdır. Gerçek daraltmayı HostLimiter yapıyor; bu yalnızca 5000 item'lık
+// bir albümde 5000 goroutine açmamak için var.
+const maxInFlight = 64
 
 type logger struct {
 	verbose bool
@@ -116,12 +124,12 @@ func run() int {
 		return exitUsage
 	}
 
-	httpClient := newHTTPClient()
+	httpClient := snet.NewClient()
 
 	var (
 		resolvedAny bool
 		problems    int
-		interrupted bool
+		halted      bool
 	)
 
 	for _, u := range urls {
@@ -132,17 +140,14 @@ func run() int {
 			problems++
 			continue
 		}
+		cfg := cfgs[idx]
 
 		// Downloader URL başına kurulur: claimed haritası albüm kapsamlı olmalı.
-		//
-		// Client açıkça veriliyor: http.DefaultClient'a bırakmak, sites.toml'daki
-		// user_agent'ın yalnızca API çağrılarına uygulanması ve transferlerde
-		// hiçbir zaman aşımı olmaması demekti.
 		down := &dl.Downloader{
 			Client:    httpClient,
 			Logf:      log.debugf,
 			Reresolve: r.ResolveOne,
-			UserAgent: cfgs[idx].UserAgent,
+			UserAgent: cfg.UserAgent,
 		}
 		// Resolver 403'ü siteye özgü yorumlayabiliyorsa indiriciye bağla; yoksa
 		// her 403 "imzalı URL süresi doldu" sayılır ve rate limit derinleşir.
@@ -150,38 +155,94 @@ func run() int {
 			down.Classify = c.ClassifyStatus
 		}
 
-		var count, failed int
-		itemErrs, err := r.Resolve(ctx, u, func(it site.Item) error {
+		// Sınır HOST başına: bir albüm birden fazla CDN host'una yayılabiliyor
+		// ve tek bir genel sayaç yanlış yerde daraltma yapar.
+		limiter := snet.NewHostLimiter(cfg.MaxConcurrent)
+		policy := snet.Policy{
+			MaxAttempts: cfg.MaxRetries,
+			MaxElapsed:  cfg.MaxElapsed,
+			Backoff:     snet.Backoff{Base: cfg.BaseDelay, Max: cfg.MaxDelay},
+			Logf:        log.debugf,
+		}
+
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(maxInFlight)
+
+		var (
+			count   int // Resolve tek goroutine'den çağırıyor; atomic gerekmiyor
+			failed  atomic.Int64
+			stopped atomic.Bool
+		)
+
+		itemErrs, rerr := r.Resolve(ctx, u, func(it site.Item) error {
 			count++
 			if resolveOnly {
 				fmt.Fprintln(os.Stdout, it.URL)
 				return nil
 			}
-			// Windows ad temizliği dl.Download içinde yapılıyor: kural diske
-			// yazan kodla aynı yerde durmalı, burada değil.
-			if derr := down.Download(ctx, outDir, it); derr != nil {
-				if errors.Is(derr, context.Canceled) {
-					return derr
+			g.Go(func() error {
+				release, aerr := limiter.Acquire(gctx, snet.HostOf(it.URL))
+				if aerr != nil {
+					return aerr
 				}
-				// Albüm içinde ölü item albümü düşürmez, sadece çıkış kodunu etkiler.
-				log.errorf("  %s: %v", it.Filename, derr)
-				failed++
-				return nil
-			}
-			log.infof("[%d] %s OK", it.Index+1, it.Filename)
+				defer release()
+
+				var final string
+				derr := policy.Do(gctx, func(int) error {
+					var e error
+					final, e = down.Download(gctx, outDir, it)
+					return e
+				})
+
+				switch {
+				case derr == nil:
+					// Diskteki ad temizleyiciden geçtiği için girdi adından
+					// farklı olabilir; gerçek adı basıyoruz.
+					log.infof("[%d] %s OK", it.Index+1, filepath.Base(final))
+					return nil
+				case errors.Is(derr, snet.ErrStop):
+					// Captcha. Beklemek çözmez ve denemeye devam etmek durumu
+					// kötüleştirir; koşuyu durdur.
+					log.errorf("DURDURULDU: %v", derr)
+					stopped.Store(true)
+					return derr // gctx iptal edilir, kalan işler durur
+				case errors.Is(derr, context.Canceled):
+					return derr
+				default:
+					// Albüm içinde ölü item albümü düşürmez.
+					log.errorf("  %s: %v", it.Filename, derr)
+					failed.Add(1)
+					return nil
+				}
+			})
 			return nil
 		})
-		problems += failed
 
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
+		// Resolve döndü ama indirmeler sürüyor olabilir; her durumda bekle.
+		gerr := g.Wait()
+		problems += int(failed.Load())
+		if count > 0 {
+			resolvedAny = true
+		}
+
+		if stopped.Load() {
+			halted = true
+			break
+		}
+		if gerr != nil && errors.Is(gerr, context.Canceled) {
+			log.errorf("kesildi: %s", u)
+			halted = true
+			break
+		}
+		if rerr != nil {
+			if errors.Is(rerr, context.Canceled) {
 				log.errorf("kesildi: %s", u)
-				interrupted = true
+				halted = true
 				break
 			}
 			// LayerError.Error() katman adını zaten içeriyor; tekrar önekleme.
-			log.errorf("%s: %v", u, err)
-			if layer, ok := site.LayerOf(err); ok {
+			log.errorf("%s: %v", u, rerr)
+			if layer, ok := site.LayerOf(rerr); ok {
 				log.debugf("  kopan katman: %s", layer)
 			}
 			problems++
@@ -191,14 +252,11 @@ func run() int {
 			log.errorf("item: %v", ie)
 			problems++
 		}
-		if count > 0 {
-			resolvedAny = true
-		}
 		log.infof("%s: %d item", u, count)
 	}
 
 	switch {
-	case interrupted:
+	case halted:
 		return exitPartial
 	case !resolvedAny:
 		return exitNoneOK
@@ -218,30 +276,6 @@ func pick(rs []site.Resolver, u string) (site.Resolver, int) {
 		}
 	}
 	return nil, -1
-}
-
-// newHTTPClient, transfer istekleri için istemciyi kurar.
-//
-// Client.Timeout KASITLI olarak verilmiyor: o alan gövde okumayı da kapsar ve
-// birkaç gigabaytlık bir indirmeyi ortasından keser. Zaman aşımları bağlantı
-// kurma ve yanıt başlığı seviyesinde tutuluyor; takılan bir sunucu yakalanır,
-// yavaş ama çalışan bir transfer kesilmez.
-//
-// SiteConfig.MaxElapsed burada uygulanmıyor: o, item başına YENİDEN DENEME
-// bütçesi (adım 6), transfer için son tarih değil.
-func newHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          32,
-			IdleConnTimeout:       90 * time.Second,
-		},
-	}
 }
 
 // readURLs, -i dosyasını ve konumsal argümanları birleştirir.

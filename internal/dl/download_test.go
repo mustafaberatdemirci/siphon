@@ -73,12 +73,12 @@ func readState(t *testing.T, path string) State {
 
 func TestFreshDownloadWritesFileAndCleansUp(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 
@@ -100,12 +100,12 @@ func TestFreshDownloadWritesFileAndCleansUp(t *testing.T) {
 
 func TestSHA256MismatchDoesNotRename(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = strings.Repeat("00", 32)
-	err := d.Download(context.Background(), out, it)
+	_, err := d.Download(context.Background(), out, it)
 	if !errors.Is(err, ErrSHA256Mismatch) {
 		t.Fatalf("ErrSHA256Mismatch bekleniyordu, %v geldi", err)
 	}
@@ -132,7 +132,7 @@ func slowServer(t *testing.T, firstChunk int, release <-chan struct{}) *httptest
 func TestInterruptThenResumeProducesCorrectHash(t *testing.T) {
 	release := make(chan struct{})
 	slow := slowServer(t, 20000, release)
-	out := t.TempDir()
+	out := tempDir(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Downloader{Client: slow.Client()}
@@ -143,7 +143,7 @@ func TestInterruptThenResumeProducesCorrectHash(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 		cancel()
 	}()
-	err := d.Download(ctx, out, it)
+	_, err := d.Download(ctx, out, it)
 	close(release)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("context.Canceled bekleniyordu, %v geldi", err)
@@ -172,7 +172,7 @@ func TestInterruptThenResumeProducesCorrectHash(t *testing.T) {
 	d2 := &Downloader{Client: srv.Client()}
 	it2 := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it2.SHA256 = payloadSHA()
-	if err := d2.Download(context.Background(), out, it2); err != nil {
+	if _, err := d2.Download(context.Background(), out, it2); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 
@@ -205,11 +205,11 @@ func TestWeakETagFallsBackToLastModified(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out := t.TempDir()
+	out := tempDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(150 * time.Millisecond); cancel() }()
 	d := &Downloader{Client: srv.Client()}
-	_ = d.Download(ctx, out, testItem(srv.URL+"/veri.bin", "veri.bin"))
+	_, _ = d.Download(ctx, out, testItem(srv.URL+"/veri.bin", "veri.bin"))
 	close(release)
 
 	st := readState(t, filepath.Join(out, "veri.bin.part.state"))
@@ -234,11 +234,11 @@ func TestNoValidatorMeansNoResumeAttempt(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out := t.TempDir()
+	out := tempDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(150 * time.Millisecond); cancel() }()
 	d := &Downloader{Client: srv.Client()}
-	_ = d.Download(ctx, out, testItem(srv.URL+"/veri.bin", "veri.bin"))
+	_, _ = d.Download(ctx, out, testItem(srv.URL+"/veri.bin", "veri.bin"))
 	close(release)
 
 	st := readState(t, filepath.Join(out, "veri.bin.part.state"))
@@ -249,7 +249,7 @@ func TestNoValidatorMeansNoResumeAttempt(t *testing.T) {
 	cap := &capture{}
 	srv2 := rangeServer(t, "", cap)
 	d2 := &Downloader{Client: srv2.Client()}
-	if err := d2.Download(context.Background(), out, testItem(srv2.URL+"/veri.bin", "veri.bin")); err != nil {
+	if _, err := d2.Download(context.Background(), out, testItem(srv2.URL+"/veri.bin", "veri.bin")); err != nil {
 		t.Fatalf("ikinci kosu: %v", err)
 	}
 	if cap.mu[0].Get("Range") != "" {
@@ -262,7 +262,7 @@ func TestNoValidatorMeansNoResumeAttempt(t *testing.T) {
 }
 
 func TestServerReturns200OnResumeResetsFile(t *testing.T) {
-	out := t.TempDir()
+	out := tempDir(t)
 	part := filepath.Join(out, "veri.bin.part")
 	// Elle bozuk bir .part + state kur: sunucu Range'i yok sayip 200 donecek.
 	if err := os.WriteFile(part, []byte("eski-icerik"), 0o644); err != nil {
@@ -286,7 +286,7 @@ func TestServerReturns200OnResumeResetsFile(t *testing.T) {
 	d := &Downloader{Client: srv.Client()}
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(out, "veri.bin"))
@@ -296,7 +296,7 @@ func TestServerReturns200OnResumeResetsFile(t *testing.T) {
 }
 
 func TestRange416WhenAlreadyComplete(t *testing.T) {
-	out := t.TempDir()
+	out := tempDir(t)
 	part := filepath.Join(out, "veri.bin.part")
 	// .part tam boyutta ama rename dusmus.
 	if err := os.WriteFile(part, payload, 0o644); err != nil {
@@ -317,7 +317,7 @@ func TestRange416WhenAlreadyComplete(t *testing.T) {
 	d := &Downloader{Client: srv.Client()}
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("416/tamamlanmis yolu: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(out, "veri.bin"))
@@ -327,7 +327,7 @@ func TestRange416WhenAlreadyComplete(t *testing.T) {
 }
 
 func TestRange416WhenPartIsCorruptResets(t *testing.T) {
-	out := t.TempDir()
+	out := tempDir(t)
 	part := filepath.Join(out, "veri.bin.part")
 	// State "tamamlandi" demiyor: offset != total. 416 burada "bozuk" demek.
 	if err := os.WriteFile(part, payload, 0o644); err != nil {
@@ -344,7 +344,7 @@ func TestRange416WhenPartIsCorruptResets(t *testing.T) {
 
 	srv := rangeServer(t, `"v1"`, nil)
 	d := &Downloader{Client: srv.Client()}
-	err := d.Download(context.Background(), out, testItem(srv.URL+"/veri.bin", "veri.bin"))
+	_, err := d.Download(context.Background(), out, testItem(srv.URL+"/veri.bin", "veri.bin"))
 	if err == nil {
 		t.Fatal("bozuk .part icin hata bekleniyordu; 416 'tamamlandi' demek degil")
 	}
@@ -365,11 +365,11 @@ func TestChunkedResponseStillUsesPartFile(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("chunked: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(out, "veri.bin"))
@@ -380,7 +380,7 @@ func TestChunkedResponseStillUsesPartFile(t *testing.T) {
 
 func TestDuplicateFilenameGetsDeterministicSuffix(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 
 	a := testItem(srv.URL+"/veri.bin", "ayni.bin")
@@ -388,10 +388,10 @@ func TestDuplicateFilenameGetsDeterministicSuffix(t *testing.T) {
 	b := testItem(srv.URL+"/veri.bin", "ayni.bin")
 	b.Index = 4
 
-	if err := d.Download(context.Background(), out, a); err != nil {
+	if _, err := d.Download(context.Background(), out, a); err != nil {
 		t.Fatalf("ilk: %v", err)
 	}
-	if err := d.Download(context.Background(), out, b); err != nil {
+	if _, err := d.Download(context.Background(), out, b); err != nil {
 		t.Fatalf("ikinci: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(out, "ayni.bin")); err != nil {
@@ -411,7 +411,7 @@ func TestExpiredSignedURLTriggersReresolveOnce(t *testing.T) {
 	t.Cleanup(expired.Close)
 
 	calls := 0
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{
 		Client: good.Client(),
 		Reresolve: func(ctx context.Context, sourcePage string) (site.Item, error) {
@@ -421,7 +421,7 @@ func TestExpiredSignedURLTriggersReresolveOnce(t *testing.T) {
 	}
 	it := testItem(expired.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if calls != 1 {
@@ -439,7 +439,7 @@ func TestExpiredURLWithoutReresolverIsPermanent(t *testing.T) {
 	}))
 	t.Cleanup(expired.Close)
 	d := &Downloader{Client: expired.Client()}
-	err := d.Download(context.Background(), t.TempDir(), testItem(expired.URL+"/x", "veri.bin"))
+	_, err := d.Download(context.Background(), tempDir(t), testItem(expired.URL+"/x", "veri.bin"))
 	if err == nil {
 		t.Fatal("Reresolve yokken 410 kalici hata olmali")
 	}
@@ -448,7 +448,7 @@ func TestExpiredURLWithoutReresolverIsPermanent(t *testing.T) {
 // .part state'ten kisaysa resume dosyanin basina delik acar. Tek guvenli
 // davranis bastan baslamak, ve sonucun BOZUK OLMAMASI.
 func TestPartShorterThanStateRestartsCleanly(t *testing.T) {
-	out := t.TempDir()
+	out := tempDir(t)
 	part := filepath.Join(out, "veri.bin.part")
 	if err := os.WriteFile(part, []byte("kisa"), 0o644); err != nil {
 		t.Fatal(err)
@@ -462,7 +462,7 @@ func TestPartShorterThanStateRestartsCleanly(t *testing.T) {
 	d := &Downloader{Client: srv.Client()}
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("bastan indirme basarisiz: %v", err)
 	}
 	got, _ := os.ReadFile(filepath.Join(out, "veri.bin"))

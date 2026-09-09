@@ -208,7 +208,7 @@ func TestComponentUsedForDirectoryLabels(t *testing.T) {
 // sabitliyor.
 func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 
 	cases := []struct {
 		rawName, rawDir string
@@ -229,7 +229,7 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 		it := testItem(srv.URL+"/veri.bin", c.rawName)
 		it.Dir = c.rawDir
 		it.SHA256 = payloadSHA()
-		if err := d.Download(context.Background(), out, it); err != nil {
+		if _, err := d.Download(context.Background(), out, it); err != nil {
 			t.Fatalf("Download(%q): %v", c.rawName, err)
 		}
 		want := filepath.Join(out, c.wantDir, c.wantName)
@@ -243,7 +243,7 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 	long := strings.Repeat("z", 400) + ".mp4"
 	it := testItem(srv.URL+"/veri.bin", long)
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("uzun ad: %v", err)
 	}
 	entries, err := os.ReadDir(out)

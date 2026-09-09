@@ -29,7 +29,7 @@ import (
 // Download nil döndü.
 func TestMissingPartWithStateMustNotCorrupt(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 	part := filepath.Join(out, "veri.bin.part")
 
 	h := sha256.New()
@@ -51,7 +51,7 @@ func TestMissingPartWithStateMustNotCorrupt(t *testing.T) {
 	d := &Downloader{Client: srv.Client()}
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), out, it); err != nil {
+	if _, err := d.Download(context.Background(), out, it); err != nil {
 		t.Fatalf("baştan indirme başarısız olmamalı: %v", err)
 	}
 	got, rerr := os.ReadFile(filepath.Join(out, "veri.bin"))
@@ -68,12 +68,12 @@ func TestMissingPartWithStateMustNotCorrupt(t *testing.T) {
 // hatayı tekrarlar ve item elle silinmeden kurtarılamaz.
 func TestSHA256MismatchCleansUpForRetry(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 
 	bad := testItem(srv.URL+"/veri.bin", "veri.bin")
 	bad.SHA256 = strings.Repeat("00", 32)
 	d := &Downloader{Client: srv.Client()}
-	if err := d.Download(context.Background(), out, bad); !errors.Is(err, ErrSHA256Mismatch) {
+	if _, err := d.Download(context.Background(), out, bad); !errors.Is(err, ErrSHA256Mismatch) {
 		t.Fatalf("ErrSHA256Mismatch bekleniyordu: %v", err)
 	}
 	part := filepath.Join(out, "veri.bin.part")
@@ -87,7 +87,7 @@ func TestSHA256MismatchCleansUpForRetry(t *testing.T) {
 	good := testItem(srv.URL+"/veri.bin", "veri.bin")
 	good.SHA256 = payloadSHA()
 	d2 := &Downloader{Client: srv.Client()}
-	if err := d2.Download(context.Background(), out, good); err != nil {
+	if _, err := d2.Download(context.Background(), out, good); err != nil {
 		t.Fatalf("temizlikten sonra tekrar denenemiyor: %v", err)
 	}
 }
@@ -110,7 +110,7 @@ func TestUserAgentAndHeadersAppliedToTransfer(t *testing.T) {
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.Headers = map[string]string{"Referer": "https://ornek.test/u/abc"}
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), t.TempDir(), it); err != nil {
+	if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if gotUA != "siphon/test" {
@@ -139,7 +139,7 @@ func TestClassifierPreventsReresolveOn403(t *testing.T) {
 		Classify:  func(resp *http.Response, body []byte) error { return sentinel },
 		Reresolve: func(context.Context, string) (site.Item, error) { calls++; return site.Item{}, nil },
 	}
-	err := d.Download(context.Background(), t.TempDir(), testItem(srv.URL+"/x", "veri.bin"))
+	_, err := d.Download(context.Background(), tempDir(t), testItem(srv.URL+"/x", "veri.bin"))
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("sınıflandırıcının hatası bekleniyordu, %v geldi", err)
 	}
@@ -167,7 +167,7 @@ func TestClassifierReturningNilFallsBackToExpired(t *testing.T) {
 	}
 	it := testItem(expired.URL+"/x", "veri.bin")
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), t.TempDir(), it); err != nil {
+	if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if calls != 1 {
@@ -186,10 +186,10 @@ func TestTruncatedBodyCaughtByItemSize(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 	it := testItem(srv.URL+"/veri.bin", "veri.bin") // Size = len(payload)
-	if err := d.Download(context.Background(), out, it); !errors.Is(err, ErrIncomplete) {
+	if _, err := d.Download(context.Background(), out, it); !errors.Is(err, ErrIncomplete) {
 		t.Fatalf("ErrIncomplete bekleniyordu, %v geldi", err)
 	}
 	if _, serr := os.Stat(filepath.Join(out, "veri.bin")); serr == nil {
@@ -210,7 +210,7 @@ func TestUnknownSizeChunkedStillCompletes(t *testing.T) {
 	it := testItem(srv.URL+"/veri.bin", "veri.bin")
 	it.Size = -1
 	it.SHA256 = payloadSHA()
-	if err := d.Download(context.Background(), t.TempDir(), it); err != nil {
+	if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestUnknownSizeChunkedStillCompletes(t *testing.T) {
 // "zaten var" dalına düşüp hiç indirilmeden OK raporlanırdı.
 func TestGeneratedDedupNameIsAlsoDeduped(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
-	out := t.TempDir()
+	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 
 	// Üçü de çakışıyor: b'nin üreteceği ad ("ayni (2).bin") c'nin düz adıyla aynı.
@@ -231,7 +231,7 @@ func TestGeneratedDedupNameIsAlsoDeduped(t *testing.T) {
 	c.Index = 2
 
 	for i, it := range []site.Item{a, b, c} {
-		if err := d.Download(context.Background(), out, it); err != nil {
+		if _, err := d.Download(context.Background(), out, it); err != nil {
 			t.Fatalf("item %d: %v", i, err)
 		}
 	}
