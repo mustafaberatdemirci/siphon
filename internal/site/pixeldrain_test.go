@@ -36,12 +36,21 @@ func TestMatchHost(t *testing.T) {
 		// Joker: gallery-dl ve cyberdrop-dl bunkr icin "bunkr.*" kullaniyor.
 		{"bunkr.cr", []string{"bunkr.*"}, true},
 		{"bunkr.ws", []string{"bunkr.*"}, true},
-		{"bunkr.co.uk", []string{"bunkr.*"}, true},
 		{"notbunkr.cr", []string{"bunkr.*"}, false},
 		{"bunkr.", []string{"bunkr.*"}, false},
 		{"bunkr", []string{"bunkr.*"}, false},
 
+		// GUVENLIK SINIRI: joker TEK etiket karsilar. Coklu etiket olsaydi
+		// girdi listesindeki dusmanca bir link guvenilen site sayilirdi.
+		{"bunkr.attacker.com", []string{"bunkr.*"}, false},
+		{"bunkr.evil.example.org", []string{"bunkr.*"}, false},
+		{"bunkr.com.phish.ru", []string{"bunkr.*"}, false},
+		// Bunun bedeli: cok parcali TLD acikca listelenmek zorunda.
+		{"bunkr.co.uk", []string{"bunkr.*"}, false},
+		{"bunkr.co.uk", []string{"bunkr.co.uk"}, true},
+
 		{"cdn.bunkr.la", []string{"*.bunkr.la"}, true},
+		{"a.b.bunkr.la", []string{"*.bunkr.la"}, false},
 		{"bunkr.la", []string{"*.bunkr.la"}, false},
 
 		// Desende sema/yol verilmisse temizlenir.
@@ -353,5 +362,111 @@ func TestAlbumCarriesSHA256WhenPresent(t *testing.T) {
 	}
 	if got.SHA256 != "912046879050495c53a221afdf09a91a0f364bf47daea56479d538c18c4b5151" {
 		t.Fatalf("album item SHA256 tasinmadi: %q", got.SHA256)
+	}
+}
+
+// Bulgu 4: file_count ile files[] ayrisirsa liste eksik geldi demektir.
+// Sessizce daha az dosya indirip cikis 0 vermek kabul edilemez.
+func TestAlbumFileCountMismatchIsReported(t *testing.T) {
+	const short = `{"success":true,"id":"a1","title":"Albüm","file_count":5,
+	  "files":[{"success":true,"id":"f1","name":"bir.bin","size":10}]}`
+	p, _ := newTestResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(short))
+	})
+	var n int
+	itemErrs, err := p.Resolve(context.Background(), "https://pixeldrain.com/l/a1",
+		func(Item) error { n++; return nil })
+	if err != nil {
+		t.Fatalf("albüm düşmemeli: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("%d item, 1 bekleniyordu", n)
+	}
+	if len(itemErrs) == 0 {
+		t.Fatal("file_count uyusmazligi bildirilmedi; cikis kodu sessizce 0 olurdu")
+	}
+	if l, ok := LayerOf(itemErrs[0].Err); !ok || l != LayerParse {
+		t.Errorf("Layer = %v, %v bekleniyordu", l, LayerParse)
+	}
+}
+
+// Bulgu 11: referer_policy indirme istegine yansimak zorunda.
+// pixeldrain'de politika "none" oldugu icin bos; ama mekanizma dogru yerde
+// olmali cunku bunkr item sayfasi Referer'ini transferde zorunlu kiliyor.
+func TestItemHeadersFollowRefererPolicy(t *testing.T) {
+	const one = `{"success":true,"id":"f1","name":"bir.bin","size":10}`
+	run := func(policy string) Item {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(one))
+		}))
+		t.Cleanup(srv.Close)
+		u, _ := url.Parse(srv.URL)
+		cfg := testCfg()
+		cfg.RefererPolicy = policy
+		cfg.HTTPClient = &http.Client{Transport: &rewriteTransport{target: u}}
+		p := &pixeldrain{cfg: cfg}
+		var got Item
+		if _, err := p.Resolve(context.Background(), "https://pixeldrain.com/u/f1",
+			func(it Item) error { got = it; return nil }); err != nil {
+			t.Fatalf("Resolve(%s): %v", policy, err)
+		}
+		return got
+	}
+
+	if h := run(RefererNone); len(h.Headers) != 0 {
+		t.Errorf("none politikasinda Referer gonderilmemeli: %v", h.Headers)
+	}
+	if h := run(RefererItemPage); h.Headers["Referer"] != "https://pixeldrain.com/u/f1" {
+		t.Errorf("item_page Referer = %q, item sayfasi bekleniyordu", h.Headers["Referer"])
+	}
+	if h := run(RefererOrigin); h.Headers["Referer"] != "https://pixeldrain.com/" {
+		t.Errorf("origin Referer = %q", h.Headers["Referer"])
+	}
+}
+
+// Bulgu 5: 403 her zaman "imzali URL suresi doldu" degil. pixeldrain rate
+// limit ve captcha durumlarini da 403 ile bildiriyor; siniflandirici bunlari
+// ayirmak zorunda, yoksa arac rate limitliyken yeniden cozup tekrar dener.
+func TestClassifyStatusSeparatesRateLimitFromExpiredURL(t *testing.T) {
+	p := &pixeldrain{cfg: testCfg()}
+
+	resp := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
+	body := []byte(`{"success":false,"value":"transfer_limit_exceeded","message":"limit"}`)
+	err := p.ClassifyStatus(resp, body)
+	if err == nil {
+		t.Fatal("taninabilir zarf nil dondu; dl varsayilani uygulanir ve 403 expired sayilir")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Value != "transfer_limit_exceeded" {
+		t.Fatalf("APIError bekleniyordu: %v", err)
+	}
+	if l, ok := LayerOf(err); !ok || l != LayerFetch {
+		t.Errorf("Layer = %v", l)
+	}
+
+	// Cloudflare challenge kendi katmanina gitmeli.
+	cf := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
+	cf.Header.Set("CF-Mitigated", "challenge")
+	cerr := p.ClassifyStatus(cf, []byte(`{"success":false,"value":"blocked","message":"x"}`))
+	if l, ok := LayerOf(cerr); !ok || l != LayerChallenge {
+		t.Errorf("challenge Layer = %v, %v bekleniyordu", l, LayerChallenge)
+	}
+
+	// Taninmayan govde: nil donmeli ki dl "imzali URL suresi doldu" yolunu izlesin.
+	opaque := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
+	if err := p.ClassifyStatus(opaque, []byte("<html>Access Denied</html>")); err != nil {
+		t.Errorf("taninmayan govde nil donmeli, %v geldi", err)
+	}
+}
+
+// Resolver, site.StatusClassifier arayuzunu gercekten karsiliyor mu?
+// Karsilamazsa main.go'daki type assertion sessizce atlar ve bulgu 5 geri doner.
+func TestPixeldrainImplementsStatusClassifier(t *testing.T) {
+	var r Resolver = NewPixeldrain(testCfg())
+	if _, ok := r.(StatusClassifier); !ok {
+		t.Fatal("pixeldrain StatusClassifier arayuzunu karsilamiyor")
 	}
 }

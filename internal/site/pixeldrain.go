@@ -158,7 +158,10 @@ func (p *pixeldrain) client() *http.Client {
 	return http.DefaultClient
 }
 
-func (p *pixeldrain) get(ctx context.Context, rawURL string, out any) error {
+// get, bir API çağrısı yapar. pageURL, politikanın "item_page" olduğu durumda
+// Referer olarak kullanılacak İNSAN sayfasıdır; istenen API adresi değil.
+// İkisini karıştırmak Referer'ı anlamsız kılar (ve bunkr'da doğrudan kırar).
+func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return Errorf(LayerFetch, rawURL, "istek kurulamadı: %v", err)
@@ -172,7 +175,9 @@ func (p *pixeldrain) get(ctx context.Context, rawURL string, out any) error {
 	case RefererOrigin:
 		req.Header.Set("Referer", "https://"+req.URL.Host+"/")
 	case RefererItemPage:
-		req.Header.Set("Referer", rawURL)
+		if pageURL != "" {
+			req.Header.Set("Referer", pageURL)
+		}
 	}
 
 	resp, err := p.client().Do(req)
@@ -235,6 +240,37 @@ func classifyTransportError(rawURL string, err error) error {
 	return &LayerError{Layer: LayerFetch, Err: err, Evidence: rawURL}
 }
 
+// ClassifyStatus, indiricinin 403/410 yanıtlarını doğru yorumlamasını sağlar.
+// site.StatusClassifier arayüzünü karşılar.
+//
+// Bu olmadan her 403 "imzalı URL süresi doldu" sayılır ve araç rate limitliyken
+// URL'i yeniden çözüp tekrar dener. pixeldrain ise transfer_limit_exceeded,
+// hotlink_detected ve *_captcha_required durumlarını da 403 ile bildiriyor.
+func (p *pixeldrain) ClassifyStatus(resp *http.Response, body []byte) error {
+	var env struct {
+		Value   string `json:"value"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &env) != nil || env.Value == "" {
+		// Tanınabilir bir API zarfı değil: CDN'in imzalı URL reddi olabilir.
+		// nil dönmek "varsayılanı uygula" demek.
+		return nil
+	}
+	evidence := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		evidence = resp.Request.URL.String()
+	}
+	layer := LayerFetch
+	if resp.StatusCode == http.StatusForbidden && looksLikeChallenge(resp, body) {
+		layer = LayerChallenge
+	}
+	return &LayerError{
+		Layer:    layer,
+		Err:      &APIError{Status: resp.StatusCode, Value: env.Value, Message: env.Message},
+		Evidence: evidence,
+	}
+}
+
 // looksLikeChallenge, 403'ün Cloudflare challenge olup olmadığını söyler.
 func looksLikeChallenge(resp *http.Response, body []byte) bool {
 	if resp.Header.Get("CF-Mitigated") != "" {
@@ -278,6 +314,34 @@ func (p *pixeldrain) itemPage(host, id string) string {
 	return "https://" + host + "/u/" + url.PathEscape(id)
 }
 
+func (p *pixeldrain) albumPage(host, id string) string {
+	return "https://" + host + "/l/" + url.PathEscape(id)
+}
+
+// itemHeaders, indirme isteğine eklenecek başlıkları politikadan türetir.
+//
+// Bu olmadan referer_policy yalnızca API çağrılarını etkiler ve asıl transfer
+// isteğine hiç yansımaz. pixeldrain'de politika "none" olduğu için sonuç boş;
+// ama bunkr item sayfası Referer'ını transferde ZORUNLU kıldığı için mekanizma
+// şimdiden doğru yerde olmak zorunda.
+func (p *pixeldrain) itemHeaders(itemPage string) map[string]string {
+	switch p.cfg.RefererPolicy {
+	case RefererItemPage:
+		if itemPage == "" {
+			return nil
+		}
+		return map[string]string{"Referer": itemPage}
+	case RefererOrigin:
+		u, err := url.Parse(itemPage)
+		if err != nil || u.Host == "" {
+			return nil
+		}
+		return map[string]string{"Referer": u.Scheme + "://" + u.Host + "/"}
+	default:
+		return nil
+	}
+}
+
 // Resolve, albüm için TEK istek atar ve gömülü files[] dizisinden Item üretir.
 //
 // Her dosya için ayrı /info çağrılmaz: 200 dosyalık albümde 201 istek eder ve
@@ -309,7 +373,8 @@ func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) err
 	}
 
 	var list listInfo
-	if err := p.get(ctx, p.apiBase(host)+"/list/"+url.PathEscape(r.id), &list); err != nil {
+	if err := p.get(ctx, p.apiBase(host)+"/list/"+url.PathEscape(r.id),
+		p.albumPage(host, r.id), &list); err != nil {
 		return nil, err
 	}
 	if !list.Success {
@@ -318,6 +383,17 @@ func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) err
 
 	dir := sanitizeDirLabel(list.Title, list.ID)
 	var itemErrs []ItemError
+
+	// file_count ile files[] uzunlugu ayrisiyorsa liste eksik geldi. Sessizce
+	// daha az dosya indirip cikis 0 vermek, "sessiz basarisizlik yok" ilkesinin
+	// dogrudan ihlali; albumu dusurmeden hata olarak bildiriyoruz.
+	if list.FileCount > 0 && list.FileCount != len(list.Files) {
+		itemErrs = append(itemErrs, ItemError{
+			URL: u,
+			Err: Errorf(LayerParse, fmt.Sprintf("file_count=%d, files[]=%d",
+				list.FileCount, len(list.Files)), "liste eksik geldi"),
+		})
+	}
 	for i, f := range list.Files {
 		if f.ID == "" {
 			itemErrs = append(itemErrs, ItemError{
@@ -326,9 +402,11 @@ func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) err
 			})
 			continue
 		}
+		sourcePage := p.itemPage(host, f.ID)
 		item := Item{
 			URL:        p.downloadURL(host, f.ID),
-			SourcePage: p.itemPage(host, f.ID),
+			SourcePage: sourcePage,
+			Headers:    p.itemHeaders(sourcePage),
 			Dir:        dir,
 			Filename:   f.Name,
 			SHA256:     f.HashSHA256, // liste yanıtında dolu geliyor; indirici doğrular
@@ -347,7 +425,8 @@ func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) err
 
 func (p *pixeldrain) resolveFile(ctx context.Context, host, id string) (Item, error) {
 	var info fileInfo
-	if err := p.get(ctx, p.apiBase(host)+"/file/"+url.PathEscape(id)+"/info", &info); err != nil {
+	if err := p.get(ctx, p.apiBase(host)+"/file/"+url.PathEscape(id)+"/info",
+		p.itemPage(host, id), &info); err != nil {
 		return Item{}, err
 	}
 	if !info.Success {
@@ -357,9 +436,11 @@ func (p *pixeldrain) resolveFile(ctx context.Context, host, id string) (Item, er
 	if size == 0 {
 		size = -1
 	}
+	sourcePage := p.itemPage(host, info.ID)
 	return Item{
 		URL:        p.downloadURL(host, info.ID),
-		SourcePage: p.itemPage(host, info.ID),
+		SourcePage: sourcePage,
+		Headers:    p.itemHeaders(sourcePage),
 		Dir:        "",
 		Filename:   info.Name,
 		SHA256:     info.HashSHA256,
@@ -437,7 +518,7 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	var probe struct {
 		Success bool `json:"success"`
 	}
-	err = p.get(ctx, canary, &probe)
+	err = p.get(ctx, canary, "", &probe)
 
 	layer, _ := LayerOf(err)
 	switch {

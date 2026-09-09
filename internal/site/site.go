@@ -209,6 +209,20 @@ type Resolver interface {
 	Diagnose(ctx context.Context) ([]LayerResult, error)
 }
 
+// StatusClassifier, bir resolver'ın HTTP hata durumlarını siteye özgü biçimde
+// sınıflandırmasını sağlar. İndirici bunu opsiyonel olarak kullanır (type
+// assertion ile), bu yüzden Resolver arayüzünü genişletmiyor.
+//
+// Neden gerekli: indirici tek başına 403'ü "imzalı URL süresi doldu" sayar.
+// pixeldrain ise rate limit, hotlink ve captcha durumlarını da 403 ile
+// bildiriyor. Bu ayrım yapılmazsa araç rate limitliyken URL'i yeniden çözüp
+// tekrar dener, yani limiti kendi eliyle derinleştirir.
+//
+// nil dönmek "tanımadım, varsayılanı uygula" demektir.
+type StatusClassifier interface {
+	ClassifyStatus(resp *http.Response, body []byte) error
+}
+
 // Factory, config'i resolver'a enjekte eder.
 type Factory func(cfg SiteConfig) Resolver
 

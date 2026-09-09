@@ -4,6 +4,11 @@
 // Çökme anında ikisi ayrışır: işletim sistemi `.part`'a yazmış olabilir ama
 // state güncellenmemiştir. Boyuta güvenirsen sha256 sessizce yanlış çıkar ve
 // bu, aracın tüm amacı olan "sessiz başarısızlık yok" ilkesinin ihlalidir.
+//
+// Bunun simetriği de geçerli ve daha sinsi: state `.part`'tan ileri olabilir
+// (dosya silinmiş veya kısalmış). O durumda resume, dosyanın başına offset
+// kadar SIFIR deliği açar ve kaydedilmiş hash durumu sha256 kontrolünü
+// GEÇİRİR. Bu yüzden state ile dosya her açılışta karşılaştırılır.
 package dl
 
 import (
@@ -39,8 +44,20 @@ type State struct {
 	Validator     string `json:"validator"`
 	ValidatorType string `json:"validator_type"`
 	SHA256State   []byte `json:"sha256_state"`
-	TotalSize     int64  `json:"total_size"` // bilinmiyorsa -1
+
+	// TotalSize YALNIZCA sunucunun Content-Length'idir; bilinmiyorsa -1.
+	// resumable() buna bakar çünkü chunked yanıtta resume denenmez (tasarım
+	// kararı). Resolver'ın bildirdiği boyut ayrı tutulur, yoksa chunked
+	// indirmeler sessizce resume edilebilir hale gelirdi.
+	TotalSize int64 `json:"total_size"`
+
+	// ItemSize, resolver'ın bildirdiği boyuttur; bilinmiyorsa -1. Sadece
+	// "tamamlandı mı" kontrolünde yedek olarak kullanılır, resume kararında
+	// kullanılmaz.
+	ItemSize int64 `json:"item_size"`
 }
+
+func freshState() State { return State{TotalSize: -1, ItemSize: -1} }
 
 // resumable, bu state ile Range denemenin anlamlı olup olmadığını söyler.
 // Validator yoksa resume DENENMEZ: sunucu dosyayı değiştirmişse iki farklı
@@ -49,8 +66,26 @@ func (s State) resumable() bool {
 	return s.Offset > 0 && s.Validator != "" && s.ValidatorType != ValidatorNone && s.TotalSize >= 0
 }
 
+// expectedTotal, tamamlanma kontrolü için kullanılacak boyuttur.
+// Sunucunun değeri önce gelir; yoksa resolver'ın bildirdiği boyut.
+func (s State) expectedTotal() int64 {
+	if s.TotalSize >= 0 {
+		return s.TotalSize
+	}
+	return s.ItemSize
+}
+
 // Reresolver, imzalı URL süresi dolduğunda (403/410) tek item'ı yeniden çözer.
 type Reresolver func(ctx context.Context, sourcePage string) (site.Item, error)
+
+// Classifier, bir hata durum kodunu siteye özgü biçimde sınıflandırır.
+// nil dönerse dl kendi varsayılanını uygular.
+//
+// Bu kanca olmadan her 403 "imzalı URL süresi doldu" sayılır. pixeldrain ise
+// rate limit, hotlink ve captcha durumlarını da 403 ile bildiriyor; onları
+// süresi dolmuş URL sanmak, rate limitliyken yeniden çözüp tekrar denemek
+// demek olurdu.
+type Classifier func(resp *http.Response, body []byte) error
 
 type Downloader struct {
 	Client *http.Client
@@ -58,6 +93,11 @@ type Downloader struct {
 	Logf func(format string, a ...any)
 	// Reresolve nil olabilir; nil ise 403/410 kalıcı hata sayılır.
 	Reresolve Reresolver
+	// Classify nil olabilir.
+	Classify Classifier
+	// UserAgent, transfer isteklerine de uygulanır. Resolver'ın User-Agent'ı
+	// yalnızca API çağrılarını kapsadığı için burada ayrıca verilmesi gerekiyor.
+	UserAgent string
 
 	// claimed, aynı koşuda aynı klasörde aynı adı iki kez kullanmayı önler.
 	// bunkr albümlerinde yinelenen ad yaygın.
@@ -79,6 +119,9 @@ func (d *Downloader) client() *http.Client {
 
 // ErrSHA256Mismatch, indirilen içerik sitenin verdiği hash ile uyuşmadığında döner.
 var ErrSHA256Mismatch = errors.New("sha256 uyuşmuyor")
+
+// ErrIncomplete, gövde beklenen boyuttan kısa geldiğinde döner.
+var ErrIncomplete = errors.New("indirme eksik")
 
 // Download, tek bir item'ı indirir ve devam edebilirliği yönetir.
 //
@@ -105,43 +148,28 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		return nil
 	}
 
-	st := loadState(statePath)
-
-	// `.part`'ı state'in söylediği offset'e kırp. Dosya boyutu doğruluk
-	// kaynağı DEĞİL; çökme anında ikisi ayrışır.
-	if err := truncatePart(part, st.Offset); err != nil {
-		return err
-	}
-	if st.Offset == 0 {
-		st = State{TotalSize: -1}
-	}
-
-	hasher, err := restoreHasher(part, st)
+	st, hasher, err := d.prepare(part, statePath, it)
 	if err != nil {
-		// Hash durumu kurtarılamıyorsa baştan başlamak tek güvenli seçenek.
-		d.logf("hash durumu kurtarılamadı, baştan: %v", err)
-		_ = os.Remove(part)
-		_ = os.Remove(statePath)
-		st = State{TotalSize: -1}
-		hasher = sha256.New()
+		return err
 	}
 
 	item := it
 	tried := false
 	for {
-		done, newState, err := d.attempt(ctx, part, statePath, item, st, hasher)
-		if err == nil {
+		done, newState, aerr := d.attempt(ctx, part, statePath, item, st, hasher)
+		if aerr == nil {
 			st = newState
 			if !done {
 				// Sunucu beklenmedik şekilde erken kapattı; kısmi ilerleme
 				// kaydedildi, bir üst katman tekrar deneyecek.
-				return fmt.Errorf("bağlantı erken kapandı, %d bayt kaydedildi", st.Offset)
+				return fmt.Errorf("%w: bağlantı erken kapandı, %d bayt kaydedildi",
+					ErrIncomplete, st.Offset)
 			}
 			break
 		}
 
 		var expired *urlExpiredError
-		if errors.As(err, &expired) && d.Reresolve != nil && !tried {
+		if errors.As(aerr, &expired) && d.Reresolve != nil && !tried {
 			// İmzalı URL süresi dolmuş. Bir KEZ yeniden çöz.
 			tried = true
 			d.logf("imzalı URL %d döndü, yeniden çözülüyor: %s", expired.status, item.SourcePage)
@@ -155,18 +183,29 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 				item.SHA256 = fresh.SHA256
 			}
 			// Hash ve offset korunur: aynı içeriğe devam ediyoruz.
-			st, hasher, err = reloadFor(part, statePath, st)
+			st, hasher, err = d.prepare(part, statePath, item)
 			if err != nil {
 				return err
 			}
 			continue
 		}
-		return err
+		return aerr
+	}
+
+	// Beklenen boyut biliniyorsa eksik dosya başarı sayılmaz. Content-Length
+	// yoksa resolver'ın bildirdiği boyut yedek olarak devreye girer; aksi halde
+	// kırpılmış bir gövde "tamamlandı" sayılırdı.
+	if total := st.expectedTotal(); total >= 0 && st.Offset != total {
+		return fmt.Errorf("%w: %d/%d bayt (%s)", ErrIncomplete, st.Offset, total, filepath.Base(final))
 	}
 
 	sum := hex.EncodeToString(hasher.Sum(nil))
 	if item.SHA256 != "" && !strings.EqualFold(sum, item.SHA256) {
-		return fmt.Errorf("%w: beklenen %s, hesaplanan %s (%s)",
+		// Bozuk `.part` diskte bırakılırsa her koşu aynı hatayı tekrarlar ve
+		// item elle silinmeden kurtarılamaz. Temizleyip baştan indirilebilir bırak.
+		_ = os.Remove(part)
+		_ = os.Remove(statePath)
+		return fmt.Errorf("%w: beklenen %s, hesaplanan %s (%s) — .part silindi, tekrar denenebilir",
 			ErrSHA256Mismatch, item.SHA256, sum, filepath.Base(final))
 	}
 	if err := os.Rename(part, final); err != nil {
@@ -174,6 +213,64 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 	}
 	_ = os.Remove(statePath)
 	return nil
+}
+
+// prepare, state ile `.part` dosyasını karşılaştırır ve tutarlı bir
+// (state, hasher) çifti döndürür.
+//
+// Üç tutarsızlık var ve üçü de sessizce bozuk dosya üretebilir:
+//   - `.part` yok ama state offset > 0  -> resume, dosyanın başına sıfır deliği açar
+//   - `.part` state'ten kısa            -> aynı delik, daha küçük
+//   - `.part` state'ten uzun            -> fazlalık hash'e girmemiş, kırpılmalı
+//
+// İlk ikisinde tek güvenli davranış baştan başlamak. Sessiz değil: log basılır.
+func (d *Downloader) prepare(part, statePath string, it site.Item) (State, hash.Hash, error) {
+	st := loadState(statePath)
+	if st.ItemSize < 0 && it.Size > 0 {
+		st.ItemSize = it.Size
+	}
+
+	reset := func(reason string) (State, hash.Hash, error) {
+		if reason != "" {
+			d.logf("%s: baştan indiriliyor", reason)
+		}
+		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
+			return State{}, nil, err
+		}
+		_ = os.Remove(statePath)
+		fresh := freshState()
+		if it.Size > 0 {
+			fresh.ItemSize = it.Size
+		}
+		return fresh, sha256.New(), nil
+	}
+
+	if st.Offset <= 0 {
+		return reset("")
+	}
+
+	fi, err := os.Stat(part)
+	switch {
+	case os.IsNotExist(err):
+		// En sinsi durum: hash durumu state'te duruyor, dosya yok. Resume
+		// edilirse delik açılır ve sha256 kontrolü GEÇER.
+		return reset(fmt.Sprintf(".part yok ama state %d bayt diyor", st.Offset))
+	case err != nil:
+		return State{}, nil, err
+	case fi.Size() < st.Offset:
+		return reset(fmt.Sprintf(".part %d bayt, state %d diyor", fi.Size(), st.Offset))
+	case fi.Size() > st.Offset:
+		// Fazlalık hash'e girmemiş; kırpmak doğru ve güvenli.
+		if err := os.Truncate(part, st.Offset); err != nil {
+			return State{}, nil, err
+		}
+	}
+
+	h, err := restoreHasher(part, st)
+	if err != nil {
+		return reset(fmt.Sprintf("hash durumu kurtarılamadı: %v", err))
+	}
+	return st, h, nil
 }
 
 // urlExpiredError, 403/410'u diğer hatalardan ayırır.
@@ -191,6 +288,11 @@ func (d *Downloader) attempt(
 	if err != nil {
 		return false, st, err
 	}
+	if d.UserAgent != "" {
+		req.Header.Set("User-Agent", d.UserAgent)
+	}
+	// Item.Headers politikadan türer (örn. bunkr'da zorunlu item sayfası
+	// Referer'ı) ve User-Agent'ı ezebilir.
 	for k, v := range it.Headers {
 		req.Header.Set(k, v)
 	}
@@ -214,17 +316,18 @@ func (d *Downloader) attempt(
 		if st.Offset > 0 {
 			d.logf("sunucu 200 döndü, kaynak değişmiş olabilir: baştan indiriliyor")
 		}
-		st = newStateFrom(resp)
+		st = mergeServerState(st, resp)
 		hasher.Reset()
-		if err := truncatePart(part, 0); err != nil {
+		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
 			return false, st, err
 		}
+		st.Offset = 0
 		return d.stream(ctx, part, statePath, resp.Body, st, hasher)
 
 	case http.StatusPartialContent:
-		start, total, err := parseContentRange(resp.Header.Get("Content-Range"))
-		if err != nil {
-			return false, st, fmt.Errorf("Content-Range ayrıştırılamadı: %w", err)
+		start, total, perr := parseContentRange(resp.Header.Get("Content-Range"))
+		if perr != nil {
+			return false, st, fmt.Errorf("Content-Range ayrıştırılamadı: %w", perr)
 		}
 		if start != st.Offset {
 			// Sunucu istediğimiz yerden başlamadı. Yapıştırmak bozuk dosya üretir.
@@ -238,20 +341,29 @@ func (d *Downloader) attempt(
 	case http.StatusRequestedRangeNotSatisfiable:
 		// 416 "tamamlandı" DEMEK DEĞİL; yalnızca "offset >= mevcut uzunluk"
 		// demek. Ayrımı state yapar.
-		if st.TotalSize >= 0 && st.Offset == st.TotalSize {
+		if total := st.expectedTotal(); total >= 0 && st.Offset == total {
 			d.logf("416: indirme zaten tamamlanmış, doğrulanıyor")
 			return true, st, nil
 		}
-		d.logf("416 ama offset=%d total=%d: .part bozuk, sıfırlanıyor", st.Offset, st.TotalSize)
-		if err := truncatePart(part, 0); err != nil {
+		d.logf("416 ama offset=%d beklenen=%d: .part bozuk, sıfırlanıyor", st.Offset, st.expectedTotal())
+		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
 			return false, st, err
 		}
 		_ = os.Remove(statePath)
 		hasher.Reset()
-		st = State{TotalSize: -1}
+		st = freshState()
+		st.ItemSize = it.Size
 		return false, st, errors.New("range reddedildi, .part sıfırlandı; tekrar deneyin")
 
 	case http.StatusForbidden, http.StatusGone:
+		// Siteye özgü sınıflandırıcı varsa önce ona sor: 403 her zaman
+		// "süresi dolmuş imzalı URL" değildir.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+		if d.Classify != nil {
+			if cerr := d.Classify(resp, body); cerr != nil {
+				return false, st, cerr
+			}
+		}
 		return false, st, &urlExpiredError{status: resp.StatusCode}
 
 	default:
@@ -277,7 +389,7 @@ func (d *Downloader) stream(
 	for {
 		select {
 		case <-ctx.Done():
-			st.Offset = flushAndSync(f, st.Offset)
+			_ = f.Sync()
 			f.Close()
 			saveState(statePath, st, hasher)
 			return false, st, ctx.Err()
@@ -287,7 +399,7 @@ func (d *Downloader) stream(
 		n, rerr := body.Read(buf)
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				f.Sync()
+				_ = f.Sync()
 				f.Close()
 				saveState(statePath, st, hasher)
 				return false, st, werr
@@ -299,7 +411,7 @@ func (d *Downloader) stream(
 			break
 		}
 		if rerr != nil {
-			st.Offset = flushAndSync(f, st.Offset)
+			_ = f.Sync()
 			f.Close()
 			saveState(statePath, st, hasher)
 			return false, st, rerr
@@ -313,26 +425,23 @@ func (d *Downloader) stream(
 		return false, st, err
 	}
 
-	// TotalSize biliniyorsa eksik veri sessizce başarı sayılmaz.
-	if st.TotalSize >= 0 && st.Offset < st.TotalSize {
+	// Beklenen boyut biliniyorsa eksik veri sessizce başarı sayılmaz.
+	if total := st.expectedTotal(); total >= 0 && st.Offset < total {
 		saveState(statePath, st, hasher)
 		return false, st, nil
 	}
 	return true, st, nil
 }
 
-func flushAndSync(f *os.File, offset int64) int64 {
-	_ = f.Sync()
-	return offset
-}
-
-// newStateFrom, 200 yanıtından taze state kurar ve validator'ı seçer.
+// mergeServerState, 200 yanıtından taze sunucu bilgisi alır ve validator'ı seçer.
+// Resolver kaynaklı ItemSize korunur.
 //
 // Zayıf ETag (W/ öneki) If-Range'de KULLANILAMAZ (RFC 7232): zayıf validator
 // "anlamca eşdeğer" demek, "bayt bayt aynı" demek değil. Kullanırsan tam olarak
 // kapatmaya çalıştığın bozuk-dosya sınıfını geri getirirsin.
-func newStateFrom(resp *http.Response) State {
-	st := State{TotalSize: -1}
+func mergeServerState(prev State, resp *http.Response) State {
+	st := freshState()
+	st.ItemSize = prev.ItemSize
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
 			st.TotalSize = n
@@ -381,35 +490,14 @@ func parseContentRange(v string) (start, total int64, err error) {
 	return start, total, nil
 }
 
-func truncatePart(part string, offset int64) error {
-	fi, err := os.Stat(part)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if fi.Size() == offset {
-		return nil
-	}
-	if offset == 0 {
-		return os.Remove(part)
-	}
-	if fi.Size() < offset {
-		// Dosya state'in söylediğinden kısa: state'e güvenilemez.
-		return fmt.Errorf(".part (%d bayt) state offset'inden (%d) kısa", fi.Size(), offset)
-	}
-	return os.Truncate(part, offset)
-}
-
 func loadState(path string) State {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return State{TotalSize: -1}
+		return freshState()
 	}
-	var st State
+	st := freshState()
 	if json.Unmarshal(data, &st) != nil || st.Offset < 0 {
-		return State{TotalSize: -1}
+		return freshState()
 	}
 	return st
 }
@@ -435,6 +523,10 @@ func saveState(path string, st State, hasher hash.Hash) {
 
 // restoreHasher, kaydedilmiş sha256 durumunu geri yükler.
 // Durum yoksa `.part`'ı offset'e kadar yeniden okuyup hash'i kurar.
+//
+// Çağıran, `.part`'ın state ile tutarlı olduğunu ÖNCEDEN doğrulamak zorunda
+// (bkz. prepare): burada dosya kısa olsa bile CopyN hata verir, ama hash
+// durumu state'ten gelirse dosya hiç okunmaz ve tutarsızlık sessiz kalır.
 func restoreHasher(part string, st State) (hash.Hash, error) {
 	h := sha256.New()
 	if st.Offset == 0 {
@@ -459,31 +551,27 @@ func restoreHasher(part string, st State) (hash.Hash, error) {
 	return h, nil
 }
 
-func reloadFor(part, statePath string, st State) (State, hash.Hash, error) {
-	saved := loadState(statePath)
-	if saved.Offset > 0 {
-		st = saved
-	}
-	h, err := restoreHasher(part, st)
-	return st, h, err
-}
-
 // claim, aynı klasörde aynı adın iki kez kullanılmasını önler.
-// Sonek Index'ten türetilir, böylece koşular arasında deterministiktir:
-// aynı albüm aynı sırada çözüldüğü sürece aynı item aynı adı alır.
+// Sonek Index'ten türer, böylece koşular arasında deterministiktir: aynı albüm
+// aynı sırada çözüldüğü sürece aynı item aynı adı alır. Üretilen adın kendisi
+// de çakışabileceği için boş bir ad bulunana kadar ilerlenir.
 func (d *Downloader) claim(dir string, it site.Item) string {
 	if d.claimed == nil {
 		d.claimed = map[string]bool{}
 	}
-	name := it.Filename
-	key := strings.ToLower(filepath.Join(dir, name))
-	if !d.claimed[key] {
-		d.claimed[key] = true
-		return name
+	key := func(n string) string { return strings.ToLower(filepath.Join(dir, n)) }
+
+	if !d.claimed[key(it.Filename)] {
+		d.claimed[key(it.Filename)] = true
+		return it.Filename
 	}
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	alt := fmt.Sprintf("%s (%d)%s", base, it.Index+1, ext)
-	d.claimed[strings.ToLower(filepath.Join(dir, alt))] = true
-	return alt
+	ext := filepath.Ext(it.Filename)
+	base := strings.TrimSuffix(it.Filename, ext)
+	for n := it.Index + 1; ; n++ {
+		alt := fmt.Sprintf("%s (%d)%s", base, n, ext)
+		if !d.claimed[key(alt)] {
+			d.claimed[key(alt)] = true
+			return alt
+		}
+	}
 }

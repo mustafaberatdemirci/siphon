@@ -5,10 +5,14 @@ import "strings"
 // MatchHost, bir host'un desen listesinden herhangi birine uyup uymadığını söyler.
 //
 // Desenler ya birebir bir host ("pixeldrain.com") ya da tek yıldızlı bir joker
-// olabilir ("bunkr.*", "*.bunkr.la"). Joker boş olmayan bir dizi karşılar ve
-// etiket sınırına saygı duyar: yıldız bir etiketin ortasına taşamaz. Yani
-// "bunkr.*" için "bunkr.cr" ve "bunkr.co.uk" eşleşir, "notbunkr.cr" eşleşmez,
-// "bunkr." de eşleşmez.
+// olabilir ("bunkr.*", "*.bunkr.la"). Joker TAM OLARAK BİR etiket karşılar:
+// karşıladığı kısım boş olamaz ve nokta içeremez.
+//
+// Tek etiket kuralı bir güvenlik sınırıdır, kolaylık değil. Joker çok etiketli
+// olsaydı "bunkr.*" deseni "bunkr.attacker.com" ile eşleşirdi ve girdi
+// listesindeki düşmanca bir link güvenilen site sayılıp çekilirdi. Çok parçalı
+// bir TLD gerekirse ("bunkr.co.uk") açıkça listeye eklenir; kamu son ek listesi
+// olmadan bunu jokerle güvenli biçimde ifade etmenin yolu yok.
 //
 // Joker desteği kasıtlı: gallery-dl 2024-08-24'te bunkr TLD'lerini saymaktan
 // vazgeçip joker seçeneği ekledi, cyberdrop-dl de "bunkr.*" kullanıyor. Liste
@@ -66,9 +70,8 @@ func hostMatchesPattern(host, pattern string) bool {
 	if middle == "" {
 		return false
 	}
-	// Nokta sınırına saygı: prefix nokta ile bitmiyorsa joker etiketin ortasına
-	// taşamaz. Böylece "bunkr.*" için "notbunkr.cr" elenir.
-	if prefix != "" && !strings.HasSuffix(prefix, ".") && strings.Contains(middle, ".") {
+	// Tam olarak bir etiket: nokta içeremez. "bunkr.attacker.com" burada elenir.
+	if strings.Contains(middle, ".") {
 		return false
 	}
 	return true

@@ -445,22 +445,29 @@ func TestExpiredURLWithoutReresolverIsPermanent(t *testing.T) {
 	}
 }
 
-func TestPartShorterThanStateIsRejected(t *testing.T) {
+// .part state'ten kisaysa resume dosyanin basina delik acar. Tek guvenli
+// davranis bastan baslamak, ve sonucun BOZUK OLMAMASI.
+func TestPartShorterThanStateRestartsCleanly(t *testing.T) {
 	out := t.TempDir()
 	part := filepath.Join(out, "veri.bin.part")
 	if err := os.WriteFile(part, []byte("kisa"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := State{Offset: 9999, Validator: `"v1"`, ValidatorType: ValidatorETag, TotalSize: 20000}
+	st := State{Offset: 9999, Validator: `"v1"`, ValidatorType: ValidatorETag, TotalSize: int64(len(payload))}
 	data, _ := json.Marshal(st)
 	if err := os.WriteFile(part+".state", data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	srv := rangeServer(t, `"v1"`, nil)
 	d := &Downloader{Client: srv.Client()}
-	err := d.Download(context.Background(), out, testItem(srv.URL+"/veri.bin", "veri.bin"))
-	if err == nil {
-		t.Fatal(".part state'ten kisayken hata bekleniyordu")
+	it := testItem(srv.URL+"/veri.bin", "veri.bin")
+	it.SHA256 = payloadSHA()
+	if err := d.Download(context.Background(), out, it); err != nil {
+		t.Fatalf("bastan indirme basarisiz: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(out, "veri.bin"))
+	if !bytes.Equal(got, payload) {
+		t.Fatal("icerik bozuk")
 	}
 }
 

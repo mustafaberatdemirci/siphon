@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -170,11 +171,15 @@ func merge(base, ext file) file {
 }
 
 func mergeSite(b, e rawSite) rawSite {
-	// Diziler birleşir, sonra açık silme uygulanır.
-	b.Domains = remove(union(b.Domains, e.Domains), e.DomainsRemove)
-	b.CDNPatterns = remove(union(b.CDNPatterns, e.CDNPatterns), e.CDNPatternsRemove)
+	// Diziler birleşir. Silme burada DEĞİL build()'de uygulanıyor: aksi halde
+	// dış dosyanın yeni tanımladığı bir sitenin kendi domains_remove'u hiç
+	// çalışmazdı (o dal merge'e girmiyor).
+	b.Domains = union(b.Domains, e.Domains)
+	b.CDNPatterns = union(b.CDNPatterns, e.CDNPatterns)
 	b.LegacyDomains = union(b.LegacyDomains, e.LegacyDomains)
 	b.CanaryURLs = union(b.CanaryURLs, e.CanaryURLs)
+	b.DomainsRemove = union(b.DomainsRemove, e.DomainsRemove)
+	b.CDNPatternsRemove = union(b.CDNPatternsRemove, e.CDNPatternsRemove)
 
 	// Skalerler ezilir, ama yalnızca verilmişlerse.
 	if e.UserAgent != "" {
@@ -218,17 +223,26 @@ func union(a, b []string) []string {
 	return out
 }
 
+// remove, silme listesini uygular.
+//
+// Karşılaştırma NORMALİZE edilerek yapılır: eşleştirme tarafı (site.MatchHost)
+// host'u küçük harfe çeviriyor ve sondaki noktayı atıyor. Burada ham string
+// karşılaştırmak, `domains_remove = ["PixelDrain.COM"]` yazan bir kullanıcının
+// silmesinin sessizce hiçbir şey yapmaması demek olurdu.
 func remove(from, drop []string) []string {
 	if len(drop) == 0 {
 		return from
 	}
+	norm := func(s string) string {
+		return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
+	}
 	bad := make(map[string]bool, len(drop))
 	for _, d := range drop {
-		bad[d] = true
+		bad[norm(d)] = true
 	}
 	out := make([]string, 0, len(from))
 	for _, s := range from {
-		if !bad[s] {
+		if !bad[norm(s)] {
 			out = append(out, s)
 		}
 	}
@@ -256,8 +270,16 @@ func build(f file) ([]site.SiteConfig, error) {
 			return nil, fmt.Errorf("%w: %s: geçersiz referer_policy %q (none|item_page|origin)",
 				ErrUsage, r.Name, r.RefererPolicy)
 		}
+		// Silme burada uygulanıyor: hem birleştirilmiş hem dış dosyanın yeni
+		// tanımladığı siteler aynı yoldan geçsin.
+		domains := remove(r.Domains, r.DomainsRemove)
+		cdn := remove(r.CDNPatterns, r.CDNPatternsRemove)
+
 		if len(r.Domains) == 0 {
 			return nil, fmt.Errorf("%w: %s: domains boş", ErrUsage, r.Name)
+		}
+		if len(domains) == 0 {
+			return nil, fmt.Errorf("%w: %s: domains_remove tüm domainleri sildi", ErrUsage, r.Name)
 		}
 
 		base, err := dur(r.Name, "base_delay", r.BaseDelay)
@@ -275,9 +297,9 @@ func build(f file) ([]site.SiteConfig, error) {
 
 		out = append(out, site.SiteConfig{
 			Name:          r.Name,
-			Domains:       r.Domains,
+			Domains:       domains,
 			LegacyDomains: r.LegacyDomains,
-			CDNPatterns:   r.CDNPatterns,
+			CDNPatterns:   cdn,
 			CanaryURLs:    r.CanaryURLs,
 			UserAgent:     r.UserAgent,
 			RefererPolicy: r.RefererPolicy,

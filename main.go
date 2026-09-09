@@ -9,9 +9,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	_ "embed"
 
@@ -113,6 +116,8 @@ func run() int {
 		return exitUsage
 	}
 
+	httpClient := newHTTPClient()
+
 	var (
 		resolvedAny bool
 		problems    int
@@ -120,7 +125,7 @@ func run() int {
 	)
 
 	for _, u := range urls {
-		r := pick(resolvers, u)
+		r, idx := pick(resolvers, u)
 		if r == nil {
 			// Sessiz başarısızlık yok: atlanan URL çıkış kodunu etkiler.
 			log.errorf("eşleşen resolver yok, atlanıyor: %s", u)
@@ -129,7 +134,21 @@ func run() int {
 		}
 
 		// Downloader URL başına kurulur: claimed haritası albüm kapsamlı olmalı.
-		down := &dl.Downloader{Logf: log.debugf, Reresolve: r.ResolveOne}
+		//
+		// Client açıkça veriliyor: http.DefaultClient'a bırakmak, sites.toml'daki
+		// user_agent'ın yalnızca API çağrılarına uygulanması ve transferlerde
+		// hiçbir zaman aşımı olmaması demekti.
+		down := &dl.Downloader{
+			Client:    httpClient,
+			Logf:      log.debugf,
+			Reresolve: r.ResolveOne,
+			UserAgent: cfgs[idx].UserAgent,
+		}
+		// Resolver 403'ü siteye özgü yorumlayabiliyorsa indiriciye bağla; yoksa
+		// her 403 "imzalı URL süresi doldu" sayılır ve rate limit derinleşir.
+		if c, ok := r.(site.StatusClassifier); ok {
+			down.Classify = c.ClassifyStatus
+		}
 
 		var count, failed int
 		itemErrs, err := r.Resolve(ctx, u, func(it site.Item) error {
@@ -192,14 +211,39 @@ func run() int {
 	}
 }
 
-// pick, URL'e uyan ilk resolver'ı döndürür.
-func pick(rs []site.Resolver, u string) site.Resolver {
-	for _, r := range rs {
+// pick, URL'e uyan ilk resolver'ı ve onun config indeksini döndürür.
+// Registry.Build sırayı koruduğu için indeks cfgs ile birebir eşleşir.
+func pick(rs []site.Resolver, u string) (site.Resolver, int) {
+	for i, r := range rs {
 		if r.Match(u) {
-			return r
+			return r, i
 		}
 	}
-	return nil
+	return nil, -1
+}
+
+// newHTTPClient, transfer istekleri için istemciyi kurar.
+//
+// Client.Timeout KASITLI olarak verilmiyor: o alan gövde okumayı da kapsar ve
+// birkaç gigabaytlık bir indirmeyi ortasından keser. Zaman aşımları bağlantı
+// kurma ve yanıt başlığı seviyesinde tutuluyor; takılan bir sunucu yakalanır,
+// yavaş ama çalışan bir transfer kesilmez.
+//
+// SiteConfig.MaxElapsed burada uygulanmıyor: o, item başına YENİDEN DENEME
+// bütçesi (adım 6), transfer için son tarih değil.
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          32,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
 }
 
 // readURLs, -i dosyasını ve konumsal argümanları birleştirir.
