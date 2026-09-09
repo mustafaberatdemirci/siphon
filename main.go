@@ -25,6 +25,7 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/doctor"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
+	"github.com/mustafaberatdemirci/siphon/internal/store"
 )
 
 //go:embed sites.toml
@@ -283,6 +284,29 @@ func run() int {
 
 	httpClient := snet.NewClient()
 
+	// Kayıt ÇIKTI KÖKÜNÜN altında açılıyor, cwd'de veya exe yanında değil:
+	// farklı bir -out ile yapılan ikinci koşu aksi halde dosyalar orada
+	// olmadığı halde "hepsi indi" deyip 0 dönerdi.
+	//
+	// --resolve-only modunda HİÇ açılmıyor: o mod diske hiçbir şey yazmıyor ve
+	// kaydı açmak çıktı klasörünü oluşturmak demek olurdu.
+	var ledger *store.Ledger
+	if !resolveOnly {
+		l, lerr := store.Open(outDir)
+		if lerr != nil {
+			log.errorf("%v", lerr)
+			return exitUsage
+		}
+		defer l.Close()
+		ledger = l
+		log.debugf("kayıt: %s (%d item)", ledger.Path(), ledger.Len())
+		if n := ledger.Skipped(); n > 0 {
+			// Sessiz geçilmiyor: yarım yazılmış satır beklenen bir durum ama
+			// kullanıcı kaç item'ın kaydını kaybettiğini bilmek zorunda.
+			log.errorf("kayıtta okunamayan %d satır atlandı: %s", n, ledger.Path())
+		}
+	}
+
 	var (
 		resolvedAny bool
 		problems    int
@@ -333,6 +357,8 @@ func run() int {
 		var (
 			count   int // Resolve tek goroutine'den çağırıyor; atomic gerekmiyor
 			failed  atomic.Int64
+			already atomic.Int64
+			degrade atomic.Int64 // item indi ama kaydı yazılamadı
 			stopped atomic.Bool
 		)
 
@@ -343,24 +369,56 @@ func run() int {
 				return nil
 			}
 			g.Go(func() error {
+				// Zaten indirilmiş mi? Kayda tek başına GÜVENİLMİYOR: dosyanın
+				// gerçekten yerinde olduğu da kontrol ediliyor. Kullanıcı dosyayı
+				// silmişse kayda bakıp atlamak sessiz başarısızlık olur.
+				if e, ok := ledger.Lookup(it.Dir, it.SourcePage, it.Filename); ok {
+					if fi, serr := os.Stat(filepath.Join(outDir, e.Path)); serr == nil && !fi.IsDir() {
+						already.Add(1)
+						log.debugf("[%d] %s zaten kayıtlı, atlanıyor", it.Index+1, e.Filename)
+						return nil
+					}
+					log.errorf("  kayıt %q diyor ama dosya yok, yeniden indiriliyor", e.Path)
+				}
+
 				release, aerr := limiter.Acquire(gctx, snet.HostOf(it.URL))
 				if aerr != nil {
 					return aerr
 				}
 				defer release()
 
-				var final string
+				var res dl.Result
 				derr := policy.Do(gctx, func(int) error {
 					var e error
-					final, e = down.Download(gctx, outDir, it)
+					res, e = down.Download(gctx, outDir, it)
 					return e
 				})
 
 				switch {
 				case derr == nil:
+					// Yol GÖRELİ kaydediliyor: çıktı klasörü taşındığında kayıt
+					// geçerli kalsın.
+					rel, relErr := filepath.Rel(outDir, res.Path)
+					if relErr != nil {
+						rel = filepath.Base(res.Path)
+					}
+					if aerr := ledger.Add(store.Entry{
+						SourcePage: it.SourcePage,
+						Dir:        it.Dir,
+						Filename:   it.Filename,
+						Path:       rel,
+						Size:       res.Size,
+						SHA256:     res.SHA256,
+					}); aerr != nil {
+						// Dosya indi ama kaydı yazılamadı: indirme geçerli,
+						// idempotence bozuk. Sonraki koşu bunu yeniden indirir.
+						// Sessiz geçilmemesi gereken bir bozulma.
+						log.errorf("  %s indi ama kaydı yazılamadı: %v", rel, aerr)
+						degrade.Add(1)
+					}
 					// Diskteki ad temizleyiciden geçtiği için girdi adından
 					// farklı olabilir; gerçek adı basıyoruz.
-					log.infof("[%d] %s OK", it.Index+1, filepath.Base(final))
+					log.infof("[%d] %s OK", it.Index+1, filepath.Base(res.Path))
 					return nil
 				case errors.Is(derr, snet.ErrStop):
 					// Captcha. Beklemek çözmez ve denemeye devam etmek durumu
@@ -382,7 +440,7 @@ func run() int {
 
 		// Resolve döndü ama indirmeler sürüyor olabilir; her durumda bekle.
 		gerr := g.Wait()
-		problems += int(failed.Load())
+		problems += int(failed.Load()) + int(degrade.Load())
 		if count > 0 {
 			resolvedAny = true
 		}
@@ -414,7 +472,11 @@ func run() int {
 			log.errorf("item: %v", ie)
 			problems++
 		}
-		log.infof("%s: %d item", u, count)
+		if n := already.Load(); n > 0 {
+			log.infof("%s: %d item (%d zaten indirilmiş, atlandı)", u, count, n)
+		} else {
+			log.infof("%s: %d item", u, count)
+		}
 	}
 
 	switch {

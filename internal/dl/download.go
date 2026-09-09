@@ -178,16 +178,25 @@ var ErrSHA256Mismatch = errors.New("sha256 uyuşmuyor")
 // ErrIncomplete, gövde beklenen boyuttan kısa geldiğinde döner.
 var ErrIncomplete = errors.New("indirme eksik")
 
+// Result, tamamlanmış bir indirmenin kaydıdır.
+//
+// Yol döndürülüyor çünkü diskteki ad temizleyiciden geçtikten sonra girdi
+// adından farklı olabiliyor. SHA256 ise HESAPLANAN hash: sitenin verdiği değil,
+// baytlardan üretilen. bunkr hash vermiyor ama yine de bir bütünlük kaydı
+// bırakabilmek için done.jsonl bunu yazıyor.
+type Result struct {
+	Path   string
+	Size   int64
+	SHA256 string
+}
+
 // Download, tek bir item'ı indirir ve devam edebilirliği yönetir.
 //
-// Hata nil ise dosya, dönen yolda, doğrulanmış halde diskte demektir. Yol
-// döndürülüyor çünkü diskteki ad temizleyiciden geçtikten sonra girdi adından
-// farklı olabiliyor; log satırı ve adım 9'daki done.jsonl gerçek adı bilmek
-// zorunda.
+// Hata nil ise dosya, Result.Path'te, doğrulanmış halde diskte demektir.
 //
 // ctx iptal edilirse `.part` ve `.part.state` tutarlı halde bırakılır ve
 // context hatası döner.
-func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item) (string, error) {
+func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item) (Result, error) {
 	// Temizleme BURADA yapılıyor, çağıranda değil: ad kuralları diske yazan
 	// kodla aynı yerde durmak zorunda, yoksa bir çağıran atlar ve ayrılmış bir
 	// aygıt adı veya 255 birim sınırını aşan bir bileşen diske sızar.
@@ -202,14 +211,14 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 	// sonek olmadığı için o tam sınırı kullanabiliyor.
 	name := ComponentLimit(it.Filename, MaxComponentUTF16-utf16Len(stateSuffix))
 	if name == "" {
-		return "", fmt.Errorf("dosya adı kullanılamaz: %q (%s)", it.Filename, it.SourcePage)
+		return Result{}, fmt.Errorf("dosya adı kullanılamaz: %q (%s)", it.Filename, it.SourcePage)
 	}
 	it.Filename = name
 	it.Dir = Component(it.Dir) // boş kalabilir; kök demek
 
 	dir := filepath.Join(outRoot, it.Dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("klasör açılamadı: %w", err)
+		return Result{}, fmt.Errorf("klasör açılamadı: %w", err)
 	}
 
 	final := filepath.Join(dir, d.claim(dir, it))
@@ -220,12 +229,14 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 	// aynı koşuda iki kez indirmeyi önleyen ucuz bir kontrol.
 	if fi, err := os.Stat(final); err == nil && !fi.IsDir() {
 		d.logf("%s zaten var, atlanıyor", filepath.Base(final))
-		return final, nil
+		// Hash yeniden hesaplanmıyor: dosya zaten yerinde ve gigabaytlık bir
+		// dosyayı yalnızca kayıt için baştan okumak kabul edilemez bir maliyet.
+		return Result{Path: final, Size: fi.Size()}, nil
 	}
 
 	st, hasher, err := d.prepare(part, statePath, it)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	item := it
@@ -237,7 +248,7 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 			if !done {
 				// Sunucu beklenmedik şekilde erken kapattı; kısmi ilerleme
 				// kaydedildi, bir üst katman tekrar deneyecek.
-				return "", Retryable(fmt.Errorf("%w: bağlantı erken kapandı, %d bayt kaydedildi",
+				return Result{}, Retryable(fmt.Errorf("%w: bağlantı erken kapandı, %d bayt kaydedildi",
 					ErrIncomplete, st.Offset))
 			}
 			break
@@ -250,7 +261,7 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 			d.logf("imzalı URL %d döndü, yeniden çözülüyor: %s", expired.status, item.SourcePage)
 			fresh, rerr := d.Reresolve(ctx, item.SourcePage)
 			if rerr != nil {
-				return "", fmt.Errorf("yeniden çözümleme başarısız: %w", rerr)
+				return Result{}, fmt.Errorf("yeniden çözümleme başarısız: %w", rerr)
 			}
 			// Ad ve klasör korunur; yalnızca indirme adresi tazelenir.
 			item.URL = fresh.URL
@@ -260,18 +271,18 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 			// Hash ve offset korunur: aynı içeriğe devam ediyoruz.
 			st, hasher, err = d.prepare(part, statePath, item)
 			if err != nil {
-				return "", err
+				return Result{}, err
 			}
 			continue
 		}
-		return "", aerr
+		return Result{}, aerr
 	}
 
 	// Beklenen boyut biliniyorsa eksik dosya başarı sayılmaz. Content-Length
 	// yoksa resolver'ın bildirdiği boyut yedek olarak devreye girer; aksi halde
 	// kırpılmış bir gövde "tamamlandı" sayılırdı.
 	if total := st.expectedTotal(); total >= 0 && st.Offset != total {
-		return "", Retryable(fmt.Errorf("%w: %d/%d bayt (%s)",
+		return Result{}, Retryable(fmt.Errorf("%w: %d/%d bayt (%s)",
 			ErrIncomplete, st.Offset, total, filepath.Base(final)))
 	}
 
@@ -281,14 +292,14 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		// item elle silinmeden kurtarılamaz. Temizleyip baştan indirilebilir bırak.
 		_ = os.Remove(part)
 		_ = os.Remove(statePath)
-		return "", fmt.Errorf("%w: beklenen %s, hesaplanan %s (%s) — .part silindi, tekrar denenebilir",
+		return Result{}, fmt.Errorf("%w: beklenen %s, hesaplanan %s (%s) — .part silindi, tekrar denenebilir",
 			ErrSHA256Mismatch, item.SHA256, sum, filepath.Base(final))
 	}
 	if err := os.Rename(part, final); err != nil {
-		return "", fmt.Errorf("rename: %w", err)
+		return Result{}, fmt.Errorf("rename: %w", err)
 	}
 	_ = os.Remove(statePath)
-	return final, nil
+	return Result{Path: final, Size: st.Offset, SHA256: sum}, nil
 }
 
 // prepare, state ile `.part` dosyasını karşılaştırır ve tutarlı bir

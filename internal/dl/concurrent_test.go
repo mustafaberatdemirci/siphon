@@ -70,7 +70,9 @@ func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 			it := testItem(srv.URL+"/veri.bin", "ayni.bin")
 			it.Index = i
 			it.SHA256 = payloadSHA()
-			paths[i], errs[i] = d.Download(context.Background(), out, it)
+			var res Result
+			res, errs[i] = d.Download(context.Background(), out, it)
+			paths[i] = res.Path
 		}(i)
 	}
 	wg.Wait()
@@ -205,7 +207,7 @@ func TestDownloadTwiceReturnsSamePath(t *testing.T) {
 	it.SHA256 = payloadSHA()
 
 	d := &Downloader{Client: srv.Client()}
-	p1, err := d.Download(context.Background(), out, it)
+	r1, err := d.Download(context.Background(), out, it)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,12 +215,12 @@ func TestDownloadTwiceReturnsSamePath(t *testing.T) {
 	// dogru davranis (iki farkli item ayni ada cozulmus olabilir). Yeni bir
 	// Downloader ise ayni adi hedefler ve "zaten var" dalina duser.
 	d2 := &Downloader{Client: srv.Client()}
-	p2, err := d2.Download(context.Background(), out, it)
+	r2, err := d2.Download(context.Background(), out, it)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p1 != p2 {
-		t.Fatalf("ikinci kosu farkli yol dondurdu:\n%s\n%s", p1, p2)
+	if r1.Path != r2.Path {
+		t.Fatalf("ikinci kosu farkli yol dondurdu:\n%s\n%s", r1.Path, r2.Path)
 	}
 	entries, _ := os.ReadDir(out)
 	if len(entries) != 1 {
