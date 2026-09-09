@@ -1,0 +1,62 @@
+# Siphon gömülü site tanımları.
+#
+# Bu dosya go:embed ile binary'ye gömülür. Dış bir kopya bulunursa (arama sırası:
+# -c bayrağı, exe'nin yanı, cwd) üzerine BİNDİRİLİR, tamamen değiştirmez:
+#   - skaler alanlar ezilir
+#   - dizi alanları BİRLEŞİR (union, sıra korunur)
+#   - silme yalnızca domains_remove / cdn_patterns_remove ile açıkça yapılır
+#
+# Yani yeni bir TLD çıktığında tüm listeyi yeniden yazman gerekmez, tek satır
+# eklersin. Premise 2'nin satış argümanı bu.
+
+schema_version = 1
+
+[[site]]
+name = "pixeldrain"
+
+# 2026-09-09'da yedisi de canlı ölçüldü: hepsi 200 + temiz JSON döndü ve
+# hiçbiri operatör engelinde değil. Kaynak: cyberdrop-dl supported-websites.md,
+# ardından /api/misc/rate_limits ile teker teker doğrulama.
+domains = [
+  "pixeldrain.com",
+  "pixeldra.in",
+  "pixeldrain.net",
+  "pixeldrain.nl",
+  "pixeldrain.dev",
+  "pixeldrain.biz",
+  "pixeldrain.tech",
+]
+
+legacy_domains = []
+
+# pixeldrain kendi dosyalarını kendi domaininden veriyor, ayrı bir CDN host'u yok.
+cdn_patterns = []
+
+# Referer YOK. pixeldrain'de yanlış Referer tam olarak hotlink_detected tetikler;
+# ücretsiz hesapta hotlinking yasak. Bu alan site başına politikadır.
+referer_policy = "none"
+
+user_agent = "siphon/0.1 (+https://github.com/mustafaberatdemirci/siphon)"
+
+# Ücretsiz hesapta eşzamanlı bağlantı sınırı var; max_concurrent_downloads
+# hatasını kendi elinle tetiklememek için düşük tutuluyor.
+max_concurrent = 3
+
+# Canary bir LİSTEDİR. Tek canary'ye bağlanan doctor, o domain engellenirse
+# çalışır durumdaki siteyi "ölü" raporlar. Ölçüm bunun bunkr'da gerçekten
+# olduğunu gösterdi.
+canary_urls = [
+  "https://pixeldrain.com/api/misc/rate_limits",
+  "https://pixeldra.in/api/misc/rate_limits",
+  "https://pixeldrain.net/api/misc/rate_limits",
+]
+
+max_retries = 5
+base_delay = "1s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+# bunkr girdisi kasıtlı olarak YOK: internal/site/bunkr.go henüz yazılmadı ve
+# resolver'ı olmayan bir site tanımı açılışta hard fail üretir. Ölçülmüş bunkr
+# domain verisi tasarım dokümanının Assignment Findings bölümünde duruyor,
+# adım 7'de buraya taşınacak.

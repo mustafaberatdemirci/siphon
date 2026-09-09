@@ -1,0 +1,9 @@
+/dist/
+/recordings/
+*.exe
+*.part
+*.part.state
+done.jsonl
+
+# Yerel oturum izinleri; makineye ozel, paylasilmaz.
+.claude/settings.local.json
