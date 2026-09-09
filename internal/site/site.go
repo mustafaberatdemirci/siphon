@@ -183,6 +183,13 @@ type SiteConfig struct {
 	// ilgilendirmiyor.
 	Extra map[string]string
 
+	// Record, --record ile etkinleşen yanıt kaydedicisi. nil olabilir.
+	//
+	// Neden var: bunkr kırıldığında elinde kırılan sayfanın GERÇEK yanıtı
+	// olmazsa, eski fixture ile diff alamazsın ve neyin değiştiğini tahminle
+	// kovalarsın. Bu aracın var oluş gerekçesi o tahmini ortadan kaldırmak.
+	Record func(name string, data []byte)
+
 	// Logf, resolver'ın teşhis satırları için. nil olabilir.
 	//
 	// Config'e bir logger koymak ilk bakışta yersiz duruyor, ama bu aracın
@@ -200,6 +207,13 @@ type SiteConfig struct {
 func (c SiteConfig) Logln(format string, a ...any) {
 	if c.Logf != nil {
 		c.Logf(format, a...)
+	}
+}
+
+// Recordln, cfg.Record varsa yanıtı kaydedir.
+func (c SiteConfig) Recordln(name string, data []byte) {
+	if c.Record != nil && len(data) > 0 {
+		c.Record(name, data)
 	}
 }
 

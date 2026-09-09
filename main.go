@@ -22,6 +22,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	"github.com/mustafaberatdemirci/siphon/internal/doctor"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
@@ -66,7 +67,174 @@ func (l logger) errorf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
 }
 
-func main() { os.Exit(run()) }
+func main() {
+	// Alt komut, flag.Parse'tan ÖNCE ayrılıyor. Go'nun flag paketi ilk
+	// bayrak olmayan argümanda duruyor, yani "siphon doctor -v" biçimini
+	// tek bir FlagSet ile ayrıştırmak mümkün değil.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(runDoctor(os.Args[2:]))
+	}
+	os.Exit(run())
+}
+
+// setupResolvers, iki komutun da ihtiyaç duyduğu ortak kurulumu yapar:
+// config yükleme, registry kaydı, resolver inşası.
+//
+// record nil olabilir; doctor --record ile doldurur.
+// canaries boş değilse config'teki canary listesi EZİLİR (doctor -canary).
+func setupResolvers(
+	log logger, cfgPath string,
+	record func(siteName string) func(string, []byte),
+	canaries []string,
+) ([]site.SiteConfig, []site.Resolver, error) {
+	cfgs, src, err := config.Load(embeddedSites, cfgPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	log.debugf("config: %s (%d site)", src, len(cfgs))
+
+	reg := site.NewRegistry()
+	for name, factory := range map[string]site.Factory{
+		site.PixeldrainName: site.NewPixeldrain,
+		site.BunkrName:      site.NewBunkr,
+	} {
+		if err := reg.Register(name, factory); err != nil {
+			return nil, nil, fmt.Errorf("registry: %w", err)
+		}
+	}
+	// Teşhis satırları -v ile görünür olsun: domain rotasyonu sessizce olursa
+	// "neden başka bir domaine gitti" sorusu cevaplanamaz.
+	for i := range cfgs {
+		cfgs[i].Logf = log.debugf
+		if record != nil {
+			cfgs[i].Record = record(cfgs[i].Name)
+		}
+		if len(canaries) > 0 {
+			cfgs[i].CanaryURLs = canaries
+		}
+	}
+	resolvers, err := reg.Build(cfgs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfgs, resolvers, nil
+}
+
+// runDoctor, katman teşhisini çalıştırır.
+//
+// Çıkış kodu: 0 hiç FAIL yok, 1 en az bir FAIL, 3 konfigürasyon hatası.
+// WARN çıkış kodunu ETKİLEMEZ ve bu kasıtlı: "CDN bir kapı değil sinyal"
+// kuralı ancak WARN başarısızlık sayılmazsa anlam taşıyor. Yeni bir CDN host'u
+// görmek betiği kırmamalı; kullanıcıya söylemeli.
+func runDoctor(args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	var (
+		cfgPath   string
+		verbose   bool
+		quiet     bool
+		record    bool
+		recordDir string
+	)
+	fs.StringVar(&cfgPath, "c", "", "sites.toml yolu")
+	fs.BoolVar(&verbose, "v", false, "teşhis detayını da bas")
+	fs.BoolVar(&quiet, "q", false, "sadece hataları bas")
+	fs.BoolVar(&record, "record", false, "yanıtları diske kaydet (diff için)")
+	fs.StringVar(&recordDir, "record-dir", doctor.DefaultDir, "kayıt klasörü")
+	// Neden bir bayrak gerekiyor: canary_urls bir dizi alanı ve dizi alanları
+	// config birleştirmede BİRLEŞİYOR (union, sıra korunur). Dış dosyaya canary
+	// yazmak onu listenin SONUNA ekliyor ve Diagnose ilk çalışan canary'de
+	// durduğu için oraya hiç gelinmiyor. Birleştirme semantiği domainler için
+	// doğru (eklemek istiyorsun, değiştirmek değil), ama "şu albüm kırık mı"
+	// diye sormanın bir yolu olmak zorunda.
+	var canaries stringList
+	fs.Var(&canaries, "canary", "canary URL'ini değiştir (tekrarlanabilir)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "kullanım: siphon doctor [bayraklar] [site ...]\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+
+	log := logger{verbose: verbose, quiet: quiet}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	var rec *doctor.Recorder
+	var recFn func(string) func(string, []byte)
+	if record {
+		rec = &doctor.Recorder{Dir: recordDir}
+		recFn = rec.For
+	}
+
+	cfgs, resolvers, err := setupResolvers(log, cfgPath, recFn, canaries)
+	if err != nil {
+		log.errorf("%v", err)
+		return exitUsage
+	}
+
+	// Argüman verilmişse yalnızca o siteler teşhis edilir.
+	want := map[string]bool{}
+	for _, a := range fs.Args() {
+		want[strings.ToLower(a)] = true
+	}
+	var sites []doctor.Named
+	for i, r := range resolvers {
+		name := cfgs[i].Name
+		if len(want) > 0 && !want[strings.ToLower(name)] {
+			continue
+		}
+		sites = append(sites, doctor.Named{Name: name, Resolver: r})
+	}
+	if len(sites) == 0 {
+		log.errorf("teşhis edilecek site yok (bilinen: %s)", strings.Join(siteNames(cfgs), ", "))
+		return exitUsage
+	}
+
+	reports := doctor.Run(ctx, sites)
+	worst := doctor.Format(os.Stdout, reports)
+
+	if rec != nil {
+		for _, f := range rec.Saved() {
+			log.infof("kaydedildi: %s", f)
+		}
+		// Kayıt hatası teşhisi DÜŞÜRMEZ: asıl iş katman raporu.
+		for _, e := range rec.Errs() {
+			log.errorf("kayıt hatası: %v", e)
+		}
+		if len(rec.Saved()) == 0 && len(rec.Errs()) == 0 {
+			log.errorf("kayıt istendi ama hiçbir yanıt kaydedilmedi")
+		}
+	}
+
+	if worst == site.StatusFail {
+		return exitPartial
+	}
+	return exitOK
+}
+
+// stringList, tekrarlanabilir bir string bayrağı.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return errors.New("boş canary")
+	}
+	*l = append(*l, v)
+	return nil
+}
+
+func siteNames(cfgs []site.SiteConfig) []string {
+	out := make([]string, 0, len(cfgs))
+	for _, c := range cfgs {
+		out = append(out, c.Name)
+	}
+	return out
+}
 
 func run() int {
 	var (
@@ -84,7 +252,8 @@ func run() int {
 	flag.BoolVar(&quiet, "q", false, "sadece hataları bas")
 	flag.BoolVar(&resolveOnly, "resolve-only", false, "çözümlenen URL'leri bas, indirme")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kullanım: siphon [bayraklar] [url ...]\n\n")
+		fmt.Fprintf(os.Stderr, "kullanım: siphon [bayraklar] [url ...]\n")
+		fmt.Fprintf(os.Stderr, "          siphon doctor [bayraklar] [site ...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -95,29 +264,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	cfgs, src, err := config.Load(embeddedSites, cfgPath)
-	if err != nil {
-		log.errorf("%v", err)
-		return exitUsage
-	}
-	log.debugf("config: %s (%d site)", src, len(cfgs))
-
-	reg := site.NewRegistry()
-	for name, factory := range map[string]site.Factory{
-		site.PixeldrainName: site.NewPixeldrain,
-		site.BunkrName:      site.NewBunkr,
-	} {
-		if err := reg.Register(name, factory); err != nil {
-			log.errorf("registry: %v", err)
-			return exitUsage
-		}
-	}
-	// Teşhis satırları -v ile görünür olsun: domain rotasyonu sessizce olursa
-	// "neden başka bir domaine gitti" sorusu cevaplanamaz.
-	for i := range cfgs {
-		cfgs[i].Logf = log.debugf
-	}
-	resolvers, err := reg.Build(cfgs)
+	cfgs, resolvers, err := setupResolvers(log, cfgPath, nil, nil)
 	if err != nil {
 		log.errorf("%v", err)
 		return exitUsage

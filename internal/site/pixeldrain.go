@@ -216,6 +216,17 @@ func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) e
 	return nil
 }
 
+// getRaw, get ile aynı yolu izler ama çözülmüş yapı yerine ham gövdeyi
+// döndürür. doctor'ın --record'u için gerekli: kaydedilecek şey çözülmüş yapı
+// değil, sunucunun gerçekten gönderdiği baytlar.
+func (p *pixeldrain) getRaw(ctx context.Context, rawURL string) ([]byte, error) {
+	var raw json.RawMessage
+	if err := p.get(ctx, rawURL, "", &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // classifyTransportError, taşıma katmanı hatasını doğru Layer'a bağlar.
 // DNS ile TLS ayrımı kritik: ikisi de "site açılmıyor" gibi görünür ama
 // düzeltmeleri farklıdır.
@@ -518,7 +529,14 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	var probe struct {
 		Success bool `json:"success"`
 	}
-	err = p.get(ctx, canary, "", &probe)
+	raw, rawErr := p.getRaw(ctx, canary)
+	p.cfg.Recordln("canary.json", raw)
+	err = rawErr
+	if err == nil {
+		if jerr := json.Unmarshal(raw, &probe); jerr != nil {
+			err = Errorf(LayerParse, canary, "JSON çözülemedi: %v", jerr)
+		}
+	}
 
 	layer, _ := LayerOf(err)
 	switch {
@@ -526,8 +544,18 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 		out = append(out,
 			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
 			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "challenge yok"},
-			LayerResult{Layer: LayerFetch, Status: StatusOK, Detail: "200"},
+			LayerResult{Layer: LayerFetch, Status: StatusOK,
+				Detail: fmt.Sprintf("200, %d bayt", len(raw))},
 			LayerResult{Layer: LayerParse, Status: StatusOK, Detail: "JSON çözüldü"},
+			// pixeldrain'de ayrı bir item sayfası yok: liste yanıtı dosya
+			// id'lerini doğrudan taşıyor, zincir tek adım.
+			LayerResult{Layer: LayerItemPage, Status: StatusOK,
+				Detail: "pixeldrain'de ayrı item sayfası yok, zincir tek adım"},
+			// Ayrı bir CDN de yok: dosyalar sitenin kendi domaininden geliyor,
+			// yani izlenecek dönen bir host kümesi yok. Bu bir boşluk değil,
+			// sitenin mimarisi.
+			LayerResult{Layer: LayerCDN, Status: StatusOK,
+				Detail: "dosyalar site domaininden servis ediliyor, ayrı CDN yok"},
 		)
 	case layer == LayerTLS:
 		out = append(out, LayerResult{

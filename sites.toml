@@ -103,7 +103,12 @@ match_patterns = ["bunkr.*", "bunkrr.*"]
 
 # bunkr CDN host'ları dönüyor; bu liste bir kapı değil SİNYAL. Listede olmayan
 # bir host indirmeyi durdurmaz, doctor WARN basar ve "sites.toml'a ekle" der.
-cdn_patterns = []
+#
+# 2026-09-09'da tek bir albümde altı farklı host görüldü: c3bc-b, c3su-b,
+# c1be-b, c2ch-b, c2ri-b, c2rm-b, hepsi .cdn.cr altında. Tek tek saymak
+# anlamsız; joker kalıp doğru çözüm. Yeni bir kök domain çıkarsa doctor WARN
+# basıp söyleyecek.
+cdn_patterns = ["*.cdn.cr"]
 
 # Sayfa isteklerinde Referer YOK. İndirme isteğinin Referer'ı ise politikadan
 # değil PROTOKOLDEN geliyor: API endpoint'i get.bunkrr.su/file/<id> Referer'ını

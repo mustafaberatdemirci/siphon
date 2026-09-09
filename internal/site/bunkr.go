@@ -814,26 +814,38 @@ func (b *bunkr) diagnoseOne(ctx context.Context, canary string) []LayerResult {
 		Detail: fmt.Sprintf("%d adres", len(ips)), Evidence: strings.Join(ips, ", ")})
 
 	body, err := b.get(ctx, canary, "")
+	// Yanıt her durumda kaydedilir: kırılan sayfanın gövdesi asıl kanıt, ama
+	// çalışan gövde de gelecekteki diff'in referansı.
+	b.cfg.Recordln("canary.html", body)
+
 	switch {
 	case err == nil:
 		out = append(out,
 			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
 			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "challenge yok"},
-			LayerResult{Layer: LayerFetch, Status: StatusOK, Detail: "200"},
+			LayerResult{Layer: LayerFetch, Status: StatusOK,
+				Detail: fmt.Sprintf("200, %d KB", len(body)/1024)},
 		)
 		// Parse katmanı yalnızca canary bir ALBÜM sayfasıysa doğrulanabilir.
 		// Site kökü albumFiles taşımıyor; onu FAIL saymak doctor'ı yalancı
 		// yapar ve "parse kırıldı" diye yanlış yöne gönderir.
 		if !strings.Contains(u.Path, "/a/") {
-			out = append(out, LayerResult{Layer: LayerParse, Status: StatusWarn,
-				Detail:   "albüm canary'si yok, ayrıştırma doğrulanmadı",
-				Evidence: "canary_urls'e bir /a/<id> adresi ekle"})
-		} else if files, perr := parseAlbumFiles(string(body)); perr == nil {
-			out = append(out, LayerResult{Layer: LayerParse, Status: StatusOK,
-				Detail: fmt.Sprintf("albumFiles %d item buldu", len(files))})
-		} else {
+			out = append(out,
+				LayerResult{Layer: LayerParse, Status: StatusWarn,
+					Detail:   "albüm canary'si yok, ayrıştırma doğrulanmadı",
+					Evidence: "canary_urls'e bir /a/<id> adresi ekle"},
+				LayerResult{Layer: LayerItemPage, Status: StatusWarn,
+					Detail: "albüm canary'si yok, API zinciri doğrulanmadı"},
+				LayerResult{Layer: LayerCDN, Status: StatusWarn,
+					Detail: "albüm canary'si yok, CDN host'u görülmedi"},
+			)
+		} else if files, perr := parseAlbumFiles(string(body)); perr != nil {
 			out = append(out, LayerResult{Layer: LayerParse, Status: StatusFail,
 				Detail: "albumFiles ayrıştırılamadı", Evidence: perr.Error()})
+		} else {
+			out = append(out, LayerResult{Layer: LayerParse, Status: StatusOK,
+				Detail: fmt.Sprintf("albumFiles %d item buldu", len(files))})
+			out = append(out, b.diagnoseItemAndCDN(ctx, files)...)
 		}
 
 	default:
@@ -859,6 +871,48 @@ func (b *bunkr) diagnoseOne(ctx context.Context, canary string) []LayerResult {
 			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "DNS geçti"},
 			LayerResult{Layer: layer, Status: StatusFail, Detail: detail, Evidence: err.Error()},
 		)
+	}
+	return out
+}
+
+// diagnoseItemAndCDN, albüm canary'si varsa API zincirini ve CDN host'unu
+// doğrular.
+//
+// TEK item çözülür. doctor bir teşhis aracı; 200 item için 200 API çağrısı
+// atmak teşhisi cezaya çevirir ve rate limit'i kendi elinle tetikler.
+func (b *bunkr) diagnoseItemAndCDN(ctx context.Context, files []bunkrFile) []LayerResult {
+	var out []LayerResult
+
+	fileURL, _, err := b.resolveFileURL(ctx, files[0].ID)
+	if err != nil {
+		return append(out,
+			LayerResult{Layer: LayerItemPage, Status: StatusFail,
+				Detail: "API zinciri kırıldı", Evidence: collapseSpace(err.Error())},
+			LayerResult{Layer: LayerCDN, Status: StatusWarn,
+				Detail: "ItemPage kırıldığı için CDN host'u görülemedi"},
+		)
+	}
+	out = append(out, LayerResult{Layer: LayerItemPage, Status: StatusOK,
+		Detail: fmt.Sprintf("1/%d item çözüldü (örnekleme)", len(files))})
+
+	host := ""
+	if u, perr := url.Parse(fileURL); perr == nil {
+		host = u.Host
+	}
+	switch {
+	case host == "":
+		out = append(out, LayerResult{Layer: LayerCDN, Status: StatusFail,
+			Detail: "çözülen adreste host yok", Evidence: fileURL})
+	case MatchHost(host, b.cfg.CDNPatterns):
+		out = append(out, LayerResult{Layer: LayerCDN, Status: StatusOK,
+			Detail: "bilinen CDN host'u", Evidence: host})
+	default:
+		// CDN bir KAPI DEĞİL, SİNYAL. Bilinmeyen host indirmeyi durdurmaz;
+		// bunkr host'ları normal işleyişte dönüyor. Kapı yapmak, aracın sonra
+		// teşhis edeceği kırılmayı bizzat üretmek olurdu.
+		out = append(out, LayerResult{Layer: LayerCDN, Status: StatusWarn,
+			Detail:   "yeni CDN host'u, cdn_patterns'da yok",
+			Evidence: host + " (sites.toml'a ekle)"})
 	}
 	return out
 }
