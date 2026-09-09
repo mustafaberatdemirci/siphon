@@ -30,6 +30,13 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
+// İndiricinin nihai adın yanına yazdığı sonekler. Sabit olmaları önemli:
+// dosya adı sınırı bunlara yer ayırmak zorunda (bkz. Download).
+const (
+	partSuffix  = ".part"
+	stateSuffix = ".part.state"
+)
+
 // Validator türleri. Hangisinin kullanıldığı state'te saklanır çünkü
 // If-Range her ikisini de kabul eder ama anlamları farklıdır.
 const (
@@ -129,17 +136,33 @@ var ErrIncomplete = errors.New("indirme eksik")
 // ctx iptal edilirse `.part` ve `.part.state` tutarlı halde bırakılır ve
 // context hatası döner.
 func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item) error {
-	if it.Filename == "" {
-		return fmt.Errorf("dosya adı boş: %s", it.SourcePage)
+	// Temizleme BURADA yapılıyor, çağıranda değil: ad kuralları diske yazan
+	// kodla aynı yerde durmak zorunda, yoksa bir çağıran atlar ve ayrılmış bir
+	// aygıt adı veya 255 birim sınırını aşan bir bileşen diske sızar.
+	//
+	// claim()'den ÖNCE olmak zorunda: ad çakışma haritasının anahtarları diskte
+	// gerçekten oluşan adlarla aynı olmalı.
+	//
+	// Dosya adı 255'e DEĞİL, 255 eksi kendi soneklerimize sığdırılıyor: nihai
+	// adın yanına `.part` ve `.part.state` yazıyoruz ve o dosyalar da aynı
+	// bileşen sınırına tabi. 255'i nihai ada harcamak, `.part.state`'i 266
+	// birime çıkarıp NTFS'in isteği reddetmesi demek. Klasör adında böyle bir
+	// sonek olmadığı için o tam sınırı kullanabiliyor.
+	name := ComponentLimit(it.Filename, MaxComponentUTF16-utf16Len(stateSuffix))
+	if name == "" {
+		return fmt.Errorf("dosya adı kullanılamaz: %q (%s)", it.Filename, it.SourcePage)
 	}
+	it.Filename = name
+	it.Dir = Component(it.Dir) // boş kalabilir; kök demek
+
 	dir := filepath.Join(outRoot, it.Dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("klasör açılamadı: %w", err)
 	}
 
 	final := filepath.Join(dir, d.claim(dir, it))
-	part := final + ".part"
-	statePath := part + ".state"
+	part := final + partSuffix
+	statePath := final + stateSuffix
 
 	// Zaten tamamlanmışsa dokunma. done.jsonl adım 9'da gelecek; bu yalnızca
 	// aynı koşuda iki kez indirmeyi önleyen ucuz bir kontrol.

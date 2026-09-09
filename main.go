@@ -157,10 +157,8 @@ func run() int {
 				fmt.Fprintln(os.Stdout, it.URL)
 				return nil
 			}
-			// Tam Windows temizliği adım 5'te internal/dl/names.go'ya taşınacak.
-			it.Filename = safeName(it.Filename)
-			it.Dir = safeName(it.Dir)
-
+			// Windows ad temizliği dl.Download içinde yapılıyor: kural diske
+			// yazan kodla aynı yerde durmalı, burada değil.
 			if derr := down.Download(ctx, outDir, it); derr != nil {
 				if errors.Is(derr, context.Canceled) {
 					return derr
@@ -265,20 +263,4 @@ func readURLs(path string, args []string) ([]string, error) {
 		out = append(out, line)
 	}
 	return out, nil
-}
-
-// safeName, v0 için asgari yol güvenliğidir: bileşen ayırıcıları ve yol
-// kaçışları etkisizleştirilir. Windows'un ayrılmış adları (CON, PRN, ...),
-// sondaki nokta ve boşluk, 255 UTF-16 birim sınırı ve yinelenen ad soneki
-// adım 5'te internal/dl/names.go'da ele alınacak.
-func safeName(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" || s == "." || s == ".." {
-		return ""
-	}
-	s = strings.NewReplacer(
-		"/", "-", "\\", "-", ":", "-", "*", "-",
-		"?", "-", "\"", "-", "<", "-", ">", "-", "|", "-", "\x00", "",
-	).Replace(s)
-	return strings.TrimSpace(s)
 }
