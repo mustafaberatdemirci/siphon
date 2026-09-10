@@ -61,6 +61,14 @@ type Events struct {
 	// ItemResolved, --resolve-only modunda her item için.
 	ItemResolved func(it site.Item)
 
+	// ItemQueued, item çözülür çözülmez, indirme kuyruğuna girerken çağrılır.
+	//
+	// URLResolved'dan AYRI olmak zorunda: URLResolved bir URL'in TÜM item'ları
+	// bitince tetikleniyor, yani arayüz toplam sayıyı ancak iş bittikten sonra
+	// öğrenirdi ve ilerleme çubuğu koşu boyunca sıfırda kalırdı. Bu tam olarak
+	// kullanıcının bildirdiği hataydı.
+	ItemQueued func(it site.Item)
+
 	// ItemStarted, indirme kuyruğundan çıkıp gerçekten başladığında.
 	ItemStarted func(it site.Item)
 	// Progress, transfer sürerken periyodik. total bilinmiyorsa -1.
@@ -365,6 +373,11 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 				ev.ItemResolved(it)
 			}
 			return nil
+		}
+		// Kuyruğa girer girmez bildiriliyor: arayüz toplamı akış halinde
+		// öğrensin, işin sonunu beklemesin.
+		if ev.ItemQueued != nil {
+			ev.ItemQueued(it)
 		}
 		g.Go(func() error {
 			// Zaten indirilmiş mi? Kayda tek başına GÜVENİLMİYOR: dosyanın

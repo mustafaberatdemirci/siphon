@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -70,15 +71,28 @@ type ui struct {
 	rows    map[string]int // SourcePage -> satır numarası
 	total   int
 	done    int
+
+	// Hız ölçümü. perItem her dosyanın kendi hızını, overall koşunun toplam
+	// hızını tutuyor. bytesByKey, her dosyanın son bilinen kümülatif baytı;
+	// toplam bayt bunun üzerinden hesaplanıyor çünkü Progress kümülatif
+	// değer gönderiyor, artış değil.
+	perItem    map[string]*speedo
+	bytesByKey map[string]int64
+	totalBytes int64
+	overall    *speedo
+	startedAt  time.Time
 }
 
 func newUI(w fyne.Window) *ui {
 	u := &ui{
-		win:      w,
-		status:   binding.NewString(),
-		progress: binding.NewFloat(),
-		items:    binding.NewStringList(),
-		rows:     map[string]int{},
+		win:        w,
+		status:     binding.NewString(),
+		progress:   binding.NewFloat(),
+		items:      binding.NewStringList(),
+		rows:       map[string]int{},
+		perItem:    map[string]*speedo{},
+		bytesByKey: map[string]int64{},
+		overall:    &speedo{},
 	}
 	_ = u.status.Set("Hazır. Linkleri yapıştır ve İndir'e bas.")
 	return u
@@ -166,12 +180,22 @@ func (u *ui) openOutDir() {
 	if dir == "" {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		dialog.ShowError(err, u.win)
+	// Klasör SESSİZCE OLUŞTURULMUYOR. Eskiden MkdirAll çağrılıyordu ve bu,
+	// henüz hiçbir şey indirilmemişken düğmeye basıldığında boş bir klasör
+	// yaratıp açıyordu: kullanıcıya "düğme bozuk" gibi görünen davranış.
+	// Klasör yoksa sebebini söylemek daha dürüst.
+	fi, err := os.Stat(dir)
+	if err != nil {
+		_ = u.status.Set("Klasör henüz yok: " + dir + " — indirme başlayınca oluşacak.")
 		return
 	}
-	// Hata yutulmuyor ama kullanıcıya dialog açmak da abartı: klasör açılmazsa
-	// durum satırında söylenir.
+	if !fi.IsDir() {
+		_ = u.status.Set("Bu bir klasör değil: " + dir)
+		return
+	}
+
+	// explorer.exe BAŞARIDA BİLE 1 döndürüyor, bu yüzden çıkış kodu
+	// kontrol edilmiyor; yalnızca başlatma hatası anlamlı.
 	if err := exec.Command("explorer", dir).Start(); err != nil {
 		_ = u.status.Set("Klasör açılamadı: " + err.Error())
 	}
@@ -199,6 +223,11 @@ func (u *ui) start() {
 	u.rows = map[string]int{}
 	u.total = 0
 	u.done = 0
+	u.perItem = map[string]*speedo{}
+	u.bytesByKey = map[string]int64{}
+	u.totalBytes = 0
+	u.overall = &speedo{}
+	u.startedAt = time.Now()
 	u.mu.Unlock()
 
 	_ = u.items.Set(nil)
@@ -291,12 +320,15 @@ func (u *ui) events() run.Events {
 		Errorf: func(f string, a ...any) {
 			u.appendLine("  ! " + fmt.Sprintf(f, a...))
 		},
-		URLResolved: func(url string, items int) {
+		// ItemQueued, item çözülür çözülmez geliyor. Toplamı BURADAN saymak
+		// zorundayız: URLResolved bir URL'in tüm item'ları bitince tetikleniyor,
+		// yani onunla sayarsak ilerleme çubuğu koşu boyunca sıfırda kalır.
+		ItemQueued: func(it site.Item) {
 			u.mu.Lock()
-			u.total += items
-			total := u.total
+			u.total++
 			u.mu.Unlock()
-			_ = u.status.Set(fmt.Sprintf("%d dosya bulundu, indiriliyor...", total))
+			u.setRow(it, "⏳ "+shortName(it.Filename)+"  sırada")
+			u.refreshStatus()
 		},
 		ItemResolved: func(it site.Item) {
 			// Sadece listele modunda: adresi göster.
@@ -306,7 +338,9 @@ func (u *ui) events() run.Events {
 			u.setRow(it, "… "+shortName(it.Filename)+" başlıyor")
 		},
 		Progress: func(it site.Item, done, total int64) {
-			u.setRow(it, progressLine(it, done, total))
+			rate := u.trackBytes(it, done)
+			u.setRow(it, progressLine(it, done, total, rate))
+			u.refreshStatus()
 		},
 		ItemDone: func(it site.Item, res dl.Result) {
 			u.setRow(it, "✓ "+filepath.Base(res.Path)+"  ("+humanBytes(res.Size)+")")
@@ -331,15 +365,79 @@ func (u *ui) bump() {
 	if total > 0 {
 		_ = u.progress.Set(float64(done) / float64(total))
 	}
+	u.refreshStatus()
+}
+
+// trackBytes, bir item'ın kümülatif bayt sayısını işler ve o item'ın hızını
+// döndürür. Toplam bayt ve genel hız da burada güncelleniyor.
+//
+// Progress KÜMÜLATİF değer gönderiyor (artış değil), bu yüzden toplamı bulmak
+// için her item'ın son değerini saklayıp farkı almak gerekiyor.
+func (u *ui) trackBytes(it site.Item, done int64) float64 {
+	key := rowKey(it)
+	now := time.Now()
+
+	u.mu.Lock()
+	prev := u.bytesByKey[key]
+	delta := done - prev
+	if delta < 0 {
+		// İndirme baştan başlamış; toplamı geriye almak yerine bu item'ın
+		// katkısını sıfırlayıp yeniden sayıyoruz.
+		u.totalBytes -= prev
+		delta = done
+	}
+	u.bytesByKey[key] = done
+	u.totalBytes += delta
+	totalBytes := u.totalBytes
+
+	sp, ok := u.perItem[key]
+	if !ok {
+		sp = &speedo{}
+		u.perItem[key] = sp
+	}
+	overall := u.overall
+	u.mu.Unlock()
+
+	overall.update(totalBytes, now)
+	return sp.update(done, now)
+}
+
+// refreshStatus, durum satırını günceller: kaç dosya bitti, toplam ne kadar
+// indi, genel hız ne.
+func (u *ui) refreshStatus() {
+	u.mu.Lock()
+	done, total, bytes := u.done, u.total, u.totalBytes
+	overall := u.overall
+	u.mu.Unlock()
+
+	var b strings.Builder
+	if total > 0 {
+		fmt.Fprintf(&b, "%d/%d dosya", done, total)
+	} else {
+		b.WriteString("çözümleniyor...")
+	}
+	if bytes > 0 {
+		fmt.Fprintf(&b, "  ·  %s indirildi", humanBytes(bytes))
+	}
+	if r := humanRate(overall.rate()); r != "" {
+		fmt.Fprintf(&b, "  ·  %s", r)
+	}
+	_ = u.status.Set(b.String())
+}
+
+// rowKey, bir item'ın tekil anahtarı. SourcePage tekil; bazı medya yollarında
+// boş olabildiği için URL yedek.
+func rowKey(it site.Item) string {
+	if it.SourcePage != "" {
+		return it.SourcePage
+	}
+	return it.URL
 }
 
 // setRow, bir item'ın satırını günceller veya ekler.
 // Anahtar SourcePage: Index albümler arasında tekrar ediyor, SourcePage tekil.
 func (u *ui) setRow(it site.Item, line string) {
-	key := it.SourcePage
-	if key == "" {
-		key = it.URL
-	}
+	key := rowKey(it)
 
 	// Length() ile Append() AYNI kilit altında olmak zorunda. İkisinin arasında
 	// kilidi bırakmak, iki goroutine'in aynı uzunluğu okuyup aynı satırı
@@ -426,15 +524,27 @@ func parseLinks(text string) []string {
 	return out
 }
 
-func progressLine(it site.Item, done, total int64) string {
+func progressLine(it site.Item, done, total int64, rate float64) string {
 	name := shortName(it.Filename)
+
+	var b strings.Builder
 	if total <= 0 {
 		// Boyut bilinmiyor (Content-Length yok ve resolver da bildirmemiş).
 		// Yüzde uydurmak yerine ineni söylüyoruz.
-		return fmt.Sprintf("↓ %s  %s", name, humanBytes(done))
+		fmt.Fprintf(&b, "↓ %s  %s", name, humanBytes(done))
+	} else {
+		pct := int(float64(done) / float64(total) * 100)
+		fmt.Fprintf(&b, "↓ %s  %%%d  (%s / %s)", name, pct, humanBytes(done), humanBytes(total))
 	}
-	pct := int(float64(done) / float64(total) * 100)
-	return fmt.Sprintf("↓ %s  %%%d  (%s / %s)", name, pct, humanBytes(done), humanBytes(total))
+	if r := humanRate(rate); r != "" {
+		fmt.Fprintf(&b, "  %s", r)
+	}
+	if total > 0 {
+		if eta := humanETA(total-done, rate); eta != "" {
+			fmt.Fprintf(&b, "  kalan %s", eta)
+		}
+	}
+	return b.String()
 }
 
 func shortName(s string) string {
