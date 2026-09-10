@@ -27,9 +27,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
+
+// progressInterval, ilerleme bildirimlerinin en sık aralığı.
+//
+// 250 ms insan gözü için yeterince akıcı, arayüz için yeterince seyrek.
+// Her yazma turunda bildirmek saniyede binlerce güncelleme demek olurdu.
+const progressInterval = 250 * time.Millisecond
 
 // İndiricinin nihai adın yanına yazdığı sonekler. Sabit olmaları önemli:
 // dosya adı sınırı bunlara yer ayırmak zorunda (bkz. Download).
@@ -114,6 +121,13 @@ type Downloader struct {
 	// yalnızca API çağrılarını kapsadığı için burada ayrıca verilmesi gerekiyor.
 	UserAgent string
 
+	// Progress nil olabilir. Transfer sürerken periyodik çağrılır.
+	//
+	// total bilinmiyorsa -1 gelir (Content-Length yok ve resolver da boyut
+	// bildirmemiş). Çağrı sıklığı kasıtlı olarak sınırlı: gigabaytlık bir
+	// dosyada her 256 KB'da bir arayüz güncellemek arayüzü kilitler.
+	Progress func(it site.Item, done, total int64)
+
 	// claimed, aynı koşuda aynı klasörde aynı adı iki kez kullanmayı önler.
 	// bunkr albümlerinde yinelenen ad yaygın.
 	//
@@ -128,6 +142,14 @@ func (d *Downloader) logf(format string, a ...any) {
 	if d.Logf != nil {
 		d.Logf(format, a...)
 	}
+}
+
+// report, ilerleme bildirimini gönderir (Progress nil ise sessiz).
+func (d *Downloader) report(it site.Item, st State) {
+	if d.Progress == nil {
+		return
+	}
+	d.Progress(it, st.Offset, st.expectedTotal())
 }
 
 // validate, siteye özgü yanıt doğrulamasını uygular.
@@ -414,7 +436,7 @@ func (d *Downloader) attempt(
 			return false, st, err
 		}
 		st.Offset = 0
-		return d.stream(ctx, part, statePath, resp.Body, st, hasher)
+		return d.stream(ctx, part, statePath, resp.Body, st, hasher, it)
 
 	case http.StatusPartialContent:
 		if verr := d.validate(resp); verr != nil {
@@ -431,7 +453,7 @@ func (d *Downloader) attempt(
 		if total >= 0 {
 			st.TotalSize = total
 		}
-		return d.stream(ctx, part, statePath, resp.Body, st, hasher)
+		return d.stream(ctx, part, statePath, resp.Body, st, hasher, it)
 
 	case http.StatusRequestedRangeNotSatisfiable:
 		// 416 "tamamlandı" DEMEK DEĞİL; yalnızca "offset >= mevcut uzunluk"
@@ -475,7 +497,7 @@ func (d *Downloader) attempt(
 // stream, gövdeyi `.part`'a yazar ve hash'i ilerletir.
 func (d *Downloader) stream(
 	ctx context.Context, part, statePath string,
-	body io.Reader, st State, hasher hash.Hash,
+	body io.Reader, st State, hasher hash.Hash, it site.Item,
 ) (bool, State, error) {
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -485,6 +507,11 @@ func (d *Downloader) stream(
 		f.Close()
 		return false, st, err
 	}
+
+	// İlk bildirim hemen gidiyor: kullanıcı indirmenin BAŞLADIĞINI görmek
+	// zorunda, ilk 250 ms boyunca hiçbir şey olmuyor gibi görünmemeli.
+	d.report(it, st)
+	lastReport := time.Now()
 
 	buf := make([]byte, 256<<10)
 	for {
@@ -507,6 +534,10 @@ func (d *Downloader) stream(
 			}
 			hasher.Write(buf[:n])
 			st.Offset += int64(n)
+			if time.Since(lastReport) >= progressInterval {
+				d.report(it, st)
+				lastReport = time.Now()
+			}
 		}
 		if rerr == io.EOF {
 			break
@@ -526,6 +557,9 @@ func (d *Downloader) stream(
 		saveState(statePath, st, hasher)
 		return false, st, err
 	}
+	// Son bildirim: aralık yüzünden son parça atlanmış olabilir ve ilerleme
+	// çubuğunun %98'de kalması kullanıcıya "takıldı" der.
+	d.report(it, st)
 
 	// Beklenen boyut biliniyorsa eksik veri sessizce başarı sayılmaz.
 	if total := st.expectedTotal(); total >= 0 && st.Offset < total {

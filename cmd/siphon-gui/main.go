@@ -1,0 +1,474 @@
+// siphon-gui, Siphon'un pencereli arayüzüdür.
+//
+// İndirme mantığının TEK satırı burada değil: her şey internal/run'da ve komut
+// satırı sürümü de aynı hattı çağırıyor. Bu dosya yalnızca olan biteni ekrana
+// çeviriyor. Arayüzün motoru kopyalaması, iki sürümün zamanla farklı davranması
+// demek olurdu.
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
+
+	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	"github.com/mustafaberatdemirci/siphon/internal/doctor"
+	"github.com/mustafaberatdemirci/siphon/internal/run"
+	"github.com/mustafaberatdemirci/siphon/internal/site"
+	"github.com/mustafaberatdemirci/siphon/internal/store"
+)
+
+func main() {
+	a := app.New()
+	w := a.NewWindow("Siphon — pixeldrain & bunkr indirici")
+	w.Resize(fyne.NewSize(920, 680))
+
+	ui := newUI(w)
+	w.SetContent(container.NewAppTabs(
+		container.NewTabItem("İndir", ui.downloadTab()),
+		container.NewTabItem("Teşhis", ui.doctorTab()),
+	))
+
+	// Pencere kapanırken süren indirme iptal edilir: indirici .part'ı sync
+	// edip durumu yazar, yani yarım dosya bırakmaz ve sonraki koşu devam eder.
+	w.SetOnClosed(ui.cancel)
+
+	w.ShowAndRun()
+}
+
+type ui struct {
+	win fyne.Window
+
+	links    *widget.Entry
+	outDir   *widget.Entry
+	listOnly *widget.Check
+
+	startBtn *widget.Button
+	stopBtn  *widget.Button
+	openBtn  *widget.Button
+
+	status   binding.String
+	progress binding.Float
+	items    binding.StringList
+
+	doctorOut *widget.Entry
+	doctorBtn *widget.Button
+
+	mu      sync.Mutex
+	cancelF context.CancelFunc
+	rows    map[string]int // SourcePage -> satır numarası
+	total   int
+	done    int
+}
+
+func newUI(w fyne.Window) *ui {
+	u := &ui{
+		win:      w,
+		status:   binding.NewString(),
+		progress: binding.NewFloat(),
+		items:    binding.NewStringList(),
+		rows:     map[string]int{},
+	}
+	_ = u.status.Set("Hazır. Linkleri yapıştır ve İndir'e bas.")
+	return u
+}
+
+// ---------- İndir sekmesi ----------
+
+func (u *ui) downloadTab() fyne.CanvasObject {
+	u.links = widget.NewMultiLineEntry()
+	u.links.SetPlaceHolder("Linkleri buraya yapıştır — satır başına bir tane.\n" +
+		"https://pixeldrain.com/l/...\nhttps://bunkr.ws/a/...\n\n# ile başlayan satırlar yorumdur.")
+	u.links.Wrapping = fyne.TextWrapOff
+
+	u.outDir = widget.NewEntry()
+	u.outDir.SetText(defaultOutDir())
+	pick := widget.NewButton("Seç...", func() {
+		dialog.ShowFolderOpen(func(lu fyne.ListableURI, err error) {
+			if err != nil || lu == nil {
+				return
+			}
+			u.outDir.SetText(lu.Path())
+		}, u.win)
+	})
+
+	u.listOnly = widget.NewCheck("Sadece listele (indirme)", nil)
+
+	u.startBtn = widget.NewButton("İndir", u.start)
+	u.startBtn.Importance = widget.HighImportance
+	u.stopBtn = widget.NewButton("Durdur", u.cancel)
+	u.stopBtn.Disable()
+	u.openBtn = widget.NewButton("Klasörü aç", u.openOutDir)
+
+	statusLabel := widget.NewLabelWithData(u.status)
+	statusLabel.Wrapping = fyne.TextWrapWord
+	bar := widget.NewProgressBarWithData(u.progress)
+
+	list := widget.NewListWithData(u.items,
+		func() fyne.CanvasObject {
+			l := widget.NewLabel("")
+			l.Truncation = fyne.TextTruncateEllipsis
+			return l
+		},
+		func(di binding.DataItem, o fyne.CanvasObject) {
+			s, ok := di.(binding.String)
+			if !ok {
+				return
+			}
+			txt, _ := s.Get()
+			o.(*widget.Label).SetText(txt)
+		})
+
+	// Kaydırılabilir bir kap içinde: yükseklik sabit (150), genişlik pencereyle
+	// birlikte büyüyor. GridWrap ile sabitlemek pencere büyütüldüğünde kutunun
+	// dar kalmasına yol açıyordu.
+	linkBox := container.NewVScroll(u.links)
+	linkBox.SetMinSize(fyne.NewSize(0, 150))
+
+	top := container.NewVBox(
+		widget.NewLabel("Linkler"),
+		linkBox,
+		container.NewBorder(nil, nil, widget.NewLabel("Klasör"), pick, u.outDir),
+		container.NewHBox(u.startBtn, u.stopBtn, u.openBtn, u.listOnly),
+		statusLabel,
+		bar,
+	)
+	return container.NewBorder(top, nil, nil, nil, list)
+}
+
+// defaultOutDir, makul bir başlangıç klasörü seçer.
+func defaultOutDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		d := filepath.Join(home, "Downloads")
+		if fi, serr := os.Stat(d); serr == nil && fi.IsDir() {
+			return filepath.Join(d, "siphon")
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+func (u *ui) openOutDir() {
+	dir := strings.TrimSpace(u.outDir.Text)
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		dialog.ShowError(err, u.win)
+		return
+	}
+	// Hata yutulmuyor ama kullanıcıya dialog açmak da abartı: klasör açılmazsa
+	// durum satırında söylenir.
+	if err := exec.Command("explorer", dir).Start(); err != nil {
+		_ = u.status.Set("Klasör açılamadı: " + err.Error())
+	}
+}
+
+// ---------- Koşu ----------
+
+func (u *ui) start() {
+	urls := parseLinks(u.links.Text)
+	if len(urls) == 0 {
+		dialog.ShowInformation("Link yok",
+			"Önce en az bir link yapıştır. Satır başına bir link.", u.win)
+		return
+	}
+	outDir := strings.TrimSpace(u.outDir.Text)
+	if outDir == "" {
+		dialog.ShowInformation("Klasör yok", "Bir çıktı klasörü seç.", u.win)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	u.mu.Lock()
+	u.cancelF = cancel
+	u.rows = map[string]int{}
+	u.total = 0
+	u.done = 0
+	u.mu.Unlock()
+
+	_ = u.items.Set(nil)
+	_ = u.progress.Set(0)
+	_ = u.status.Set(fmt.Sprintf("%d link çözümleniyor...", len(urls)))
+	u.setRunning(true)
+
+	listOnly := u.listOnly.Checked
+
+	go func() {
+		defer cancel()
+		sum, err := run.Run(ctx, run.Options{
+			URLs:        urls,
+			OutDir:      outDir,
+			ResolveOnly: listOnly,
+		}, u.events())
+
+		fyne.Do(func() {
+			u.setRunning(false)
+			if err != nil {
+				// Kullanım/konfigürasyon hatası: koşu hiç başlamadı.
+				_ = u.status.Set("Hata: " + err.Error())
+				dialog.ShowError(err, u.win)
+				return
+			}
+			_ = u.status.Set(summaryLine(sum, listOnly))
+			if sum.ExitCode() == run.ExitOK && !listOnly {
+				_ = u.progress.Set(1)
+			}
+		})
+	}()
+}
+
+func (u *ui) cancel() {
+	u.mu.Lock()
+	c := u.cancelF
+	u.cancelF = nil
+	u.mu.Unlock()
+	if c != nil {
+		_ = u.status.Set("Durduruluyor... yarım dosyalar korunuyor, sonra devam edebilir.")
+		c()
+	}
+}
+
+func (u *ui) setRunning(running bool) {
+	if running {
+		u.startBtn.Disable()
+		u.stopBtn.Enable()
+	} else {
+		u.startBtn.Enable()
+		u.stopBtn.Disable()
+	}
+}
+
+// summaryLine, özeti tek satırlık insan diline çevirir.
+//
+// Çıkış kodu sözleşmesi burada da korunuyor: WARN benzeri durumlar "tamam"
+// demiyor, ama kısmi başarı da "başarısız" demiyor.
+func summaryLine(s run.Summary, listOnly bool) string {
+	if listOnly {
+		return fmt.Sprintf("Listeleme bitti: %d link, %d dosya bulundu.", s.URLs, s.Items)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Bitti: %d/%d dosya indi", s.Done, s.Items)
+	if s.Skipped > 0 {
+		fmt.Fprintf(&b, ", %d zaten vardı", s.Skipped)
+	}
+	if s.Failed > 0 {
+		fmt.Fprintf(&b, ", %d başarısız", s.Failed)
+	}
+	if s.SkippedURLs > 0 {
+		fmt.Fprintf(&b, ", %d link tanınmadı", s.SkippedURLs)
+	}
+	if s.Degraded > 0 {
+		fmt.Fprintf(&b, ", %d dosya indi ama kaydı yazılamadı", s.Degraded)
+	}
+	if s.Halted {
+		b.WriteString(" — koşu durduruldu")
+	}
+	return b.String()
+}
+
+// events, run paketinin olaylarını arayüze bağlar.
+//
+// Tüm geri çağrılar ARKA PLAN goroutine'lerinden geliyor. Veri bağlamaları
+// (binding) bunun için güvenli; doğrudan widget değiştiren her şey fyne.Do
+// içine alınıyor.
+func (u *ui) events() run.Events {
+	return run.Events{
+		Errorf: func(f string, a ...any) {
+			u.appendLine("  ! " + fmt.Sprintf(f, a...))
+		},
+		URLResolved: func(url string, items int) {
+			u.mu.Lock()
+			u.total += items
+			total := u.total
+			u.mu.Unlock()
+			_ = u.status.Set(fmt.Sprintf("%d dosya bulundu, indiriliyor...", total))
+		},
+		ItemResolved: func(it site.Item) {
+			// Sadece listele modunda: adresi göster.
+			u.appendLine(it.URL)
+		},
+		ItemStarted: func(it site.Item) {
+			u.setRow(it, "… "+shortName(it.Filename)+" başlıyor")
+		},
+		Progress: func(it site.Item, done, total int64) {
+			u.setRow(it, progressLine(it, done, total))
+		},
+		ItemDone: func(it site.Item, res dl.Result) {
+			u.setRow(it, "✓ "+filepath.Base(res.Path)+"  ("+humanBytes(res.Size)+")")
+			u.bump()
+		},
+		ItemFailed: func(it site.Item, err error) {
+			u.setRow(it, "✗ "+shortName(it.Filename)+"  — "+firstLine(err.Error()))
+			u.bump()
+		},
+		ItemSkipped: func(it site.Item, e store.Entry) {
+			u.setRow(it, "• "+shortName(e.Filename)+"  (zaten indirilmiş)")
+			u.bump()
+		},
+	}
+}
+
+func (u *ui) bump() {
+	u.mu.Lock()
+	u.done++
+	done, total := u.done, u.total
+	u.mu.Unlock()
+	if total > 0 {
+		_ = u.progress.Set(float64(done) / float64(total))
+	}
+}
+
+// setRow, bir item'ın satırını günceller veya ekler.
+// Anahtar SourcePage: Index albümler arasında tekrar ediyor, SourcePage tekil.
+func (u *ui) setRow(it site.Item, line string) {
+	key := it.SourcePage
+	if key == "" {
+		key = it.URL
+	}
+
+	// Length() ile Append() AYNI kilit altında olmak zorunda. İkisinin arasında
+	// kilidi bırakmak, iki goroutine'in aynı uzunluğu okuyup aynı satırı
+	// sahiplenmesi demek; sonuç, iki dosyanın tek satırı ezmesi. Bu yarışı
+	// TestSetRowIsConcurrentSafe yakaladı.
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	if row, ok := u.rows[key]; ok {
+		_ = u.items.SetValue(row, line)
+		return
+	}
+	row := u.items.Length()
+	u.rows[key] = row
+	_ = u.items.Append(line)
+}
+
+func (u *ui) appendLine(line string) { _ = u.items.Append(line) }
+
+// ---------- Teşhis sekmesi ----------
+
+func (u *ui) doctorTab() fyne.CanvasObject {
+	u.doctorOut = widget.NewMultiLineEntry()
+	u.doctorOut.Wrapping = fyne.TextWrapOff
+	u.doctorOut.SetText("Teşhis Et'e bas: her site için yedi katman kontrol edilir\n" +
+		"(DNS, TLS, Challenge, Fetch, Parse, ItemPage, CDN).")
+
+	u.doctorBtn = widget.NewButton("Teşhis Et", u.runDoctor)
+	u.doctorBtn.Importance = widget.HighImportance
+
+	return container.NewBorder(
+		container.NewHBox(u.doctorBtn),
+		nil, nil, nil,
+		u.doctorOut,
+	)
+}
+
+func (u *ui) runDoctor() {
+	u.doctorBtn.Disable()
+	u.doctorOut.SetText("Teşhis çalışıyor...")
+
+	go func() {
+		var out strings.Builder
+		cfgs, resolvers, err := run.Setup(run.Events{}, "", nil, nil)
+		if err != nil {
+			fyne.Do(func() {
+				u.doctorOut.SetText("Config hatası:\n" + err.Error())
+				u.doctorBtn.Enable()
+			})
+			return
+		}
+		named := make([]doctor.Named, 0, len(resolvers))
+		for i, r := range resolvers {
+			named = append(named, doctor.Named{Name: cfgs[i].Name, Resolver: r})
+		}
+		reports := doctor.Run(context.Background(), named)
+		worst := doctor.Format(&out, reports)
+		fmt.Fprintf(&out, "\nSonuç: %s\n", worst)
+		if worst == site.StatusWarn {
+			out.WriteString("UYARI başarısızlık değildir: bilinmeyen bir CDN host'u\n" +
+				"indirmeyi durdurmaz, sadece bildirilir.\n")
+		}
+
+		fyne.Do(func() {
+			u.doctorOut.SetText(out.String())
+			u.doctorBtn.Enable()
+		})
+	}()
+}
+
+// ---------- Yardımcılar ----------
+
+// parseLinks, metin alanını URL listesine çevirir.
+// Komut satırındaki -i dosyası ile AYNI kurallar: boş satır ve # atlanır.
+func parseLinks(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func progressLine(it site.Item, done, total int64) string {
+	name := shortName(it.Filename)
+	if total <= 0 {
+		// Boyut bilinmiyor (Content-Length yok ve resolver da bildirmemiş).
+		// Yüzde uydurmak yerine ineni söylüyoruz.
+		return fmt.Sprintf("↓ %s  %s", name, humanBytes(done))
+	}
+	pct := int(float64(done) / float64(total) * 100)
+	return fmt.Sprintf("↓ %s  %%%d  (%s / %s)", name, pct, humanBytes(done), humanBytes(total))
+}
+
+func shortName(s string) string {
+	s = filepath.Base(s)
+	const max = 60
+	if len([]rune(s)) <= max {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:max-3]) + "..."
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+func humanBytes(n int64) string {
+	if n < 0 {
+		return "? B"
+	}
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	v := float64(n)
+	for _, u := range units {
+		v /= unit
+		if v < unit {
+			return fmt.Sprintf("%.1f %s", v, u)
+		}
+	}
+	return fmt.Sprintf("%.1f PB", v/unit)
+}

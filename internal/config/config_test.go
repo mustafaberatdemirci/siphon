@@ -26,6 +26,27 @@ max_delay = "60s"
 max_elapsed = "10m"
 `
 
+// isolatedCwd, calisma dizinini bos bir klasore tasir.
+//
+// Neden gerekli: sites.toml artik internal/config altinda duruyor (iki binary
+// ayni gomulu kopyayi kullanabilsin diye). Testler bu paketin dizininde kostugu
+// icin locate() cwd'de O dosyayi buluyor ve "gomulu kopya kullanilsin" diyen
+// testler sessizce dis dosyayi okuyor. Izolasyon olmadan o testler dogru seyi
+// olcmez.
+//
+// chdir surec genelinde etkili oldugu icin bu testler paralel KOSMAMALI.
+func isolatedCwd(t *testing.T) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+}
+
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "sites.toml")
@@ -36,14 +57,14 @@ func writeTemp(t *testing.T, content string) string {
 }
 
 func TestLoadEmbeddedOnly(t *testing.T) {
+	isolatedCwd(t)
 	cfgs, src, err := Load([]byte(baseTOML), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	// Izole cwd'de dis config olamaz, yani bu artik kesin bir iddia.
 	if !src.Embedded {
-		// cwd'de sites.toml varsa bu test yaniltici olurdu; t.TempDir kullanmiyoruz
-		// cunku locate() cwd'ye bakiyor. Repo kokunde kosarsa src dis dosya olur.
-		t.Logf("dis config bulundu: %s", src)
+		t.Fatalf("gomulu kopya kullanilmadi: %s", src)
 	}
 	if len(cfgs) != 1 || cfgs[0].Name != "pixeldrain" {
 		t.Fatalf("beklenmeyen config: %+v", cfgs)
@@ -151,6 +172,7 @@ func TestMissingExplicitConfigIsUsageError(t *testing.T) {
 }
 
 func TestEmbeddedMissingSchemaVersion(t *testing.T) {
+	isolatedCwd(t)
 	_, _, err := Load([]byte("[[site]]\nname=\"a\"\ndomains=[\"a.com\"]\n"), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
 		t.Fatalf("gomulu kopyada schema_version zorunlu olmali, err=%v", err)
@@ -158,6 +180,7 @@ func TestEmbeddedMissingSchemaVersion(t *testing.T) {
 }
 
 func TestDurationsParsed(t *testing.T) {
+	isolatedCwd(t)
 	cfgs, _, err := Load([]byte(baseTOML), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -169,6 +192,7 @@ func TestDurationsParsed(t *testing.T) {
 }
 
 func TestBadDurationIsUsageError(t *testing.T) {
+	isolatedCwd(t)
 	bad := strings.Replace(baseTOML, `base_delay = "1s"`, `base_delay = "bir saniye"`, 1)
 	_, _, err := Load([]byte(bad), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
@@ -177,6 +201,7 @@ func TestBadDurationIsUsageError(t *testing.T) {
 }
 
 func TestBadRefererPolicyIsUsageError(t *testing.T) {
+	isolatedCwd(t)
 	bad := strings.Replace(baseTOML, `referer_policy = "none"`, `referer_policy = "her zaman"`, 1)
 	_, _, err := Load([]byte(bad), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
@@ -185,6 +210,7 @@ func TestBadRefererPolicyIsUsageError(t *testing.T) {
 }
 
 func TestEmptyDomainsIsUsageError(t *testing.T) {
+	isolatedCwd(t)
 	_, _, err := Load([]byte("schema_version = 1\n[[site]]\nname=\"a\"\n"), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
 		t.Fatalf("domains bos olamaz, err=%v", err)
@@ -192,6 +218,7 @@ func TestEmptyDomainsIsUsageError(t *testing.T) {
 }
 
 func TestDuplicateSiteNameIsUsageError(t *testing.T) {
+	isolatedCwd(t)
 	dup := baseTOML + "\n[[site]]\nname = \"pixeldrain\"\ndomains = [\"x.com\"]\n"
 	_, _, err := Load([]byte(dup), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
