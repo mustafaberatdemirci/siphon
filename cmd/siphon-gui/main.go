@@ -113,7 +113,9 @@ func (u *ui) downloadTab() fyne.CanvasObject {
 			if err != nil || lu == nil {
 				return
 			}
-			u.outDir.SetText(lu.Path())
+			// Path() EĞİK ÇİZGİLİ geliyor; normalize edilmeden kutuya yazılırsa
+			// "Klasörü aç" Belgeler'i açar. Ayrıntı normalizeDir'de.
+			u.outDir.SetText(normalizeDir(lu.Path()))
 		}, u.win)
 	})
 
@@ -161,6 +163,42 @@ func (u *ui) downloadTab() fyne.CanvasObject {
 	return container.NewBorder(top, nil, nil, nil, list)
 }
 
+// normalizeDir, kullanıcıdan veya klasör seçiciden gelen yolu Windows'un
+// beklediği biçime çevirir.
+//
+// ÖLÇÜLDÜ: Fyne'ın klasör seçicisi yolu URI'den türetiyor ve EĞİK ÇİZGİYLE
+// veriyor — "E:\x" seçince kutuya "E:/x" yazılıyor. Go'nun dosya çağrıları
+// eğik çizgiyi kabul ettiği için indirme doğru yere iniyor ve hata görünmez
+// kalıyor; ama explorer.exe kabul etmiyor. Yolu tanımayınca hata da vermiyor,
+// sessizce Belgeler klasörünü açıyor. Kullanıcının gördüğü davranış buydu.
+//
+// Clean ayrıca sondaki ayracı atıyor ve bu ikinci bir tuzağı kapatıyor:
+// "E:\x\" komut satırında explorer "E:\x\" olarak tırnaklanır, sondaki ters
+// çizgi kapanış tırnağını kaçırır ve explorer yine yolu tanımaz.
+//
+// Tırnaklar da soyuluyor: Windows'un "Yol olarak kopyala" komutu yolu
+// tırnak içinde veriyor ve yapıştıran herkes bunu fark etmiyor.
+func normalizeDir(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"`)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Çıplak sürücü harfi ("E:") SÜRÜCÜYE GÖRELİ bir yoldur, kökü değil:
+	// Clean onu "E:." yapar, yani "E: sürücüsünün geçerli dizini". Bu, işlem
+	// durumuna bağlı bir yer; klasör kutusuna "E:" yazan kimse bunu kastetmez.
+	// Kök olarak yorumluyoruz.
+	if len(s) == 2 && s[1] == ':' && isDriveLetter(s[0]) {
+		s += string(filepath.Separator)
+	}
+	return filepath.Clean(filepath.FromSlash(s))
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
 // defaultOutDir, makul bir başlangıç klasörü seçer.
 func defaultOutDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
@@ -176,7 +214,7 @@ func defaultOutDir() string {
 }
 
 func (u *ui) openOutDir() {
-	dir := strings.TrimSpace(u.outDir.Text)
+	dir := normalizeDir(u.outDir.Text)
 	if dir == "" {
 		return
 	}
@@ -192,6 +230,13 @@ func (u *ui) openOutDir() {
 	if !fi.IsDir() {
 		_ = u.status.Set("Bu bir klasör değil: " + dir)
 		return
+	}
+
+	// MUTLAK yola çevriliyor: göreli bir yol verilirse explorer onu KENDİ
+	// çalışma dizinine göre çözer, bizimkine göre değil; yani yanlış klasörü
+	// açar. Abs başarısız olursa elimizdekiyle devam etmek hiç denememekten iyi.
+	if abs, aerr := filepath.Abs(dir); aerr == nil {
+		dir = abs
 	}
 
 	// explorer.exe BAŞARIDA BİLE 1 döndürüyor, bu yüzden çıkış kodu
@@ -210,7 +255,7 @@ func (u *ui) start() {
 			"Önce en az bir link yapıştır. Satır başına bir link.", u.win)
 		return
 	}
-	outDir := strings.TrimSpace(u.outDir.Text)
+	outDir := normalizeDir(u.outDir.Text)
 	if outDir == "" {
 		dialog.ShowInformation("Klasör yok", "Bir çıktı klasörü seç.", u.win)
 		return

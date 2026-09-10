@@ -533,3 +533,71 @@ func TestStatusShowsLiveTotals(t *testing.T) {
 		t.Errorf("inen miktar yok: %q", got)
 	}
 }
+
+// --- Klasor yolu normalizasyonu ---
+
+// OLCULDU: Fyne'in klasor seciciden dondurdugu yol EGIK CIZGILI ("E:/x").
+// Go'nun dosya cagrilari bunu kabul ettigi icin indirme dogru yere iniyordu,
+// ama explorer.exe kabul etmiyor ve sessizce Belgeler klasorunu aciyordu.
+// Kullanicinin bildirdigi hata tam olarak buydu.
+func TestNormalizeDirConvertsPickerPathForExplorer(t *testing.T) {
+	const want = `E:\x`
+	got := normalizeDir("E:/x")
+	if got != want {
+		t.Fatalf("normalizeDir(%q) = %q, %q bekleniyordu: egik cizgili yol explorer'da Belgeler'i acar", "E:/x", got, want)
+	}
+}
+
+func TestNormalizeDirStripsTrailingSeparator(t *testing.T) {
+	// Sondaki ters cizgi komut satirinda kapanis tirnagini kacirir ve
+	// explorer yolu yine tanimaz.
+	const want = `E:\x`
+	if got := normalizeDir(`E:\x\`); got != want {
+		t.Errorf("normalizeDir = %q, %q bekleniyordu", got, want)
+	}
+	if got := normalizeDir("E:/x/"); got != want {
+		t.Errorf("normalizeDir = %q, %q bekleniyordu", got, want)
+	}
+}
+
+func TestNormalizeDirStripsQuotes(t *testing.T) {
+	// Windows'un "Yol olarak kopyala" komutu yolu tirnak icinde veriyor.
+	if got := normalizeDir(`"E:\x"`); got != `E:\x` {
+		t.Errorf("normalizeDir = %q, %q bekleniyordu", got, `E:\x`)
+	}
+	if got := normalizeDir(`  "E:\alt klasor"  `); got != `E:\alt klasor` {
+		t.Errorf("normalizeDir bosluklu yolu bozdu: %q", got)
+	}
+}
+
+func TestNormalizeDirEmpty(t *testing.T) {
+	for _, in := range []string{"", "   ", `""`} {
+		if got := normalizeDir(in); got != "" {
+			t.Errorf("normalizeDir(%q) = %q, bos bekleniyordu", in, got)
+		}
+	}
+}
+
+// Normalizasyon yolu BOZMAMALI: gecerli bir yol ayni kalmali.
+func TestNormalizeDirKeepsValidPath(t *testing.T) {
+	for _, in := range []string{`E:\x`, `C:\Users\musta\Downloads\siphon`, `\sunucu\pay\klasor`} {
+		if got := normalizeDir(in); got != in {
+			t.Errorf("normalizeDir(%q) = %q; gecerli yol degistirilmemeliydi", in, got)
+		}
+	}
+}
+
+// Kullanicinin gercek durumu: klasor secicide E: surucusunun kokunu sectiginde
+// Path() "E:/" donuyor. Ciplak "E:" ise SURUCUYE GORELI bir yol ("E: nin
+// gecerli dizini"); klasor kutusuna yazan kimse bunu kastetmez.
+func TestNormalizeDirDriveRoot(t *testing.T) {
+	if got := normalizeDir("E:/"); got != `E:\` {
+		t.Errorf("normalizeDir(\"E:/\") = %q, %q bekleniyordu", got, `E:\`)
+	}
+	if got := normalizeDir("E:"); got != `E:\` {
+		t.Errorf("normalizeDir(\"E:\") = %q, %q bekleniyordu; %q surucuye goreli yoldur", got, `E:\`, "E:.")
+	}
+	if got := normalizeDir(`e:`); got != `e:\` {
+		t.Errorf("normalizeDir kucuk harf surucu = %q", got)
+	}
+}
