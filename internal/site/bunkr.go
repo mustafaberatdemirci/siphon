@@ -27,24 +27,31 @@ const BunkrName = "bunkr"
 // 2026 itibarıyla apidl.bunkr.ru/api/_001_v2. Üçü de config'te çünkü bir
 // sonraki değişiklikte kod değiştirmek gerekmesin.
 const (
-	ExtraAPIEndpoint = "api_endpoint"
-	ExtraDLOrigin    = "dl_origin"
-	ExtraXORPrefix   = "xor_key_prefix"
+	ExtraAPIEndpoint  = "api_endpoint"
+	ExtraDLOrigin     = "dl_origin"
+	ExtraXORPrefix    = "xor_key_prefix"
+	ExtraSignEndpoint = "sign_endpoint"
 
-	defaultBunkrAPIEndpoint = "https://apidl.bunkr.ru/api/_001_v2"
-	defaultBunkrDLOrigin    = "https://get.bunkrr.su"
+	defaultBunkrAPIEndpoint = "https://dl.bunkr.cr/api/_001_v2"
+	defaultBunkrDLOrigin    = "https://dl.bunkr.cr"
 	defaultBunkrXORPrefix   = "SECRET_KEY_"
+
+	// İmza servisi. CDN, imzasız isteği dosyaya hiç bakmadan 403 ile
+	// reddediyor: var olan ve olmayan dosya için yanıt bayt bayt aynı.
+	// 2026-09-10 ölçümü.
+	defaultBunkrSignEndpoint = "https://glb-apisign.cdn.cr/sign"
 )
 
 // NewBunkr, registry'ye verilecek fabrikadır.
 func NewBunkr(cfg SiteConfig) Resolver {
 	cfg = cfg.WithDefaults()
 	b := &bunkr{
-		cfg:         cfg,
-		apiEndpoint: cfg.ExtraOr(ExtraAPIEndpoint, defaultBunkrAPIEndpoint),
-		dlOrigin:    strings.TrimRight(cfg.ExtraOr(ExtraDLOrigin, defaultBunkrDLOrigin), "/"),
-		xorPrefix:   cfg.ExtraOr(ExtraXORPrefix, defaultBunkrXORPrefix),
-		burned:      map[string]string{},
+		cfg:          cfg,
+		apiEndpoint:  cfg.ExtraOr(ExtraAPIEndpoint, defaultBunkrAPIEndpoint),
+		dlOrigin:     strings.TrimRight(cfg.ExtraOr(ExtraDLOrigin, defaultBunkrDLOrigin), "/"),
+		xorPrefix:    cfg.ExtraOr(ExtraXORPrefix, defaultBunkrXORPrefix),
+		signEndpoint: cfg.ExtraOr(ExtraSignEndpoint, defaultBunkrSignEndpoint),
+		burned:       map[string]string{},
 	}
 	// Rotasyon havuzu SOMUT domainlerden kurulur; joker girdiler yalnızca
 	// tanımaya yarar, rastgele seçilemez.
@@ -57,10 +64,11 @@ func NewBunkr(cfg SiteConfig) Resolver {
 }
 
 type bunkr struct {
-	cfg         SiteConfig
-	apiEndpoint string
-	dlOrigin    string
-	xorPrefix   string
+	cfg          SiteConfig
+	apiEndpoint  string
+	dlOrigin     string
+	xorPrefix    string
+	signEndpoint string
 
 	// Rotasyon durumu. Global DEĞİL (gallery-dl'de paket seviyesinde bir küme);
 	// resolver örneğine bağlı olması paralel testleri mümkün kılıyor.
@@ -541,10 +549,27 @@ func unquoteJS(v string) string {
 
 // ---------- API ve şifre çözme ----------
 
+// bunkrAPIResponse, indirme API'sinin yanıtı. İKİ biçim de karşılanıyor.
+//
+// Güncel biçim (dl.bunkr.cr) adresi parçalı veriyor: mediafiles + path.
+// Eski biçim (apidl.bunkr.ru) XOR ile şifrelenmiş tam adres veriyor ve
+// 2026-09-10 ölçümünde BAYAT bir yol döndürüyordu: aynı dosya için
+// ".../Castingcurvy---...m4v" derken güncel API ".../storage/media/..." diyor.
+// Eski dal yalnızca geriye dönük uyumluluk için duruyor.
 type bunkrAPIResponse struct {
+	MediaFiles string `json:"mediafiles"`
+	Path       string `json:"path"`
+	Original   string `json:"original"`
+
 	URL       string `json:"url"`
 	Encrypted bool   `json:"encrypted"`
 	Timestamp int64  `json:"timestamp"`
+}
+
+// bunkrSignResponse, imza servisinin yanıtı.
+type bunkrSignResponse struct {
+	Token string `json:"token"`
+	Ex    int64  `json:"ex"`
 }
 
 // resolveFileURL, bir data id için gerçek indirme adresini çözer.
@@ -588,20 +613,107 @@ func (b *bunkr) resolveFileURL(ctx context.Context, dataID string) (string, stri
 	if err := json.Unmarshal(body, &data); err != nil {
 		return "", "", Errorf(LayerItemPage, b.apiEndpoint, "API yanıtı JSON değil: %v", err)
 	}
-	if data.URL == "" {
-		return "", "", Errorf(LayerItemPage, dataID, "API url alanı boş")
+	// Boşluk denetimi rawFileURL'de: güncel biçimde "url" alanı YOK, adres
+	// mediafiles+path'ten kuruluyor. Burada url'e bakmak, çalışan yanıtı
+	// hatalı saymak olurdu.
+	rawURL, err := b.rawFileURL(data, dataID)
+	if err != nil {
+		return "", "", err
 	}
 
-	fileURL := data.URL
-	if data.Encrypted {
-		key := b.xorPrefix + strconv.FormatInt(data.Timestamp/3600, 10)
-		dec, err := decryptXOR(data.URL, []byte(key))
-		if err != nil {
-			return "", "", Errorf(LayerItemPage, dataID, "URL şifresi çözülemedi: %v", err)
-		}
-		fileURL = dec
+	// İMZA ZORUNLU. İmzasız adres, dosya var olsa bile 403 dönüyor.
+	signed, err := b.signURL(ctx, rawURL)
+	if err != nil {
+		return "", "", err
 	}
-	return fileURL, referer, nil
+	return signed, referer, nil
+}
+
+// rawFileURL, API yanıtından imzalanacak ham adresi kurar.
+func (b *bunkr) rawFileURL(data bunkrAPIResponse, dataID string) (string, error) {
+	if data.MediaFiles != "" && data.Path != "" {
+		raw := strings.TrimRight(data.MediaFiles, "/") + data.Path
+		if data.Original == "" {
+			return raw, nil
+		}
+		// n, CDN'in Content-Disposition'da kullandığı özgün ad. Sitenin
+		// kendisi de bunu imzadan ÖNCE ekliyor; imza yalnızca yola bakıyor,
+		// bu yüzden sıralama sonucu değiştirmiyor.
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", Errorf(LayerItemPage, dataID, "API adresi ayrıştırılamadı: %v", err)
+		}
+		q := u.Query()
+		q.Set("n", data.Original)
+		u.RawQuery = q.Encode()
+		return u.String(), nil
+	}
+
+	if data.URL == "" {
+		return "", Errorf(LayerItemPage, dataID, "API ne mediafiles/path ne de url verdi")
+	}
+	if !data.Encrypted {
+		return data.URL, nil
+	}
+	key := b.xorPrefix + strconv.FormatInt(data.Timestamp/3600, 10)
+	dec, err := decryptXOR(data.URL, []byte(key))
+	if err != nil {
+		return "", Errorf(LayerItemPage, dataID, "URL şifresi çözülemedi: %v", err)
+	}
+	return dec, nil
+}
+
+// signURL, CDN adresini imza servisinden aldığı token ile imzalar.
+//
+// Neden ayrı bir servis: CDN, imzasız GET'i dosyaya bakmadan reddediyor.
+// 2026-09-10 ölçümü: var olan dosya ile UYDURMA bir dosya adı için yanıt
+// bayt bayt aynı (403, aynı gövde, aynı başlıklar). Bu yüzden 403'e bakıp
+// "dosya silinmiş" demek YANLIŞ olurdu.
+//
+// Token süreli (ex alanı). Süresi dolduğunda indirici ResolveOne ile item'ı
+// yeniden çözüyor; Item.SourcePage'in zorunlu olmasının gerekçesi bu.
+func (b *bunkr) signURL(ctx context.Context, rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", Errorf(LayerCDN, rawURL, "adres ayrıştırılamadı: %v", err)
+	}
+
+	// Servise yolun ÇÖZÜLMÜŞ hali gidiyor: sitenin JS'i decodeURIComponent
+	// uygulayıp encodeURIComponent ile geri kodluyor. u.Path zaten çözülmüş
+	// haldir, QueryEscape de "/" dahil her şeyi kodlar.
+	endpoint := b.signEndpoint + "?path=" + url.QueryEscape(u.Path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", Errorf(LayerCDN, endpoint, "istek kurulamadı: %v", err)
+	}
+	if b.cfg.UserAgent != "" {
+		req.Header.Set("User-Agent", b.cfg.UserAgent)
+	}
+
+	resp, err := b.client().Do(req)
+	if err != nil {
+		return "", &LayerError{Layer: LayerCDN, Err: unwrapURLError(err), Evidence: endpoint}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	b.cfg.Recordln("sign", body)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", Errorf(LayerCDN, endpoint, "imza servisi HTTP %s", resp.Status)
+	}
+	var sig bunkrSignResponse
+	if err := json.Unmarshal(body, &sig); err != nil {
+		return "", Errorf(LayerCDN, endpoint, "imza yanıtı JSON değil: %v", err)
+	}
+	if sig.Token == "" {
+		return "", Errorf(LayerCDN, endpoint, "imza yanıtında token yok")
+	}
+
+	q := u.Query()
+	q.Set("token", sig.Token)
+	q.Set("ex", strconv.FormatInt(sig.Ex, 10))
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // decryptXOR, base64 ile kodlanmış veriyi anahtarla XOR'layıp çözer.

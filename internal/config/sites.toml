@@ -133,11 +133,21 @@ base_delay = "2s"
 max_delay = "60s"
 max_elapsed = "10m"
 
-# bunkr'ın en çok değişen üç değeri. 2025-02'de indirme adresi HTML'deki
-# <source src> alanındaydı; 2025-03'te get.bunkrr.su/api/vs oldu; 2026
-# itibarıyla apidl.bunkr.ru/api/_001_v2. Kod değiştirmeden güncellenebilmeleri
-# için config'te.
+# bunkr'ın en çok değişen değerleri. 2025-02'de indirme adresi HTML'deki
+# <source src> alanındaydı; 2025-03'te get.bunkrr.su/api/vs oldu; sonra
+# apidl.bunkr.ru/api/_001_v2; 2026-09-10 itibarıyla dl.bunkr.cr/api/_001_v2
+# ve AYRICA bir imza servisi. Kod değiştirmeden güncellenebilmeleri için
+# config'te.
+#
+# ÖLÇÜM 2026-09-10: apidl.bunkr.ru hâlâ 200 dönüyor ama BAYAT yol veriyor
+# (".../dosya.m4v" derken güncel API ".../storage/media/dosya.m4v" diyor).
+# Yani eski uca bakıp "çalışıyor" demek yanıltıcıydı; adres çözülüyor,
+# indirme 403 alıyordu.
+#
+# sign_endpoint OLMADAN her indirme 403 alır. CDN imzasız isteği dosyaya hiç
+# bakmadan reddediyor: var olmayan bir dosya adı için yanıt bayt bayt aynı.
 [site.extra]
-api_endpoint = "https://apidl.bunkr.ru/api/_001_v2"
-dl_origin = "https://get.bunkrr.su"
+api_endpoint = "https://dl.bunkr.cr/api/_001_v2"
+dl_origin = "https://dl.bunkr.cr"
+sign_endpoint = "https://glb-apisign.cdn.cr/sign"
 xor_key_prefix = "SECRET_KEY_"

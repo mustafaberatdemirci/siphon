@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -21,9 +22,10 @@ func bunkrCfg() SiteConfig {
 		RefererPolicy: RefererNone,
 		CanaryURLs:    []string{"https://bunkr.ws/"},
 		Extra: map[string]string{
-			ExtraAPIEndpoint: "https://api.test/api/v",
-			ExtraDLOrigin:    "https://get.test",
-			ExtraXORPrefix:   "SECRET_KEY_",
+			ExtraAPIEndpoint:  "https://api.test/api/v",
+			ExtraDLOrigin:     "https://get.test",
+			ExtraXORPrefix:    "SECRET_KEY_",
+			ExtraSignEndpoint: "https://sign.test/sign",
 		},
 	}.WithDefaults()
 }
@@ -424,10 +426,19 @@ func apiHandler(t *testing.T, wantReferer string) http.HandlerFunc {
 	}
 }
 
+// signHandler, imza servisini taklit eder. Gercek servis gibi yalnizca yola
+// bakip token uretiyor.
+func signHandler(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"token":"tok-` + strings.TrimPrefix(path, "/") + `","ex":1789054914}`))
+}
+
 func TestBunkrResolveAlbum(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
-		"bunkr.ws": albumHandler,
-		"api.test": apiHandler(t, "https://get.test/file/"),
+		"bunkr.ws":  albumHandler,
+		"api.test":  apiHandler(t, "https://get.test/file/"),
+		"sign.test": signHandler,
 	}}
 	b := newBunkr(t, rt)
 
@@ -450,8 +461,12 @@ func TestBunkrResolveAlbum(t *testing.T) {
 	if items[0].Filename != "Birinci Video - Özgür & Aslı.mp4" {
 		t.Errorf("Filename = %q", items[0].Filename)
 	}
-	if items[0].URL != "https://cdn.test/dosya.mp4" {
+	// URL IMZALI olmak zorunda: imzasiz adres CDN'de 403 aliyor.
+	if !strings.HasPrefix(items[0].URL, "https://cdn.test/dosya.mp4?") {
 		t.Errorf("URL = %q", items[0].URL)
+	}
+	if !strings.Contains(items[0].URL, "token=") || !strings.Contains(items[0].URL, "ex=") {
+		t.Errorf("URL imzasiz: %q", items[0].URL)
 	}
 	// SourcePage slug uzerinden kurulmali: ResolveOne buna bagli.
 	if items[0].SourcePage != "https://bunkr.ws/f/birinci-video-abc" {
@@ -475,7 +490,8 @@ func TestBunkrResolveAlbum(t *testing.T) {
 func TestBunkrResolveCollectsPerItemErrors(t *testing.T) {
 	calls := 0
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
-		"bunkr.ws": albumHandler,
+		"bunkr.ws":  albumHandler,
+		"sign.test": signHandler,
 		"api.test": func(w http.ResponseWriter, r *http.Request) {
 			calls++
 			if calls == 2 {
@@ -511,7 +527,8 @@ func TestBunkrResolveMediaAndResolveOne(t *testing.T) {
 		"bunkr.ws": func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(mediaPage))
 		},
-		"api.test": apiHandler(t, "https://get.test/file/99887766"),
+		"api.test":  apiHandler(t, "https://get.test/file/99887766"),
+		"sign.test": signHandler,
 	}}
 	b := newBunkr(t, rt)
 
@@ -629,5 +646,157 @@ func TestBunkrRedirectLoopIsBounded(t *testing.T) {
 	b := NewBunkr(cfg).(*bunkr)
 	if _, _, err := b.fetchWithRotation(context.Background(), "/dongu", ""); err == nil {
 		t.Fatal("sonsuz yonlendirme durdurulmali")
+	}
+}
+
+// --- Imzali indirme akisi (2026-09-10) ---
+
+// OLCULDU: CDN imzasiz GET'i dosyaya HIC BAKMADAN reddediyor. Var olan dosya
+// ile uydurma bir ad icin yanit bayt bayt ayni (403, ayni govde, ayni
+// basliklar). Bu yuzden imza zorunlu ve 403'e bakip "dosya silinmis" demek
+// yanlis olurdu.
+func TestBunkrSignsCurrentAPIShape(t *testing.T) {
+	var signedPath string
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mediafiles":"https://c1.test","path":"/storage/media/video-abc.mp4","original":"Gerçek Ad.mp4"}`))
+		},
+		"sign.test": func(w http.ResponseWriter, r *http.Request) {
+			signedPath = r.URL.Query().Get("path")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"abc123","ex":1789054914}`))
+		},
+	}}
+	b := newBunkr(t, rt)
+
+	got, _, err := b.resolveFileURL(context.Background(), "555")
+	if err != nil {
+		t.Fatalf("resolveFileURL: %v", err)
+	}
+
+	// Imza servisine yolun COZULMUS hali gitmeli.
+	if signedPath != "/storage/media/video-abc.mp4" {
+		t.Errorf("imzalanan yol = %q", signedPath)
+	}
+
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("uretilen URL ayristirilamadi: %v", err)
+	}
+	if u.Host != "c1.test" || u.Path != "/storage/media/video-abc.mp4" {
+		t.Errorf("adres yanlis kuruldu: %q", got)
+	}
+	q := u.Query()
+	if q.Get("token") != "abc123" {
+		t.Errorf("token = %q", q.Get("token"))
+	}
+	if q.Get("ex") != "1789054914" {
+		t.Errorf("ex = %q", q.Get("ex"))
+	}
+	// n, CDN'in Content-Disposition'da kullandigi ozgun ad.
+	if q.Get("n") != "Gerçek Ad.mp4" {
+		t.Errorf("n = %q", q.Get("n"))
+	}
+}
+
+// Eski bicim (XOR ile sifreli tam adres) hala calismali; o da imzalanmali.
+func TestBunkrSignsLegacyAPIShape(t *testing.T) {
+	plain := "https://c9.test/eski/dosya.mp4"
+	key := []byte("SECRET_KEY_0")
+	enc := make([]byte, len(plain))
+	for i := 0; i < len(plain); i++ {
+		enc[i] = plain[i] ^ key[i%len(key)]
+	}
+	body := `{"url":"` + base64.StdEncoding.EncodeToString(enc) + `","encrypted":true,"timestamp":0}`
+
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		},
+		"sign.test": signHandler,
+	}}
+	b := newBunkr(t, rt)
+
+	got, _, err := b.resolveFileURL(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("resolveFileURL: %v", err)
+	}
+	if !strings.HasPrefix(got, plain+"?") {
+		t.Errorf("eski bicim adresi bozuldu: %q", got)
+	}
+	if !strings.Contains(got, "token=") {
+		t.Errorf("eski bicim imzalanmadi: %q", got)
+	}
+}
+
+// Imza servisi dusrse indirme adresi UYDURULMAMALI: imzasiz adres nasilsa
+// 403 alir ve hata "403" olarak gorunup teshisi saptirir.
+func TestBunkrSignFailureIsAnError(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mediafiles":"https://c1.test","path":"/storage/media/x.mp4"}`))
+		},
+		"sign.test": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	}}
+	b := newBunkr(t, rt)
+
+	if _, _, err := b.resolveFileURL(context.Background(), "7"); err == nil {
+		t.Fatal("imza servisi 500 dondugunde hata bekleniyordu")
+	} else if l, ok := LayerOf(err); !ok || l != LayerCDN {
+		t.Errorf("katman = %v, %v bekleniyordu", l, LayerCDN)
+	}
+}
+
+func TestBunkrSignRejectsTokenlessResponse(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mediafiles":"https://c1.test","path":"/storage/media/x.mp4"}`))
+		},
+		"sign.test": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ex":123}`))
+		},
+	}}
+	b := newBunkr(t, rt)
+
+	if _, _, err := b.resolveFileURL(context.Background(), "7"); err == nil {
+		t.Fatal("token'siz imza yaniti hata vermeliydi")
+	}
+}
+
+// API ne yeni ne eski bicimde adres vermezse net hata.
+func TestBunkrEmptyAPIResponse(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		},
+		"sign.test": signHandler,
+	}}
+	b := newBunkr(t, rt)
+
+	if _, _, err := b.resolveFileURL(context.Background(), "7"); err == nil {
+		t.Fatal("bos yanit icin hata bekleniyordu")
+	}
+}
+
+// mediafiles sonunda "/" olsa bile yol ikiye katlanmamali.
+func TestBunkrRawURLJoinsCleanly(t *testing.T) {
+	b := NewBunkr(bunkrCfg()).(*bunkr)
+	got, err := b.rawFileURL(bunkrAPIResponse{
+		MediaFiles: "https://c1.test/",
+		Path:       "/storage/media/a.mp4",
+	}, "1")
+	if err != nil {
+		t.Fatalf("rawFileURL: %v", err)
+	}
+	if got != "https://c1.test/storage/media/a.mp4" {
+		t.Errorf("adres = %q", got)
 	}
 }
