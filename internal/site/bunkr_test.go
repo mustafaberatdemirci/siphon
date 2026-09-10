@@ -461,12 +461,9 @@ func TestBunkrResolveAlbum(t *testing.T) {
 	if items[0].Filename != "Birinci Video - Özgür & Aslı.mp4" {
 		t.Errorf("Filename = %q", items[0].Filename)
 	}
-	// URL IMZALI olmak zorunda: imzasiz adres CDN'de 403 aliyor.
-	if !strings.HasPrefix(items[0].URL, "https://cdn.test/dosya.mp4?") {
+	// URL artik HAM donuyor: imza indirme baslarken PrepareURL ile atiliyor.
+	if items[0].URL != "https://cdn.test/dosya.mp4" {
 		t.Errorf("URL = %q", items[0].URL)
-	}
-	if !strings.Contains(items[0].URL, "token=") || !strings.Contains(items[0].URL, "ex=") {
-		t.Errorf("URL imzasiz: %q", items[0].URL)
 	}
 	// SourcePage slug uzerinden kurulmali: ResolveOne buna bagli.
 	if items[0].SourcePage != "https://bunkr.ws/f/birinci-video-abc" {
@@ -487,6 +484,29 @@ func TestBunkrResolveAlbum(t *testing.T) {
 }
 
 // Tek item'in API cagrisi duserse album DUSMEMELI, ItemError toplanmali.
+// TEMBEL IMZA: cozumleme sirasinda imza servisine hic gidilmemeli. Aksi
+// halde atlanan ve yalnizca listelenen dosyalar icin de bosuna imza istenir,
+// ve kuyrugun sonundaki dosyanin tokeni sirasi gelmeden olur.
+func TestBunkrResolveDoesNotSign(t *testing.T) {
+	signCalls := 0
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"bunkr.ws": albumHandler,
+		"api.test": apiHandler(t, "https://get.test/file/"),
+		"sign.test": func(w http.ResponseWriter, r *http.Request) {
+			signCalls++
+			signHandler(w, r)
+		},
+	}}
+	b := newBunkr(t, rt)
+	if _, err := b.Resolve(context.Background(), "https://bunkr.ws/a/ABC123",
+		func(Item) error { return nil }); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if signCalls != 0 {
+		t.Fatalf("cozumleme sirasinda %d imza istegi gitti, 0 bekleniyordu", signCalls)
+	}
+}
+
 func TestBunkrResolveCollectsPerItemErrors(t *testing.T) {
 	calls := 0
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
@@ -670,9 +690,13 @@ func TestBunkrSignsCurrentAPIShape(t *testing.T) {
 	}}
 	b := newBunkr(t, rt)
 
-	got, _, err := b.resolveFileURL(context.Background(), "555")
+	raw, _, err := b.resolveFileURL(context.Background(), "555")
 	if err != nil {
 		t.Fatalf("resolveFileURL: %v", err)
+	}
+	got, err := b.PrepareURL(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("PrepareURL: %v", err)
 	}
 
 	// Imza servisine yolun COZULMUS hali gitmeli.
@@ -719,9 +743,13 @@ func TestBunkrSignsLegacyAPIShape(t *testing.T) {
 	}}
 	b := newBunkr(t, rt)
 
-	got, _, err := b.resolveFileURL(context.Background(), "42")
+	raw, _, err := b.resolveFileURL(context.Background(), "42")
 	if err != nil {
 		t.Fatalf("resolveFileURL: %v", err)
+	}
+	got, err := b.PrepareURL(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("PrepareURL: %v", err)
 	}
 	if !strings.HasPrefix(got, plain+"?") {
 		t.Errorf("eski bicim adresi bozuldu: %q", got)
@@ -745,7 +773,11 @@ func TestBunkrSignFailureIsAnError(t *testing.T) {
 	}}
 	b := newBunkr(t, rt)
 
-	if _, _, err := b.resolveFileURL(context.Background(), "7"); err == nil {
+	raw, _, err := b.resolveFileURL(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("resolveFileURL: %v", err)
+	}
+	if _, err := b.PrepareURL(context.Background(), raw); err == nil {
 		t.Fatal("imza servisi 500 dondugunde hata bekleniyordu")
 	} else if l, ok := LayerOf(err); !ok || l != LayerCDN {
 		t.Errorf("katman = %v, %v bekleniyordu", l, LayerCDN)
@@ -765,7 +797,11 @@ func TestBunkrSignRejectsTokenlessResponse(t *testing.T) {
 	}}
 	b := newBunkr(t, rt)
 
-	if _, _, err := b.resolveFileURL(context.Background(), "7"); err == nil {
+	raw, _, err := b.resolveFileURL(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("resolveFileURL: %v", err)
+	}
+	if _, err := b.PrepareURL(context.Background(), raw); err == nil {
 		t.Fatal("token'siz imza yaniti hata vermeliydi")
 	}
 }
@@ -798,5 +834,217 @@ func TestBunkrRawURLJoinsCleanly(t *testing.T) {
 	}
 	if got != "https://c1.test/storage/media/a.mp4" {
 		t.Errorf("adres = %q", got)
+	}
+}
+
+// OLCULDU: dosya adinda '#' varsa url.Parse onu fragment sanip yolu KESER.
+// Birlestirip ayristirmak yerine yol ALAN olarak atandigi icin ad korunuyor.
+// Bu bozulsaydi imza yanlis yola atilir ve CDN 403 donerdi -- "imza suresi
+// doldu" gibi gorunen, teshisi en zor hata sinifi.
+func TestBunkrRawURLKeepsSpecialCharsInPath(t *testing.T) {
+	b := NewBunkr(bunkrCfg()).(*bunkr)
+	for _, name := range []string{"/storage/media/track #3.mp4", "/storage/media/a?b.mp4"} {
+		got, err := b.rawFileURL(bunkrAPIResponse{MediaFiles: "https://c1.test", Path: name}, "1")
+		if err != nil {
+			t.Fatalf("rawFileURL(%q): %v", name, err)
+		}
+		u, perr := url.Parse(got)
+		if perr != nil {
+			t.Fatalf("uretilen adres ayristirilamadi: %v", perr)
+		}
+		if u.Fragment != "" {
+			t.Errorf("%q: dosya adinin kuyrugu fragment'e kacti (%q): %q", name, u.Fragment, got)
+		}
+		if u.Path != name {
+			t.Errorf("%q: imzalanacak yol bozuldu: %q", name, u.Path)
+		}
+	}
+}
+
+// Yol basinda "/" yoksa eklenmeli; aksi halde "@evil.tld/x" gibi bir deger
+// birlestirmede host'u degistirebilirdi.
+func TestBunkrRawURLForcesLeadingSlash(t *testing.T) {
+	b := NewBunkr(bunkrCfg()).(*bunkr)
+	got, err := b.rawFileURL(bunkrAPIResponse{MediaFiles: "https://c1.test", Path: "@evil.tld/x.mp4"}, "1")
+	if err != nil {
+		t.Fatalf("rawFileURL: %v", err)
+	}
+	u, _ := url.Parse(got)
+	if u.Host != "c1.test" {
+		t.Fatalf("host degisti: %q (%q)", u.Host, got)
+	}
+}
+
+// API https disinda bir taban verirse indirme sessizce duz metne dusmemeli.
+func TestBunkrRawURLRejectsNonHTTPSBase(t *testing.T) {
+	b := NewBunkr(bunkrCfg()).(*bunkr)
+	for _, base := range []string{"http://c1.test", "ftp://c1.test", "/yolsuz"} {
+		if got, err := b.rawFileURL(bunkrAPIResponse{MediaFiles: base, Path: "/x.mp4"}, "1"); err == nil {
+			t.Errorf("taban %q kabul edildi: %q", base, got)
+		}
+	}
+}
+
+// ex eksikse 0 yazilirdi; CDN duz 403 doner ve ClassifyStatus onu "imza
+// suresi doldu" sayardi. Yani kullanici yanlis hatayi gorurdu.
+func TestBunkrSignRejectsMissingExpiry(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"mediafiles":"https://c1.test","path":"/storage/media/x.mp4"}`))
+		},
+		"sign.test": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"token":"abc123"}`))
+		},
+	}}
+	b := newBunkr(t, rt)
+	raw, _, err := b.resolveFileURL(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("resolveFileURL: %v", err)
+	}
+	if got, err := b.PrepareURL(context.Background(), raw); err == nil {
+		t.Fatalf("ex'siz imza yaniti kabul edildi: %q", got)
+	}
+}
+
+// --record ile diske yazilan imza kaydinda token DEGERI bulunmamali:
+// dosyaya erisim veren sureli bir yetki ve kayitlar 0644 yaziliyor.
+func TestRedactTokenRemovesTheToken(t *testing.T) {
+	out := redactToken([]byte(`{"token":"gizli-deger-123","ex":1789054914}`))
+	if strings.Contains(string(out), "gizli-deger-123") {
+		t.Fatalf("token kayda yazildi: %s", out)
+	}
+	if !strings.Contains(string(out), "1789054914") {
+		t.Errorf("ex kaybedildi, teshis degeri dusuyor: %s", out)
+	}
+	// Ayristirilamayan govde (HTML hata sayfasi) oldugu gibi kalmali.
+	raw := []byte("<html>503</html>")
+	if string(redactToken(raw)) != string(raw) {
+		t.Errorf("hata govdesi bozuldu: %s", redactToken(raw))
+	}
+}
+
+// --- Yedek API ucu ---
+
+func fallbackCfg() SiteConfig {
+	cfg := bunkrCfg()
+	cfg.Extra[ExtraFallbackAPI] = "https://eskiapi.test/api/v"
+	cfg.Extra[ExtraLegacyPrefix] = "/storage/media"
+	return cfg
+}
+
+func newBunkrFallback(t *testing.T, rt *hostRouter) *bunkr {
+	t.Helper()
+	cfg := fallbackCfg()
+	cfg.HTTPClient = &http.Client{Transport: rt}
+	return NewBunkr(cfg).(*bunkr)
+}
+
+// legacyBody, eski ucun bicimini (XOR'lu tam adres) uretir.
+func legacyBody(plain string) string {
+	key := []byte("SECRET_KEY_0")
+	enc := make([]byte, len(plain))
+	for i := 0; i < len(plain); i++ {
+		enc[i] = plain[i] ^ key[i%len(key)]
+	}
+	return `{"url":"` + base64.StdEncoding.EncodeToString(enc) + `","encrypted":true,"timestamp":0}`
+}
+
+// OLCULDU: bu agda dl.bunkr.cr DNS seviyesinde ele geciriliyor. Birincil uca
+// ULASILAMIYORSA yedek uca dusulmeli, yoksa bunkr yalnizca VPN ile calisir.
+func TestBunkrFallsBackWhenPrimaryUnreachable(t *testing.T) {
+	rt := &hostRouter{
+		failures: map[string]error{"api.test": errors.New("baglanti zaman asimi")},
+		handlers: map[string]http.HandlerFunc{
+			"eskiapi.test": func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(legacyBody("https://c9.test/dosya.m4v")))
+			},
+		},
+	}
+	b := newBunkrFallback(t, rt)
+
+	got, _, err := b.resolveFileURL(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("yedek uca dusulmedi: %v", err)
+	}
+	// Eski uc depo on ekini vermiyor; eklenmis olmali.
+	if got != "https://c9.test/storage/media/dosya.m4v" {
+		t.Fatalf("adres = %q", got)
+	}
+}
+
+// Yedege dusme karari YAPISKAN olmali: aksi halde 40 dosyalik bir albumde
+// 40 kez zaman asimi beklenir ve arayuz dakikalarca donar.
+func TestBunkrFallbackDecisionIsSticky(t *testing.T) {
+	primaryTries := 0
+	rt := &hostRouter{
+		handlers: map[string]http.HandlerFunc{
+			"eskiapi.test": func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(legacyBody("https://c9.test/a.m4v")))
+			},
+		},
+	}
+	rt.failures = map[string]error{}
+	// api.test'e her dokunusu say: hostRouter.seen uzerinden.
+	b := newBunkrFallback(t, rt)
+	rt.failures["api.test"] = errors.New("zaman asimi")
+
+	for i := 0; i < 4; i++ {
+		if _, _, err := b.resolveFileURL(context.Background(), "1"); err != nil {
+			t.Fatalf("%d. cagri: %v", i, err)
+		}
+	}
+	for _, h := range rt.seen {
+		if strings.HasPrefix(h, "api.test") {
+			primaryTries++
+		}
+	}
+	if primaryTries != 1 {
+		t.Fatalf("birincil uc %d kez denendi, 1 bekleniyordu (karar yapiskan degil)", primaryTries)
+	}
+}
+
+// Sunucunun VERDIGI bir yanit yedegi tetiklememeli: "dosya silinmis" (400)
+// yedek ucta da silinmis olacak, tekrar denemek yalnizca gecikme uretir.
+func TestBunkrDoesNotFallBackOnRealAPIError(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"api.test": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+		},
+		"eskiapi.test": func(w http.ResponseWriter, r *http.Request) {
+			t.Error("400 alindiginda yedek uca gidilmemeliydi")
+			_, _ = w.Write([]byte(legacyBody("https://c9.test/a.m4v")))
+		},
+	}}
+	b := newBunkrFallback(t, rt)
+	if _, _, err := b.resolveFileURL(context.Background(), "1"); err == nil {
+		t.Fatal("400 icin hata bekleniyordu")
+	}
+}
+
+// On ek zaten varsa iki kez eklenmemeli.
+func TestBunkrLegacyPrefixNotDoubled(t *testing.T) {
+	b := NewBunkr(fallbackCfg()).(*bunkr)
+	got, err := b.applyLegacyPrefix("https://c9.test/storage/media/a.m4v", "1")
+	if err != nil {
+		t.Fatalf("applyLegacyPrefix: %v", err)
+	}
+	if got != "https://c9.test/storage/media/a.m4v" {
+		t.Fatalf("on ek ikilendi: %q", got)
+	}
+}
+
+// Imza servisi Cloudflare challenge donerse bu CDN hatasi degil CHALLENGE
+// olarak siniflanmali; yoksa kullanici config'e bakmaya gonderilir.
+func TestBunkrSignChallengeIsClassified(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"sign.test": forbidden,
+	}}
+	b := newBunkr(t, rt)
+	_, err := b.PrepareURL(context.Background(), "https://c1.test/storage/media/x.mp4")
+	if err == nil {
+		t.Fatal("challenge icin hata bekleniyordu")
+	}
+	if l, ok := LayerOf(err); !ok || l != LayerChallenge {
+		t.Errorf("katman = %v, %v bekleniyordu", l, LayerChallenge)
 	}
 }

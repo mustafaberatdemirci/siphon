@@ -14,25 +14,13 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
-// tempDir, Windows'ta t.TempDir() temizliğinin virüs tarayıcı yüzünden
-// "Dizin boş değil" ile patlamasını engelliyor.
+// tempDir, paylaşılan yardımcıya devrediyor (Windows dosya kilidi sorunu).
 func tempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "siphon-run-")
-	if err != nil {
-		t.Fatalf("geçici dizin: %v", err)
-	}
-	t.Cleanup(func() {
-		for i := 0; i < 10; i++ {
-			if err := os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	})
-	return dir
+	return testutil.TempDir(t)
 }
 
 // fakeResolver, yield'i çağırıp verilen item'ları döndürür. Gerçek resolver

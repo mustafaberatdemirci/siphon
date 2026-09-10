@@ -110,6 +110,14 @@ type Downloader struct {
 	Reresolve Reresolver
 	// Classify nil olabilir.
 	Classify Classifier
+	// PrepareURL nil olabilir. Isteğin TAM ÖNCESİNDE adresi hazırlar.
+	//
+	// Neden gerekli: bunkr'ın CDN'i süreli imza istiyor. Adresi çözümleme
+	// anında imzalamak, albümün tüm dosyalarını daha indirme başlamadan
+	// imzalamak demekti ve kuyruğun sonundaki dosyanın tokenı sırası gelmeden
+	// ölüyordu. Her DENEMEDE çağrıldığı için süresi dolmuş imza kendiliğinden
+	// tazeleniyor.
+	PrepareURL func(ctx context.Context, rawURL string) (string, error)
 	// Validate nil olabilir. Basarili bir yanitin GERCEKTEN istenen icerik
 	// olup olmadigini siteye ozgu bicimde dogrular.
 	//
@@ -393,7 +401,19 @@ func (d *Downloader) attempt(
 	ctx context.Context, part, statePath string,
 	it site.Item, st State, hasher hash.Hash,
 ) (bool, State, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, it.URL, nil)
+	// Adres isteğin tam öncesinde hazırlanıyor (imza gibi süreli parçalar
+	// için). Hata GEÇİCİ sayılıyor: imza servisi anlık düşmüş olabilir,
+	// dosyayla ilgili kalıcı bir sorun değil.
+	target := it.URL
+	if d.PrepareURL != nil {
+		prepared, perr := d.PrepareURL(ctx, target)
+		if perr != nil {
+			return false, st, Retryable(perr)
+		}
+		target = prepared
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return false, st, err
 	}

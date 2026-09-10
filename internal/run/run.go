@@ -56,8 +56,6 @@ type Events struct {
 	// LedgerOpened, kaydın yolunu ve içindeki item sayısını bildirir.
 	LedgerOpened func(path string, items, skippedLines int)
 
-	// URLResolved, bir URL çözüldüğünde toplam item sayısıyla çağrılır.
-	URLResolved func(url string, items int)
 	// ItemResolved, --resolve-only modunda her item için.
 	ItemResolved func(it site.Item)
 
@@ -286,9 +284,6 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 			continue
 		}
 		sum.ItemErrors += res.itemErrs
-		if ev.URLResolved != nil {
-			ev.URLResolved(u, res.count)
-		}
 		if res.skipped > 0 {
 			ev.infof("%s: %d item (%d zaten indirilmiş, atlandı)", u, res.count, res.skipped)
 		} else {
@@ -340,6 +335,11 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 	}
 	// bunkr 200 ile bakım placeholder'ı döndürebiliyor; durum kodu yeterli
 	// sinyal değil.
+	// Adresin isteğin tam öncesinde hazırlanması gerekiyorsa (bunkr'da süreli
+	// imza) indiriciye bağlanıyor.
+	if p, ok := r.(site.URLPreparer); ok {
+		down.PrepareURL = p.PrepareURL
+	}
 	if v, ok := r.(site.ResponseValidator); ok {
 		down.Validate = v.ValidateResponse
 	}

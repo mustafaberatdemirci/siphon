@@ -111,8 +111,9 @@ match_patterns = ["bunkr.*", "bunkrr.*"]
 cdn_patterns = ["*.cdn.cr"]
 
 # Sayfa isteklerinde Referer YOK. İndirme isteğinin Referer'ı ise politikadan
-# değil PROTOKOLDEN geliyor: API endpoint'i get.bunkrr.su/file/<id> Referer'ını
+# değil PROTOKOLDEN geliyor: API endpoint'i <dl_origin>/file/<id> Referer'ını
 # ve Origin'ini zorunlu kılıyor, bu yüzden Item.Headers'a açıkça yazılıyor.
+# Host'u buraya YAZMIYORUZ: dl_origin değiştiğinde bu yorum bayatlamasın.
 referer_policy = "none"
 
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
@@ -151,3 +152,19 @@ api_endpoint = "https://dl.bunkr.cr/api/_001_v2"
 dl_origin = "https://dl.bunkr.cr"
 sign_endpoint = "https://glb-apisign.cdn.cr/sign"
 xor_key_prefix = "SECRET_KEY_"
+
+# YEDEK UÇ. Birincil uca ULAŞILAMADIĞINDA kullanılıyor; sunucunun verdiği
+# gerçek bir yanıt (400 "silinmiş" gibi) yedeği tetiklemez.
+#
+# ÖLÇÜM 2026-09-10: bu bağlantıda dl.bunkr.cr operatör tarafından DNS
+# seviyesinde ele geçiriliyor (195.175.254.2 = engel sayfası, 443 yanıt
+# vermiyor), apidl.bunkr.ru ise açık. Yedek olmadan bunkr yalnızca VPN ile
+# çalışıyordu.
+fallback_api_endpoint = "https://apidl.bunkr.ru/api/_001_v2"
+
+# Yedek uç aynı dosya için ".../dosya.m4v" derken güncel uç
+# ".../storage/media/dosya.m4v" diyor; fark bu ön ek. Üç ayrı CDN düğümünde,
+# iki albümde imzalanıp 206 alınarak doğrulandı (2026-09-10). Yine de bir
+# TAHMİN: güncel uca ulaşılabildiğinde gerçek yolu sunucu söylüyor ve bu
+# değer hiç kullanılmıyor.
+legacy_path_prefix = "/storage/media"

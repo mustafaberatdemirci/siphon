@@ -24,17 +24,28 @@ const BunkrName = "bunkr"
 //
 // Bu üç değer bunkr'ın en çok değişen parçaları. 2025-02'de indirme adresi
 // HTML'deki <source src> alanındaydı; 2025-03'te get.bunkrr.su/api/vs oldu;
-// 2026 itibarıyla apidl.bunkr.ru/api/_001_v2. Üçü de config'te çünkü bir
-// sonraki değişiklikte kod değiştirmek gerekmesin.
+// sonra apidl.bunkr.ru/api/_001_v2; 2026-09-10 itibarıyla
+// dl.bunkr.cr/api/_001_v2 ve AYRICA zorunlu bir imza servisi. Dördü de
+// config'te çünkü bir sonraki değişiklikte kod değiştirmek gerekmesin.
 const (
 	ExtraAPIEndpoint  = "api_endpoint"
+	ExtraFallbackAPI  = "fallback_api_endpoint"
 	ExtraDLOrigin     = "dl_origin"
 	ExtraXORPrefix    = "xor_key_prefix"
 	ExtraSignEndpoint = "sign_endpoint"
+	ExtraLegacyPrefix = "legacy_path_prefix"
 
 	defaultBunkrAPIEndpoint = "https://dl.bunkr.cr/api/_001_v2"
 	defaultBunkrDLOrigin    = "https://dl.bunkr.cr"
 	defaultBunkrXORPrefix   = "SECRET_KEY_"
+
+	// Yedek uç: birincil uca ULAŞILAMADIĞINDA kullanılıyor. Bu ağda
+	// dl.bunkr.cr operatör tarafından DNS seviyesinde ele geçiriliyor,
+	// apidl.bunkr.ru ise açık (2026-09-10 ölçümü).
+	defaultBunkrFallbackAPI = "https://apidl.bunkr.ru/api/_001_v2"
+
+	// Eski ucun verdiği yola eklenecek depo ön eki. Ayrıntı applyLegacyPrefix'te.
+	defaultBunkrLegacyPrefix = "/storage/media"
 
 	// İmza servisi. CDN, imzasız isteği dosyaya hiç bakmadan 403 ile
 	// reddediyor: var olan ve olmayan dosya için yanıt bayt bayt aynı.
@@ -51,8 +62,24 @@ func NewBunkr(cfg SiteConfig) Resolver {
 		dlOrigin:     strings.TrimRight(cfg.ExtraOr(ExtraDLOrigin, defaultBunkrDLOrigin), "/"),
 		xorPrefix:    cfg.ExtraOr(ExtraXORPrefix, defaultBunkrXORPrefix),
 		signEndpoint: cfg.ExtraOr(ExtraSignEndpoint, defaultBunkrSignEndpoint),
+		fallbackAPI:  cfg.ExtraOr(ExtraFallbackAPI, defaultBunkrFallbackAPI),
+		legacyPrefix: strings.TrimRight(cfg.ExtraOr(ExtraLegacyPrefix, defaultBunkrLegacyPrefix), "/"),
 		burned:       map[string]string{},
 	}
+	// Tanınmayan extra anahtarı UYARILIYOR. ExtraOr eksik anahtarda sessizce
+	// koddaki varsayılana düşüyor, yani "sign_endpont" gibi bir yazım hatası
+	// hiçbir belirti vermeden yok sayılırdı: config'e yazdığın düzeltmenin
+	// uygulandığını sanırsın.
+	known := map[string]bool{
+		ExtraAPIEndpoint: true, ExtraFallbackAPI: true, ExtraDLOrigin: true,
+		ExtraXORPrefix: true, ExtraSignEndpoint: true, ExtraLegacyPrefix: true,
+	}
+	for k := range cfg.Extra {
+		if !known[k] {
+			cfg.Logln("bunkr: config'te tanınmayan extra anahtarı %q — yok sayılıyor (yazım hatası olabilir)", k)
+		}
+	}
+
 	// Rotasyon havuzu SOMUT domainlerden kurulur; joker girdiler yalnızca
 	// tanımaya yarar, rastgele seçilemez.
 	for _, d := range cfg.Domains {
@@ -69,6 +96,12 @@ type bunkr struct {
 	dlOrigin     string
 	xorPrefix    string
 	signEndpoint string
+	fallbackAPI  string
+	legacyPrefix string
+
+	// primaryDead, birincil API ucuna ulaşılamadığını işaretler. YAPIŞKAN:
+	// aksi halde albümdeki her dosya için ayrı ayrı zaman aşımı beklenirdi.
+	primaryDead bool
 
 	// Rotasyon durumu. Global DEĞİL (gallery-dl'de paket seviyesinde bir küme);
 	// resolver örneğine bağlı olması paralel testleri mümkün kılıyor.
@@ -572,20 +605,108 @@ type bunkrSignResponse struct {
 	Ex    int64  `json:"ex"`
 }
 
+// redactToken, --record ile diske yazılacak imza yanıtındaki token'ı siler.
+//
+// Token, dosyaya erişim veren süreli bir yetkidir ve kayıtlar 0644 ile
+// yazılıyor. Teşhis için yanıtın BİÇİMİ gerekli, değeri değil: uzunluğu
+// tutmak "token geldi mi, makul mü" sorusunu yanıtlamaya yetiyor.
+func redactToken(body []byte) []byte {
+	var sig bunkrSignResponse
+	if err := json.Unmarshal(body, &sig); err != nil {
+		// Ayrıştırılamıyorsa beklenen biçimde değil; token içerdiğini
+		// varsayıp tamamını saklamak yerine ham gövdeyi geçiriyoruz:
+		// hata gövdeleri (HTML, düz metin) teşhis için değerli.
+		return body
+	}
+	out, err := json.Marshal(struct {
+		TokenLen int   `json:"token_len"`
+		Ex       int64 `json:"ex"`
+	}{len(sig.Token), sig.Ex})
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // resolveFileURL, bir data id için gerçek indirme adresini çözer.
 //
 // Referer ve Origin ZORUNLU: endpoint bunları kontrol ediyor ve eksikse
 // reddediyor. gallery-dl'in 2025-02-27 commit'i bu ikisini birlikte ekledi.
+// İMZA BURADA ATILMIYOR. Adres ham dönüyor; imza indirme başlarken
+// PrepareURL ile alınıyor.
+//
+// Neden: token 2 saat yaşıyor (ölçüm) ama bir albümün TÜM item'ları çözümleme
+// anında imzalanırdı, oysa indirme aynı anda birkaç dosya sürüyor. Yavaş bir
+// bağlantıda kuyruğun sonundaki dosyanın tokenı sırası gelmeden ölür ve
+// kurtarma üç istek tutar. Ayrıca atlanan (zaten inmiş) ve yalnızca listelenen
+// dosyalar için imza istemek tamamen israftı.
 func (b *bunkr) resolveFileURL(ctx context.Context, dataID string) (string, string, error) {
 	referer := b.dlOrigin + "/file/" + url.PathEscape(dataID)
 
+	// Birincil uç bir kez ölü işaretlendiyse BİR DAHA DENENMİYOR. Denemek,
+	// albümdeki her dosya için ayrı bir zaman aşımı beklemek demekti: 40
+	// dosyalık bir albümde arayüz dakikalarca donardı.
+	primaryErr := error(nil)
+	if !b.primaryIsDead() {
+		data, err := b.callAPI(ctx, b.apiEndpoint, dataID, referer)
+		if err == nil {
+			rawURL, rerr := b.rawFileURL(data, dataID)
+			if rerr != nil {
+				return "", "", rerr
+			}
+			return rawURL, referer, nil
+		}
+		// Yedek uca YALNIZCA birincil uca ULAŞILAMADIĞINDA düşülüyor.
+		// "Dosya silinmiş" (400) gibi gerçek yanıtlar yedekle düzelmez.
+		if !b.markPrimaryDead(err) {
+			return "", "", err
+		}
+		primaryErr = err
+	}
+
+	fb, ferr := b.callAPI(ctx, b.fallbackAPI, dataID, referer)
+	if ferr != nil {
+		// Birincil hata daha bilgilendirici: asıl sorun ona ulaşılamaması.
+		if primaryErr != nil {
+			return "", "", primaryErr
+		}
+		return "", "", ferr
+	}
+	raw, rerr := b.rawFileURL(fb, dataID)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	fixed, rerr := b.applyLegacyPrefix(raw, dataID)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	return fixed, referer, nil
+}
+
+// primaryIsDead, birincil ucun elenmiş olup olmadığını söyler.
+func (b *bunkr) primaryIsDead() bool {
+	if b.fallbackAPI == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.primaryDead
+}
+
+// callAPI, indirme API'sine tek bir POST atar.
+func (b *bunkr) callAPI(ctx context.Context, endpoint, dataID, referer string) (bunkrAPIResponse, error) {
+	var zero bunkrAPIResponse
+	if endpoint == "" {
+		return zero, Errorf(LayerItemPage, dataID, "API ucu tanımlı değil")
+	}
+
 	payload, err := json.Marshal(map[string]string{"id": dataID})
 	if err != nil {
-		return "", "", err
+		return zero, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.apiEndpoint, strings.NewReader(string(payload)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(payload)))
 	if err != nil {
-		return "", "", Errorf(LayerItemPage, b.apiEndpoint, "istek kurulamadı: %v", err)
+		return zero, Errorf(LayerItemPage, endpoint, "istek kurulamadı: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Referer", referer)
@@ -596,56 +717,116 @@ func (b *bunkr) resolveFileURL(ctx context.Context, dataID string) (string, stri
 
 	resp, err := b.client().Do(req)
 	if err != nil {
-		return "", "", &LayerError{Layer: LayerItemPage, Err: unwrapURLError(err), Evidence: b.apiEndpoint}
+		return zero, &LayerError{Layer: LayerItemPage, Err: unwrapURLError(err), Evidence: endpoint}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode == http.StatusBadRequest {
 		// gallery-dl bu durumu "albüm silinmiş" olarak yorumluyor.
-		return "", "", Errorf(LayerItemPage, dataID, "API 400: albüm veya dosya silinmiş olabilir")
+		return zero, Errorf(LayerItemPage, dataID, "API 400: albüm veya dosya silinmiş olabilir")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", Errorf(LayerItemPage, b.apiEndpoint, "API HTTP %s", resp.Status)
+		return zero, Errorf(LayerItemPage, endpoint, "API HTTP %s", resp.Status)
 	}
 
 	var data bunkrAPIResponse
 	if err := json.Unmarshal(body, &data); err != nil {
-		return "", "", Errorf(LayerItemPage, b.apiEndpoint, "API yanıtı JSON değil: %v", err)
+		return zero, Errorf(LayerItemPage, endpoint, "API yanıtı JSON değil: %v", err)
 	}
-	// Boşluk denetimi rawFileURL'de: güncel biçimde "url" alanı YOK, adres
-	// mediafiles+path'ten kuruluyor. Burada url'e bakmak, çalışan yanıtı
-	// hatalı saymak olurdu.
-	rawURL, err := b.rawFileURL(data, dataID)
-	if err != nil {
-		return "", "", err
-	}
+	return data, nil
+}
 
-	// İMZA ZORUNLU. İmzasız adres, dosya var olsa bile 403 dönüyor.
-	signed, err := b.signURL(ctx, rawURL)
-	if err != nil {
-		return "", "", err
+// markPrimaryDead, birincil uçtaki hatanın yedek ucu gerektirip
+// gerektirmediğine karar verir ve gerekiyorsa ucu KALICI olarak eler.
+//
+// ÖLÇÜM 2026-09-10: bu ağda dl.bunkr.cr DNS seviyesinde ele geçiriliyor
+// (195.175.254.2 = operatörün engel sayfası, 443'te yanıt yok).
+func (b *bunkr) markPrimaryDead(err error) bool {
+	if b.fallbackAPI == "" {
+		return false
 	}
-	return signed, referer, nil
+	// Yalnızca BAĞLANTI hataları yedeği tetikler; sunucunun verdiği bir yanıt
+	// (400, 404, 500) yedekle düzelmez.
+	if _, ok := burnReason(err); !ok {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.primaryDead {
+		b.primaryDead = true
+		b.cfg.Logln("bunkr: %s uca ulaşılamıyor (%v), yedek uca geçiliyor: %s",
+			b.apiEndpoint, unwrapURLError(err), b.fallbackAPI)
+	}
+	return true
+}
+
+// applyLegacyPrefix, eski ucun verdiği yola depo ön ekini ekler.
+//
+// Eski uç aynı dosya için ".../dosya.m4v" derken güncel uç
+// ".../storage/media/dosya.m4v" diyor. Ön ek ÖLÇÜMLE doğrulandı: 2026-09-10'da
+// üç ayrı CDN düğümünde, iki ayrı albümde imzalanıp 206 alındı. Yine de bu bir
+// TAHMİN; güncel uca ulaşılabildiğinde gerçek yolu o söylediği için ön ek
+// yalnızca yedek yolda kullanılıyor.
+func (b *bunkr) applyLegacyPrefix(raw, dataID string) (string, error) {
+	if b.legacyPrefix == "" {
+		return raw, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", Errorf(LayerItemPage, dataID, "eski uç adresi ayrıştırılamadı: %v", err)
+	}
+	if strings.HasPrefix(u.Path, b.legacyPrefix+"/") {
+		return raw, nil
+	}
+	u.Path = b.legacyPrefix + u.Path
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+// PrepareURL, indirme tam başlarken adresi imzalar. site.URLPreparer.
+//
+// Her denemede yeniden çağrıldığı için süresi dolmuş token kendiliğinden
+// tazeleniyor: 403 alıp item'ı baştan çözmeye gerek kalmıyor.
+func (b *bunkr) PrepareURL(ctx context.Context, rawURL string) (string, error) {
+	return b.signURL(ctx, rawURL)
 }
 
 // rawFileURL, API yanıtından imzalanacak ham adresi kurar.
 func (b *bunkr) rawFileURL(data bunkrAPIResponse, dataID string) (string, error) {
 	if data.MediaFiles != "" && data.Path != "" {
-		raw := strings.TrimRight(data.MediaFiles, "/") + data.Path
-		if data.Original == "" {
-			return raw, nil
-		}
-		// n, CDN'in Content-Disposition'da kullandığı özgün ad. Sitenin
-		// kendisi de bunu imzadan ÖNCE ekliyor; imza yalnızca yola bakıyor,
-		// bu yüzden sıralama sonucu değiştirmiyor.
-		u, err := url.Parse(raw)
+		// Taban ile yol BİRLEŞTİRİLİP ayrıştırılMIYOR. Dosya adında '#' veya
+		// '?' geçerse url.Parse onları fragment/query sanıp yolu KESER:
+		// "track #3.mp4" -> Path="/…/track ", Fragment="3.mp4". O zaman imza
+		// yanlış yola atılır ve CDN 403 döner — teşhisi en zor hata sınıfı,
+		// çünkü "imza süresi doldu" gibi görünür.
+		//
+		// Ayrıştırma yalnızca tabana uygulanıyor; yol ALAN olarak atanıyor ve
+		// kaçışı String() yapıyor. Bu ayrıca "@evil.tld/x" gibi bir path'in
+		// birleştirme sırasında host'u değiştirmesini de imkânsız kılıyor.
+		u, err := url.Parse(strings.TrimRight(data.MediaFiles, "/"))
 		if err != nil {
 			return "", Errorf(LayerItemPage, dataID, "API adresi ayrıştırılamadı: %v", err)
 		}
-		q := u.Query()
-		q.Set("n", data.Original)
-		u.RawQuery = q.Encode()
+		if u.Scheme != "https" || u.Host == "" {
+			return "", Errorf(LayerItemPage, dataID,
+				"API beklenmeyen indirme tabanı verdi: %q", data.MediaFiles)
+		}
+		p := data.Path
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		u.Path = p
+		u.RawPath = "" // kaçış Path'ten yeniden türetilsin
+
+		// n, CDN'in Content-Disposition'da kullandığı özgün ad. Sitenin
+		// kendisi de bunu imzadan ÖNCE ekliyor; imza yalnızca yola bakıyor,
+		// bu yüzden sıralama sonucu değiştirmiyor.
+		if data.Original != "" {
+			q := u.Query()
+			q.Set("n", data.Original)
+			u.RawQuery = q.Encode()
+		}
 		return u.String(), nil
 	}
 
@@ -696,9 +877,18 @@ func (b *bunkr) signURL(ctx context.Context, rawURL string) (string, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	b.cfg.Recordln("sign", body)
+	b.cfg.Recordln("sign.json", redactToken(body))
 
 	if resp.StatusCode != http.StatusOK {
+		// Challenge AYRI sınıflanıyor: "imza servisi 403" demek kullanıcıyı
+		// config'e bakmaya gönderirdi, oysa sorun Cloudflare.
+		if resp.StatusCode == http.StatusForbidden && looksLikeChallenge(resp, body) {
+			return "", &LayerError{
+				Layer:    LayerChallenge,
+				Err:      errors.New("imza servisi Cloudflare challenge döndürdü"),
+				Evidence: endpoint,
+			}
+		}
 		return "", Errorf(LayerCDN, endpoint, "imza servisi HTTP %s", resp.Status)
 	}
 	var sig bunkrSignResponse
@@ -707,6 +897,12 @@ func (b *bunkr) signURL(ctx context.Context, rawURL string) (string, error) {
 	}
 	if sig.Token == "" {
 		return "", Errorf(LayerCDN, endpoint, "imza yanıtında token yok")
+	}
+	// ex de DENETLENİYOR: eksikse 0 yazılır, CDN düz 403 döner ve
+	// ClassifyStatus onu "imza süresi doldu" sayar. Sonuç: aynı bozuk adres
+	// bir kez daha kurulup tekrar denenir ve kullanıcı yanlış hatayı görür.
+	if sig.Ex <= 0 {
+		return "", Errorf(LayerCDN, endpoint, "imza yanıtında geçerli ex yok")
 	}
 
 	q := u.Query()
@@ -997,11 +1193,21 @@ func (b *bunkr) diagnoseItemAndCDN(ctx context.Context, files []bunkrFile) []Lay
 
 	fileURL, _, err := b.resolveFileURL(ctx, files[0].ID)
 	if err != nil {
-		return append(out,
-			LayerResult{Layer: LayerItemPage, Status: StatusFail,
-				Detail: "API zinciri kırıldı", Evidence: collapseSpace(err.Error())},
+		// Hatanın KENDİ katmanı korunuyor. Her arızayı ItemPage'e yazmak,
+		// teşhisi yanlış yere gönderiyordu: imza servisi çökse bile kullanıcı
+		// api_endpoint'i kurcalamaya başlıyordu.
+		layer := LayerItemPage
+		if l, ok := LayerOf(err); ok {
+			layer = l
+		}
+		fail := LayerResult{Layer: layer, Status: StatusFail,
+			Detail: "API zinciri kırıldı", Evidence: collapseSpace(err.Error())}
+		if layer == LayerCDN || layer == LayerChallenge {
+			return append(out, fail)
+		}
+		return append(out, fail,
 			LayerResult{Layer: LayerCDN, Status: StatusWarn,
-				Detail: "ItemPage kırıldığı için CDN host'u görülemedi"},
+				Detail: "önceki katman kırıldığı için CDN host'u görülemedi"},
 		)
 	}
 	out = append(out, LayerResult{Layer: LayerItemPage, Status: StatusOK,

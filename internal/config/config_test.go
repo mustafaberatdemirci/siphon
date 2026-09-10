@@ -225,3 +225,33 @@ func TestDuplicateSiteNameIsUsageError(t *testing.T) {
 		t.Fatalf("ayni ad iki kez tanimlanamaz, err=%v", err)
 	}
 }
+
+// Gomulu config'teki bunkr uclari EKSIKSIZ olmali.
+//
+// ExtraOr eksik/bos anahtarda sessizce koddaki varsayilana duser; yani
+// "sign_endpont" gibi bir yazim hatasi hicbir belirti vermeden yok sayilir ve
+// config'e yazdigin duzeltmenin uygulandigini sanirsin.
+func TestEmbeddedBunkrExtrasAreComplete(t *testing.T) {
+	isolatedCwd(t)
+	cfgs, _, err := Load(Embedded, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var extra map[string]string
+	for _, c := range cfgs {
+		if c.Name == "bunkr" {
+			extra = c.Extra
+		}
+	}
+	if extra == nil {
+		t.Fatal("gomulu config'te bunkr yok")
+	}
+	for _, k := range []string{"api_endpoint", "fallback_api_endpoint", "dl_origin", "sign_endpoint"} {
+		if v := extra[k]; !strings.HasPrefix(v, "https://") {
+			t.Errorf("%s = %q; eksik veya yanlis anahtar sessizce varsayilana duser", k, v)
+		}
+	}
+	if p := extra["legacy_path_prefix"]; !strings.HasPrefix(p, "/") {
+		t.Errorf("legacy_path_prefix = %q, '/' ile baslamali", p)
+	}
+}

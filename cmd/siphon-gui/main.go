@@ -8,7 +8,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +82,6 @@ type ui struct {
 	bytesByKey map[string]int64
 	totalBytes int64
 	overall    *speedo
-	startedAt  time.Time
 }
 
 func newUI(w fyne.Window) *ui {
@@ -189,14 +190,13 @@ func normalizeDir(s string) string {
 	// Clean onu "E:." yapar, yani "E: sürücüsünün geçerli dizini". Bu, işlem
 	// durumuna bağlı bir yer; klasör kutusuna "E:" yazan kimse bunu kastetmez.
 	// Kök olarak yorumluyoruz.
-	if len(s) == 2 && s[1] == ':' && isDriveLetter(s[0]) {
+	//
+	// VolumeName girdinin TAMAMINA eşitse elde yalnızca sürücü harfi var
+	// demektir ("E:"). "E:\", "E:/x" ve UNC yolları eşit olmaz, dokunulmaz.
+	if s == filepath.VolumeName(s) {
 		s += string(filepath.Separator)
 	}
 	return filepath.Clean(filepath.FromSlash(s))
-}
-
-func isDriveLetter(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // defaultOutDir, makul bir başlangıç klasörü seçer.
@@ -224,7 +224,14 @@ func (u *ui) openOutDir() {
 	// Klasör yoksa sebebini söylemek daha dürüst.
 	fi, err := os.Stat(dir)
 	if err != nil {
-		_ = u.status.Set("Klasör henüz yok: " + dir + " — indirme başlayınca oluşacak.")
+		// YALNIZCA "yok" hatası "henüz oluşmadı" demektir. İzin reddi,
+		// geçersiz sürücü veya erişilemeyen ağ payı için aynı cümleyi kurmak
+		// doğrulanmamış bir şey iddia etmek olurdu.
+		if errors.Is(err, fs.ErrNotExist) {
+			_ = u.status.Set("Klasör henüz yok: " + dir + " — indirme başlayınca oluşacak.")
+		} else {
+			_ = u.status.Set("Klasöre erişilemedi: " + err.Error())
+		}
 		return
 	}
 	if !fi.IsDir() {
@@ -239,9 +246,16 @@ func (u *ui) openOutDir() {
 		dir = abs
 	}
 
+	// explorer TAM YOLLA çağrılıyor: çıplak ad %PATH% üzerinden çözülür ve
+	// yazılabilir bir PATH dizinine konan explorer.exe bu düğmeyle çalışırdı.
+	explorer := "explorer"
+	if root := os.Getenv("SystemRoot"); root != "" {
+		explorer = filepath.Join(root, "explorer.exe")
+	}
+
 	// explorer.exe BAŞARIDA BİLE 1 döndürüyor, bu yüzden çıkış kodu
 	// kontrol edilmiyor; yalnızca başlatma hatası anlamlı.
-	if err := exec.Command("explorer", dir).Start(); err != nil {
+	if err := exec.Command(explorer, dir).Start(); err != nil {
 		_ = u.status.Set("Klasör açılamadı: " + err.Error())
 	}
 }
@@ -272,7 +286,6 @@ func (u *ui) start() {
 	u.bytesByKey = map[string]int64{}
 	u.totalBytes = 0
 	u.overall = &speedo{}
-	u.startedAt = time.Now()
 	u.mu.Unlock()
 
 	_ = u.items.Set(nil)
@@ -376,8 +389,15 @@ func (u *ui) events() run.Events {
 			u.refreshStatus()
 		},
 		ItemResolved: func(it site.Item) {
-			// Sadece listele modunda: adresi göster.
+			// Sadece listele modu. Toplamı BURADAN da saymak zorundayız:
+			// ItemQueued yalnızca indirme yolunda tetikleniyor, yani
+			// listelerken durum satırı baştan sona "çözümleniyor..." kalırdı.
+			u.mu.Lock()
+			u.total++
+			u.done++
+			u.mu.Unlock()
 			u.appendLine(it.URL)
+			u.refreshStatus()
 		},
 		ItemStarted: func(it site.Item) {
 			u.setRow(it, "… "+shortName(it.Filename)+" başlıyor")

@@ -601,3 +601,25 @@ func TestNormalizeDirDriveRoot(t *testing.T) {
 		t.Errorf("normalizeDir kucuk harf surucu = %q", got)
 	}
 }
+
+// Sadece listele modunda run yalnizca ItemResolved gonderiyor. Arayuz
+// toplami ItemQueued'dan saydigi icin bu modda durum satiri bastan sona
+// "cozumleniyor..." kaliyordu.
+func TestListOnlyModeReportsFoundCount(t *testing.T) {
+	u := newUI(nil)
+	ev := u.events()
+	for i := 0; i < 3; i++ {
+		ev.ItemResolved(site.Item{
+			SourcePage: fmt.Sprintf("https://s.test/f/%d", i),
+			URL:        fmt.Sprintf("https://cdn.test/%d.bin", i),
+			Filename:   fmt.Sprintf("d%d.bin", i),
+		})
+	}
+	got, _ := u.status.Get()
+	if !strings.Contains(got, "3") {
+		t.Errorf("listeleme sirasinda bulunan dosya sayisi gorunmuyor: %q", got)
+	}
+	if strings.Contains(got, "çözümleniyor") {
+		t.Errorf("durum satiri hala 'cozumleniyor' diyor: %q", got)
+	}
+}

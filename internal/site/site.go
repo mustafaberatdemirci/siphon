@@ -290,6 +290,21 @@ type ResponseValidator interface {
 	ValidateResponse(resp *http.Response) error
 }
 
+// URLPreparer, indirme adresini isteğin TAM ÖNCESİNDE hazırlayan resolver'lar
+// için opsiyonel arayüzdür. İndirici bunu type assertion ile kullanıyor.
+//
+// Neden gerekli: bunkr'ın CDN'i imzalı adres istiyor ve imza süreli (2 saat).
+// Adresi çözümleme anında imzalamak, bir albümün tüm dosyalarını daha indirme
+// başlamadan imzalamak demekti; kuyruğun sonundaki dosyanın tokenı sırası
+// gelmeden ölüyordu. Ayrıca atlanan ve yalnızca listelenen dosyalar için de
+// boşuna imza isteniyordu.
+//
+// Her denemede yeniden çağrılır; bu yüzden süresi dolan token kendiliğinden
+// tazelenir ve item'ı baştan çözmek gerekmez.
+type URLPreparer interface {
+	PrepareURL(ctx context.Context, rawURL string) (string, error)
+}
+
 // Factory, config'i resolver'a enjekte eder.
 type Factory func(cfg SiteConfig) Resolver
 
