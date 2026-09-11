@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -621,5 +622,89 @@ func TestListOnlyModeReportsFoundCount(t *testing.T) {
 	}
 	if strings.Contains(got, "çözümleniyor") {
 		t.Errorf("durum satiri hala 'cozumleniyor' diyor: %q", got)
+	}
+}
+
+// --- "Klasoru ac" hedef secimi ---
+
+// Cikti koku "E:\" iken dosyalar album alt klasorune iniyor; koku acmak
+// kullaniciya "yanlis klasor" gorunuyordu. Sira: son inen dosya (secili) ->
+// baslayan albumun klasoru -> cikti koku.
+func TestPickOpenTargetPrefersLastFile(t *testing.T) {
+	root := t.TempDir()
+	album := filepath.Join(root, "Album")
+	if err := os.MkdirAll(album, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(album, "video.mp4")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target, sel, _ := pickOpenTarget(file, album, root)
+	if target != file || !sel {
+		t.Errorf("son dosya varken hedef = %q secili=%v; dosya ve secili bekleniyordu", target, sel)
+	}
+}
+
+func TestPickOpenTargetFallsBackToAlbumDir(t *testing.T) {
+	root := t.TempDir()
+	album := filepath.Join(root, "Album")
+	if err := os.MkdirAll(album, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Dosya tasinmis/silinmis: klasore dusmeli, koke degil.
+	target, sel, _ := pickOpenTarget(filepath.Join(album, "yok.mp4"), album, root)
+	if target != album || sel {
+		t.Errorf("hedef = %q secili=%v; album klasoru bekleniyordu", target, sel)
+	}
+}
+
+func TestPickOpenTargetFallsBackToRoot(t *testing.T) {
+	root := t.TempDir()
+	target, sel, _ := pickOpenTarget("", "", root)
+	if target != root || sel {
+		t.Errorf("hedef = %q secili=%v; cikti koku bekleniyordu", target, sel)
+	}
+}
+
+// Kok yoksa SESSIZCE OLUSTURULMAMALI; sebep soylenmeli.
+func TestPickOpenTargetMissingRootExplains(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "henuz-yok")
+	target, _, reason := pickOpenTarget("", "", missing)
+	if target != "" {
+		t.Errorf("olmayan kok icin hedef dondu: %q", target)
+	}
+	if !strings.Contains(reason, "henüz yok") {
+		t.Errorf("sebep = %q", reason)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Error("klasor sessizce olusturuldu")
+	}
+}
+
+// ItemStarted album klasorunu, ItemDone dosya yolunu kaydetmeli.
+func TestOpenTargetTracksRun(t *testing.T) {
+	u := newUI(nil)
+	u.mu.Lock()
+	u.runOutDir = `E:\`
+	u.mu.Unlock()
+	ev := u.events()
+
+	ev.ItemStarted(site.Item{SourcePage: "https://s.test/f/1", Filename: "a.mp4", Dir: "Albüm/Alt"})
+	u.mu.Lock()
+	dir := u.lastDir
+	u.mu.Unlock()
+	// Dir indiricinin temizledigi adla kurulmali ("/" -> "-").
+	if dir != filepath.Join(`E:\`, "Albüm-Alt") {
+		t.Errorf("lastDir = %q", dir)
+	}
+
+	ev.ItemDone(site.Item{SourcePage: "https://s.test/f/1"}, dl.Result{Path: `E:\Albüm-Alt\a.mp4`, Size: 1})
+	u.mu.Lock()
+	p, d := u.lastPath, u.lastDir
+	u.mu.Unlock()
+	if p != `E:\Albüm-Alt\a.mp4` || d != `E:\Albüm-Alt` {
+		t.Errorf("lastPath=%q lastDir=%q", p, d)
 	}
 }

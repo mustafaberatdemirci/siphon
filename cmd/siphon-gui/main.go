@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -82,6 +81,15 @@ type ui struct {
 	bytesByKey map[string]int64
 	totalBytes int64
 	overall    *speedo
+
+	// "Klasörü aç" için hedef. Çıktı kökü "E:\" iken dosyalar albüm alt
+	// klasörüne iniyor; kökü açmak kullanıcıya "yanlış klasör" görünüyordu.
+	// lastPath son inen dosya (seçili açılır), lastDir başlayan son albümün
+	// klasörü (henüz hiçbir şey inmediyse).
+	lastPath string
+	lastDir  string
+	// runOutDir, süren koşunun normalize edilmiş çıktı kökü.
+	runOutDir string
 }
 
 func newUI(w fyne.Window) *ui {
@@ -214,50 +222,58 @@ func defaultOutDir() string {
 }
 
 func (u *ui) openOutDir() {
-	dir := normalizeDir(u.outDir.Text)
-	if dir == "" {
-		return
-	}
-	// Klasör SESSİZCE OLUŞTURULMUYOR. Eskiden MkdirAll çağrılıyordu ve bu,
-	// henüz hiçbir şey indirilmemişken düğmeye basıldığında boş bir klasör
-	// yaratıp açıyordu: kullanıcıya "düğme bozuk" gibi görünen davranış.
-	// Klasör yoksa sebebini söylemek daha dürüst.
-	fi, err := os.Stat(dir)
-	if err != nil {
-		// YALNIZCA "yok" hatası "henüz oluşmadı" demektir. İzin reddi,
-		// geçersiz sürücü veya erişilemeyen ağ payı için aynı cümleyi kurmak
-		// doğrulanmamış bir şey iddia etmek olurdu.
-		if errors.Is(err, fs.ErrNotExist) {
-			_ = u.status.Set("Klasör henüz yok: " + dir + " — indirme başlayınca oluşacak.")
-		} else {
-			_ = u.status.Set("Klasöre erişilemedi: " + err.Error())
+	u.mu.Lock()
+	lastPath, lastDir := u.lastPath, u.lastDir
+	u.mu.Unlock()
+
+	target, selectFile, reason := pickOpenTarget(lastPath, lastDir, normalizeDir(u.outDir.Text))
+	if target == "" {
+		if reason != "" {
+			_ = u.status.Set(reason)
 		}
 		return
 	}
-	if !fi.IsDir() {
-		_ = u.status.Set("Bu bir klasör değil: " + dir)
-		return
-	}
-
-	// MUTLAK yola çevriliyor: göreli bir yol verilirse explorer onu KENDİ
-	// çalışma dizinine göre çözer, bizimkine göre değil; yani yanlış klasörü
-	// açar. Abs başarısız olursa elimizdekiyle devam etmek hiç denememekten iyi.
-	if abs, aerr := filepath.Abs(dir); aerr == nil {
-		dir = abs
-	}
-
-	// explorer TAM YOLLA çağrılıyor: çıplak ad %PATH% üzerinden çözülür ve
-	// yazılabilir bir PATH dizinine konan explorer.exe bu düğmeyle çalışırdı.
-	explorer := "explorer"
-	if root := os.Getenv("SystemRoot"); root != "" {
-		explorer = filepath.Join(root, "explorer.exe")
-	}
-
-	// explorer.exe BAŞARIDA BİLE 1 döndürüyor, bu yüzden çıkış kodu
-	// kontrol edilmiyor; yalnızca başlatma hatası anlamlı.
-	if err := exec.Command(explorer, dir).Start(); err != nil {
+	if err := openInExplorer(target, selectFile); err != nil {
 		_ = u.status.Set("Klasör açılamadı: " + err.Error())
 	}
+}
+
+// pickOpenTarget, "Klasörü aç" için en anlamlı hedefi seçer.
+//
+// Sıra: son inen dosya (klasöründe SEÇİLİ) -> başlayan albümün klasörü ->
+// çıktı kökü. Çıktı kökü "E:\" iken dosyalar "E:\Albüm\" altına indiği için
+// kökü açmak kullanıcıya "yanlış klasör açıldı" görünüyordu; IDM'in yaptığı
+// gibi dosyanın kendisine gitmek doğru davranış.
+//
+// Klasör SESSİZCE OLUŞTURULMUYOR: yoksa sebebi söyleniyor.
+func pickOpenTarget(lastPath, lastDir, outDir string) (target string, selectFile bool, reason string) {
+	if lastPath != "" {
+		if fi, err := os.Stat(lastPath); err == nil && !fi.IsDir() {
+			return lastPath, true, ""
+		}
+	}
+	if lastDir != "" {
+		if fi, err := os.Stat(lastDir); err == nil && fi.IsDir() {
+			return lastDir, false, ""
+		}
+	}
+	if outDir == "" {
+		return "", false, ""
+	}
+	fi, err := os.Stat(outDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", false, "Klasör henüz yok: " + outDir + " — indirme başlayınca oluşacak."
+	case err != nil:
+		return "", false, "Klasöre erişilemedi: " + err.Error()
+	case !fi.IsDir():
+		return "", false, "Bu bir klasör değil: " + outDir
+	}
+	// Göreli yol verilirse explorer onu KENDİ çalışma dizinine göre çözerdi.
+	if abs, aerr := filepath.Abs(outDir); aerr == nil {
+		outDir = abs
+	}
+	return outDir, false, ""
 }
 
 // ---------- Koşu ----------
@@ -286,6 +302,9 @@ func (u *ui) start() {
 	u.bytesByKey = map[string]int64{}
 	u.totalBytes = 0
 	u.overall = &speedo{}
+	u.lastPath = ""
+	u.lastDir = ""
+	u.runOutDir = outDir
 	u.mu.Unlock()
 
 	_ = u.items.Set(nil)
@@ -400,6 +419,15 @@ func (u *ui) events() run.Events {
 			u.refreshStatus()
 		},
 		ItemStarted: func(it site.Item) {
+			// Albüm klasörü indiricinin kullandığı temizlenmiş adla kuruluyor;
+			// aksi halde "Klasörü aç" var olmayan bir yolu hedeflerdi.
+			u.mu.Lock()
+			dir := u.runOutDir
+			if d := dl.Component(it.Dir); d != "" {
+				dir = filepath.Join(dir, d)
+			}
+			u.lastDir = dir
+			u.mu.Unlock()
 			u.setRow(it, "… "+shortName(it.Filename)+" başlıyor")
 		},
 		Progress: func(it site.Item, done, total int64) {
@@ -408,6 +436,10 @@ func (u *ui) events() run.Events {
 			u.refreshStatus()
 		},
 		ItemDone: func(it site.Item, res dl.Result) {
+			u.mu.Lock()
+			u.lastPath = res.Path
+			u.lastDir = filepath.Dir(res.Path)
+			u.mu.Unlock()
 			u.setRow(it, "✓ "+filepath.Base(res.Path)+"  ("+humanBytes(res.Size)+")")
 			u.bump()
 		},
