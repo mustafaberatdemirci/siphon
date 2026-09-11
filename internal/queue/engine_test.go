@@ -621,3 +621,29 @@ func TestJobIDIsStable(t *testing.T) {
 func runEvents(errorf func(string)) run.Events {
 	return run.Events{Errorf: func(f string, a ...any) { errorf(fmt.Sprintf(f, a...)) }}
 }
+
+// Kullanici ayari site tavanini asamaz; 1 parcaliyi kapatir.
+func TestSetSegmentsRespectsSiteCap(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	cfg := site.SiteConfig{Name: "fake", MaxSegments: 3}.WithDefaults()
+	e, err := New(Options{Client: f.srv.Client(), Resolvers: []site.Resolver{&fakeResolver{f: f}}, Configs: []site.SiteConfig{cfg}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Varsayilan istek 4, tavan 3 -> etkin 3.
+	if got := e.workers["fake"].Down.Segments; got != 3 {
+		t.Errorf("varsayilanda etkin parca = %d, 3 bekleniyordu", got)
+	}
+	e.SetSegments(8)
+	if got := e.workers["fake"].Down.Segments; got != 3 {
+		t.Errorf("8 istenince etkin = %d, tavan 3 olmaliydi", got)
+	}
+	e.SetSegments(2)
+	if got := e.workers["fake"].Down.Segments; got != 2 {
+		t.Errorf("2 istenince etkin = %d", got)
+	}
+	e.SetSegments(0)
+	if got := e.workers["fake"].Down.Segments; got != 1 || e.Segments() != 1 {
+		t.Errorf("0 istenince etkin = %d, istek = %d; ikisi de 1 olmaliydi", got, e.Segments())
+	}
+}

@@ -65,6 +65,11 @@ type State struct {
 	// içi de diske yazılıyor. Çözücü yoksa boş.
 	DecoderState []byte `json:"decoder_state,omitempty"`
 
+	// Segments, parçalı indirmenin aralıkları ve her birinin ilerlemesi.
+	// Doluysa Offset anlamsızdır (0); toplam ilerleme parçaların toplamıdır.
+	// Tek akışlı durumla karışmasın diye prepare() bunu görünce sıfırlar.
+	Segments []Segment `json:"segments,omitempty"`
+
 	// TotalSize YALNIZCA sunucunun Content-Length'idir; bilinmiyorsa -1.
 	// resumable() buna bakar çünkü chunked yanıtta resume denenmez (tasarım
 	// kararı). Resolver'ın bildirdiği boyut ayrı tutulur, yoksa chunked
@@ -129,6 +134,16 @@ type Downloader struct {
 	Decode func(it site.Item, offset int64, saved []byte, r io.Reader) (site.DecodedStream, error)
 	// Throttle nil olabilir. Tüm indirmelerin paylaştığı bayt/saniye sınırı.
 	Throttle *Throttle
+
+	// Segments, dosya başına paralel bağlantı sayısı; 0 veya 1 tek akış.
+	// Boyut bilinmiyorsa, sunucu Range desteklemiyorsa, dosya
+	// MinSegmentSize'dan küçükse veya çözücü varsa kendiliğinden 1'e düşer.
+	Segments int
+	// MinSegmentSize, altında bölme yapılmayan boyut; 0 = DefaultMinSegmentSize.
+	MinSegmentSize int64
+	// AcquireExtra nil olabilir. Ek parça bağlantıları için host yuvası ister:
+	// en fazla want yuva, beklemeden. Host sınırı bağlantı sayısını sınırlar.
+	AcquireExtra func(rawURL string, want int) (got int, release func())
 	// Validate nil olabilir. Basarili bir yanitin GERCEKTEN istenen icerik
 	// olup olmadigini siteye ozgu bicimde dogrular.
 	//
@@ -280,6 +295,16 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		return Result{Path: final, Size: fi.Size()}, nil
 	}
 
+	// Parçalı yol prepare()'den ÖNCE: tek akışlı prepare, önceden
+	// boyutlandırılmış .part'ı "fazlalık" sanıp kırpardı.
+	if n := d.segmentsFor(it); n > 1 {
+		res, serr := d.segmented(ctx, final, part, statePath, it, n)
+		if !errors.Is(serr, errNoRangeSupport) {
+			return res, serr
+		}
+		d.logf("%s: tek akışla indiriliyor", filepath.Base(final))
+	}
+
 	st, hasher, err := d.prepare(part, statePath, it)
 	if err != nil {
 		return Result{}, err
@@ -393,6 +418,11 @@ func (d *Downloader) prepare(part, statePath string, it site.Item) (State, hash.
 		return fresh, sha256.New(), nil
 	}
 
+	if len(st.Segments) > 0 {
+		// Parçalı bir durum tek akışla sürdürülemez: parçalar dosyanın
+		// ortasına dağılmış, hash durumu yok. Sıfırdan başlamak tek güvenli yol.
+		return reset("parçalı durum tek akışla sürdürülemez")
+	}
 	if st.Offset <= 0 {
 		return reset("")
 	}
@@ -685,17 +715,22 @@ func mergeServerState(prev State, resp *http.Response) State {
 			st.TotalSize = n
 		}
 	}
+	st.Validator, st.ValidatorType = pickValidator(resp)
+	return st
+}
+
+// pickValidator, If-Range için kullanılacak doğrulayıcıyı seçer: güçlü ETag,
+// yoksa Last-Modified, o da yoksa hiçbiri (resume denenmez).
+func pickValidator(resp *http.Response) (string, string) {
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
 	switch {
 	case etag != "" && !strings.HasPrefix(etag, "W/"):
-		st.Validator, st.ValidatorType = etag, ValidatorETag
+		return etag, ValidatorETag
 	case resp.Header.Get("Last-Modified") != "":
-		st.Validator, st.ValidatorType = resp.Header.Get("Last-Modified"), ValidatorLastModified
+		return resp.Header.Get("Last-Modified"), ValidatorLastModified
 	default:
-		// İkisi de yoksa resume denenmez.
-		st.Validator, st.ValidatorType = "", ValidatorNone
+		return "", ValidatorNone
 	}
-	return st
 }
 
 // parseContentRange, "bytes 100-199/1234" biçimini çözer.

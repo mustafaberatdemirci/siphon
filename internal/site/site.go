@@ -164,6 +164,13 @@ type SiteConfig struct {
 	RefererPolicy string // none | item_page | origin
 	MaxConcurrent int
 
+	// MaxSegments, tek bir dosyanın en fazla kaç bağlantıyla çekilebileceği;
+	// 1 = parçalı indirme kapalı. Bu bir TAVAN: kullanıcı ayarı bunu aşamaz.
+	// Site başına çünkü kazanç ve risk siteye göre değişiyor: pixeldrain
+	// ücretsiz katmanda IP başına eşzamanlı bağlantı sayısını sınırlıyor, mega
+	// çözücü yüzünden zaten tek akış, bunkr'ın CDN'i aralık istekleriyle iyi.
+	MaxSegments int
+
 	// CanaryURLs bir LİSTEDİR, tek URL değil. Ölçüm, bunkr.cr'nin bu ağda
 	// operatör tarafından engellendiğini gösterdi; tek canary'ye bağlanan bir
 	// doctor, çalışır durumdaki siteyi "ölü" diye raporlardı. doctor çalışan
@@ -248,6 +255,9 @@ func (c SiteConfig) WithDefaults() SiteConfig {
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = DefaultMaxConcurrent
+	}
+	if c.MaxSegments == 0 {
+		c.MaxSegments = 1
 	}
 	if c.RefererPolicy == "" {
 		c.RefererPolicy = RefererNone

@@ -18,6 +18,10 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/store"
 )
 
+// DefaultSegments, kullanıcı ayarlamadıysa dosya başına istenen bağlantı.
+// Site tavanı (max_segments) bunu kırpıyor; pixeldrain ve mega'da 1.
+const DefaultSegments = 4
+
 // DefaultMaxActive, aynı anda indirilen iş sayısı. Site başına host sınırı
 // ayrıca uygulanıyor; bu genel bir tavan.
 const DefaultMaxActive = 3
@@ -65,6 +69,7 @@ type Engine struct {
 	ledgers   map[string]*store.Ledger      // outDir -> kayıt
 	pausedAll bool
 	closing   bool
+	segments  int // kullanıcının istediği bağlantı/dosya
 
 	wake chan struct{}
 
@@ -111,6 +116,9 @@ func New(opt Options) (*Engine, error) {
 		w.Down.Throttle = e.throttle
 		e.workers[cfg.Name] = w
 	}
+
+	// Varsayılan istek 4 bağlantı/dosya; site tavanları bunu kırpar.
+	e.SetSegments(DefaultSegments)
 
 	if opt.StatePath != "" {
 		jobs, err := load(opt.StatePath)
@@ -328,6 +336,32 @@ func (e *Engine) ClearFinished() {
 	e.jobs = kept
 	e.mu.Unlock()
 	e.scheduleSave()
+}
+
+// SetSegments, dosya başına istenen bağlantı sayısını ayarlar. Etkin değer
+// site tavanını (max_segments) aşamaz; 1 parçalı indirmeyi kapatır. Süren
+// indirmeler etkilenmez, sonraki başlayanlar yeni değeri kullanır.
+func (e *Engine) SetSegments(n int) {
+	if n < 1 {
+		n = 1
+	}
+	e.mu.Lock()
+	e.segments = n
+	e.mu.Unlock()
+	for _, w := range e.workers {
+		eff := n
+		if w.Cfg.MaxSegments > 0 && eff > w.Cfg.MaxSegments {
+			eff = w.Cfg.MaxSegments
+		}
+		w.Down.Segments = eff
+	}
+}
+
+// Segments, istenen bağlantı sayısı (site tavanları uygulanmadan).
+func (e *Engine) Segments() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.segments
 }
 
 // SetSpeedLimit, toplam bayt/saniye sınırını ayarlar; 0 kaldırır.

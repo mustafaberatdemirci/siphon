@@ -42,6 +42,12 @@ user_agent = "siphon/0.1 (+https://github.com/mustafaberatdemirci/siphon)"
 # hatasını kendi elinle tetiklememek için düşük tutuluyor.
 max_concurrent = 3
 
+# Parçalı indirme KAPALI: pixeldrain'in belgesi ücretsiz indirmede "IP başına
+# eşzamanlı bağlantı sayısı" sınırı olduğunu söylüyor; tek dosyayı 4 bağlantıyla
+# çekmek o sınırı kendi elinle tetiklemek. Ücretli hesap + api_key ile dış
+# sites.toml'dan yükseltilebilir (örn. 4).
+max_segments = 1
+
 # Canary bir LİSTEDİR. Tek canary'ye bağlanan doctor, o domain engellenirse
 # çalışır durumdaki siteyi "ölü" raporlar. Ölçüm bunun bunkr'da gerçekten
 # olduğunu gösterdi.
@@ -145,6 +151,18 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # bunkr CDN'i pixeldrain'den toleranslı ama abartmanın anlamı yok.
 max_concurrent = 4
 
+# Parçalı indirme AÇIK, tavan 3. Ek parçalar host yuvalarına tabi olduğu için
+# bir host'a giden TOPLAM bağlantı hiçbir zaman max_concurrent'ı aşmıyor:
+# 4 dosya paralelken parça açılmaz, tek büyük dosya inerken parçalar ona gider.
+#
+# ÖLÇÜM 2026-09-11, 523 MB'lik dosya, aynı saat:
+#   4 bağlantı -> biri 503 aldı, uyarlanıp 3'e düştü, 113.8 sn (4.6 MB/s)
+#   1 bağlantı -> 120.1 sn (4.4 MB/s)
+# Yani bunkr CDN'i istemci başına TOPLAM hızı sınırlıyor; bağlantı sayısı
+# kazandırmıyor. Tavan 3: 4'te 503 yiyor, 3 temiz. Parçalı kalıyor çünkü
+# zararı yok ve CDN davranışı değişirse kazanç kendiliğinden gelir.
+max_segments = 3
+
 # Canary site kökü. Bir ALBÜM adresi eklersen doctor'ın Parse katmanı da
 # doğrulanır; kök sayfa albumFiles taşımadığı için şu an Parse WARN basıyor.
 canary_urls = [
@@ -215,6 +233,11 @@ user_agent = "siphon/0.1 (+https://github.com/mustafaberatdemirci/siphon)"
 # kotayı daha yavaş tüketmiyor ama 509 geldiğinde açık bağlantı sayısını
 # sınırlı tutuyor.
 max_concurrent = 2
+
+# Parçalı indirme KAPALI: içerik akış içinde çözülüyor ve bütünlük MAC'i
+# sıralı; çözücü varken indirici zaten tek akışa düşüyor. mega hız değil kota
+# sınırlı, parçalamanın kazandıracağı bir şey yok.
+max_segments = 1
 
 # Teşhis, API ucuna kasıtlı olarak geçersiz bir komut gönderir; negatif bir
 # sayı dönmesi "API ulaşılabilir ve konuşuyor" demektir. Gerçek bir dosya

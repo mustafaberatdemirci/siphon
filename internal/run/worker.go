@@ -58,13 +58,22 @@ func NewWorker(r site.Resolver, cfg site.SiteConfig, client *http.Client, ev Eve
 		down.Validate = v.ValidateResponse
 	}
 
+	// Sınır HOST başına: bir albüm birden fazla CDN host'una yayılabiliyor
+	// ve tek bir genel sayaç yanlış yerde daraltma yapar.
+	limiter := snet.NewHostLimiter(cfg.MaxConcurrent)
+
+	// Parçalı indirme: site tavanı kadar bağlantı; ek parçalar host
+	// yuvalarına tabi (beklemeden alınır, yoksa daha az parça).
+	down.Segments = cfg.MaxSegments
+	down.AcquireExtra = func(rawURL string, want int) (int, func()) {
+		return limiter.TryAcquire(snet.HostOf(rawURL), want)
+	}
+
 	return &Worker{
 		Resolver: r,
 		Cfg:      cfg,
 		Down:     down,
-		// Sınır HOST başına: bir albüm birden fazla CDN host'una yayılabiliyor
-		// ve tek bir genel sayaç yanlış yerde daraltma yapar.
-		Limiter: snet.NewHostLimiter(cfg.MaxConcurrent),
+		Limiter:  limiter,
 		Policy: snet.Policy{
 			MaxAttempts: cfg.MaxRetries,
 			MaxElapsed:  cfg.MaxElapsed,

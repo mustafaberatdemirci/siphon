@@ -49,6 +49,7 @@ type rawSite struct {
 	UserAgent     string `toml:"user_agent"`
 	RefererPolicy string `toml:"referer_policy"`
 	MaxConcurrent int    `toml:"max_concurrent"`
+	MaxSegments   int    `toml:"max_segments"`
 	DNSResolver   string `toml:"dns_resolver"`
 
 	MaxRetries int    `toml:"max_retries"`
@@ -210,6 +211,9 @@ func mergeSite(b, e rawSite) rawSite {
 	if e.MaxConcurrent != 0 {
 		b.MaxConcurrent = e.MaxConcurrent
 	}
+	if e.MaxSegments != 0 {
+		b.MaxSegments = e.MaxSegments
+	}
 	if e.MaxRetries != 0 {
 		b.MaxRetries = e.MaxRetries
 	}
@@ -322,6 +326,7 @@ func build(f file) ([]site.SiteConfig, error) {
 			UserAgent:     r.UserAgent,
 			RefererPolicy: r.RefererPolicy,
 			MaxConcurrent: r.MaxConcurrent,
+			MaxSegments:   r.MaxSegments,
 			DNSResolver:   r.DNSResolver,
 			MaxRetries:    r.MaxRetries,
 			BaseDelay:     base,

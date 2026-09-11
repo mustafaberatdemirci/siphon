@@ -23,6 +23,7 @@ const refreshEvery = 150 * time.Millisecond
 const (
 	prefOutDir     = "out_dir"
 	prefSpeedLimit = "speed_limit_mbps"
+	prefSegments   = "segments"
 )
 
 // queueTab, "İndir" sekmesi: link ekleme, kuyruk listesi, satır başına
@@ -36,6 +37,7 @@ type queueTab struct {
 	links    *widget.Entry
 	outDir   *widget.Entry
 	speed    *widget.Entry
+	segments *widget.Select
 	addBtn   *widget.Button
 	pauseAll *widget.Button
 	list     *widget.List
@@ -99,7 +101,21 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	}
 	speedBox := container.NewHBox(widget.NewLabel("Hız sınırı"), container.NewGridWrap(fyne.NewSize(70, 36), q.speed), widget.NewLabel("MB/s"))
 
-	toolbar := container.NewHBox(q.pauseAll, clearBtn, openBtn, widget.NewLabel("   "), speedBox)
+	// Bağlantı/dosya: parçalı indirme. Site tavanı (max_segments) bunu kırpar;
+	// pixeldrain ve mega'da 1, bunkr'da 4. Kullanıcı seçimi "istek", tavan
+	// "izin". Etkin değer siteye göre değişir, bu yüzden etiket öyle diyor.
+	q.segments = widget.NewSelect([]string{"1", "2", "4", "6", "8"}, func(v string) {
+		n := 1
+		fmt.Sscanf(v, "%d", &n)
+		eng.SetSegments(n)
+		prefs.SetInt(prefSegments, n)
+	})
+	if n := prefs.IntWithFallback(prefSegments, queue.DefaultSegments); n > 0 {
+		q.segments.SetSelected(fmt.Sprint(n))
+	}
+	segBox := container.NewHBox(widget.NewLabel("Bağlantı/dosya"), q.segments)
+
+	toolbar := container.NewHBox(q.pauseAll, clearBtn, openBtn, widget.NewLabel("   "), speedBox, widget.NewLabel("  "), segBox)
 
 	// --- Liste ---
 	q.list = widget.NewList(

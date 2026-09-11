@@ -255,3 +255,18 @@ func TestEmbeddedBunkrExtrasAreComplete(t *testing.T) {
 		t.Errorf("legacy_path_prefix = %q, '/' ile baslamali", p)
 	}
 }
+
+// max_segments site basina bir TAVAN; gomulu config'te bilincli degerler var.
+func TestEmbeddedMaxSegments(t *testing.T) {
+	isolatedCwd(t)
+	cfgs, _, err := Load(Embedded, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"pixeldrain": 1, "bunkr": 3, "mega": 1}
+	for _, c := range cfgs {
+		if w, ok := want[c.Name]; ok && c.MaxSegments != w {
+			t.Errorf("%s max_segments = %d, %d bekleniyordu", c.Name, c.MaxSegments, w)
+		}
+	}
+}

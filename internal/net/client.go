@@ -83,6 +83,36 @@ func (l *HostLimiter) slot(host string) chan struct{} {
 	return c
 }
 
+// TryAcquire, host için EN FAZLA want yuva alır, hiç beklemeden. Kaç yuva
+// aldığını ve hepsini bırakan fonksiyonu döndürür.
+//
+// Parçalı indirme için: bir dosyayı N bağlantıyla çekmek, o host'a N
+// bağlantı açmak demek. Host sınırı bağlantı sayısını sınırlıyor, indirme
+// sayısını değil; yani ek parçalar ancak boş yuva varsa açılıyor. Aksi halde
+// max_concurrent=4 ve 4 parça, host'a 16 bağlantı olurdu — bunkr'ın 429
+// verdiği yer tam orası.
+func (l *HostLimiter) TryAcquire(host string, want int) (int, func()) {
+	c := l.slot(host)
+	got := 0
+	for got < want {
+		select {
+		case c <- struct{}{}:
+			got++
+		default:
+			want = got
+		}
+	}
+	n := got
+	var once sync.Once
+	return n, func() {
+		once.Do(func() {
+			for i := 0; i < n; i++ {
+				<-c
+			}
+		})
+	}
+}
+
 // Acquire, host için bir yuva alır. Dönen fonksiyon yuvayı bırakır ve
 // çağrılmak zorundadır (defer).
 func (l *HostLimiter) Acquire(ctx context.Context, host string) (func(), error) {
