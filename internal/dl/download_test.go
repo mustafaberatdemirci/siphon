@@ -383,10 +383,13 @@ func TestDuplicateFilenameGetsDeterministicSuffix(t *testing.T) {
 	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 
+	// Farkli item'lar FARKLI SourcePage tasir; ad sahipligi kimlikle tutuluyor.
 	a := testItem(srv.URL+"/veri.bin", "ayni.bin")
 	a.Index = 0
+	a.SourcePage = "https://ornek.test/u/a"
 	b := testItem(srv.URL+"/veri.bin", "ayni.bin")
 	b.Index = 4
+	b.SourcePage = "https://ornek.test/u/b"
 
 	if _, err := d.Download(context.Background(), out, a); err != nil {
 		t.Fatalf("ilk: %v", err)
@@ -495,5 +498,45 @@ func TestParseContentRange(t *testing.T) {
 		if err != nil || s != c.start || tt != c.tot {
 			t.Errorf("parseContentRange(%q) = %d,%d,%v", c.in, s, tt, err)
 		}
+	}
+}
+
+// --- Ad sahipligi ---
+
+// AYNI item adi ikinci kez isterse ayni adi geri almali: duraklat/devam bu
+// olmadan "(N)" ekli yeni bir ada sapar ve yarim .part oksuz kalir.
+func TestClaimIsIdempotentForSameItem(t *testing.T) {
+	d := &Downloader{}
+	a := site.Item{SourcePage: "https://s.test/f/a", Filename: "video.mp4"}
+	first := d.claim("out", a)
+	second := d.claim("out", a)
+	if first != "video.mp4" || second != first {
+		t.Fatalf("ayni item icin adlar farkli: %q, %q", first, second)
+	}
+	// FARKLI bir item ayni adi isterse ek almali.
+	b := site.Item{SourcePage: "https://s.test/f/b", Filename: "video.mp4", Index: 1}
+	if got := d.claim("out", b); got == "video.mp4" {
+		t.Fatalf("farkli item ayni adi aldi: %q", got)
+	}
+}
+
+// Plan, Download'in kullanacagi yolu onceden ve tutarli soylemeli.
+func TestPlanMatchesDownloadPath(t *testing.T) {
+	srv := rangeServer(t, `"v1"`, nil)
+	out := tempDir(t)
+	d := &Downloader{Client: srv.Client()}
+	it := testItem(srv.URL+"/veri.bin", "veri.bin")
+	it.Dir = "Albüm"
+
+	planned, err := d.Plan(out, it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Download(context.Background(), out, it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != planned {
+		t.Fatalf("Plan %q dedi, Download %q yazdi", planned, res.Path)
 	}
 }

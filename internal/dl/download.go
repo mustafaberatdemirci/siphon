@@ -152,7 +152,7 @@ type Downloader struct {
 	// Kilitsiz bırakmak iki item'ın aynı adı almasına ve birinin diğerini
 	// ezmesine yol açardı; yarış koşulu olduğu için de ancak bazen.
 	mu      sync.Mutex
-	claimed map[string]bool
+	claimed map[string]string // küçük harfli yol -> sahibi (SourcePage)
 }
 
 func (d *Downloader) logf(format string, a ...any) {
@@ -778,29 +778,51 @@ func restoreHasher(part string, st State) (hash.Hash, error) {
 	return h, nil
 }
 
-// claim, aynı klasörde aynı adın iki kez kullanılmasını önler.
-// Sonek Index'ten türer, böylece koşular arasında deterministiktir: aynı albüm
-// aynı sırada çözüldüğü sürece aynı item aynı adı alır. Üretilen adın kendisi
-// de çakışabileceği için boş bir ad bulunana kadar ilerlenir.
+// claim, aynı klasörde aynı adın iki FARKLI item tarafından kullanılmasını
+// önler. Sonek Index'ten türer, böylece koşular arasında deterministiktir.
+//
+// Sahiplik item kimliğiyle (SourcePage) tutuluyor: AYNI item adı ikinci kez
+// isterse aynı adı geri alır. Bu, duraklat/devam için zorunlu: aksi halde
+// devam eden indirme "(N)" ekli yeni bir ada, yani başka bir .part'a saparak
+// yarım dosyayı öksüz bırakırdı.
 func (d *Downloader) claim(dir string, it site.Item) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.claimed == nil {
-		d.claimed = map[string]bool{}
+		d.claimed = map[string]string{}
 	}
 	key := func(n string) string { return strings.ToLower(filepath.Join(dir, n)) }
+	free := func(n string) bool {
+		owner, taken := d.claimed[key(n)]
+		return !taken || (owner != "" && owner == it.SourcePage)
+	}
 
-	if !d.claimed[key(it.Filename)] {
-		d.claimed[key(it.Filename)] = true
+	if free(it.Filename) {
+		d.claimed[key(it.Filename)] = it.SourcePage
 		return it.Filename
 	}
 	ext := filepath.Ext(it.Filename)
 	base := strings.TrimSuffix(it.Filename, ext)
 	for n := it.Index + 1; ; n++ {
 		alt := fmt.Sprintf("%s (%d)%s", base, n, ext)
-		if !d.claimed[key(alt)] {
-			d.claimed[key(alt)] = true
+		if free(alt) {
+			d.claimed[key(alt)] = it.SourcePage
 			return alt
 		}
 	}
+}
+
+// Plan, Download'ın kullanacağı nihai yolu indirmeye BAŞLAMADAN söyler.
+//
+// Kuyruk bunu diske yazıyor: uygulama kapanıp açılınca yarım kalan iş aynı
+// adla devam etmeli, ".part" yeni bir adın altında yeniden başlamamalı.
+// Aynı item için tekrar çağrılmak güvenli; claim sahipliği hatırlıyor.
+func (d *Downloader) Plan(outRoot string, it site.Item) (string, error) {
+	name := ComponentLimit(it.Filename, MaxComponentUTF16-utf16Len(stateSuffix))
+	if name == "" {
+		return "", fmt.Errorf("dosya adı kullanılamaz: %q (%s)", it.Filename, it.SourcePage)
+	}
+	it.Filename = name
+	dir := filepath.Join(outRoot, Component(it.Dir))
+	return filepath.Join(dir, d.claim(dir, it)), nil
 }

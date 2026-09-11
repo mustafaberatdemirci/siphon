@@ -16,8 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
@@ -319,45 +317,10 @@ type oneResult struct {
 // runOne, tek bir URL'i çözer ve item'larını indirir.
 func runOne(ctx context.Context, rc runCtx) oneResult {
 	var out oneResult
-	r, cfg, ev, opt := rc.resolver, rc.cfg, rc.ev, rc.opt
+	r, ev, opt := rc.resolver, rc.ev, rc.opt
 
-	// Downloader URL başına kurulur: ad çakışma haritası albüm kapsamlı olmalı.
-	down := &dl.Downloader{
-		Client:    rc.client,
-		Logf:      ev.Debugf,
-		Reresolve: r.ResolveOne,
-		UserAgent: cfg.UserAgent,
-		Progress:  ev.Progress,
-	}
-	// Resolver 403'ü siteye özgü yorumlayabiliyorsa indiriciye bağla; yoksa
-	// her 403 "imzalı URL süresi doldu" sayılır ve rate limit derinleşir.
-	if c, ok := r.(site.StatusClassifier); ok {
-		down.Classify = c.ClassifyStatus
-	}
-	// bunkr 200 ile bakım placeholder'ı döndürebiliyor; durum kodu yeterli
-	// sinyal değil.
-	// Adresin isteğin tam öncesinde hazırlanması gerekiyorsa (bunkr'da süreli
-	// imza) indiriciye bağlanıyor.
-	if p, ok := r.(site.URLPreparer); ok {
-		down.PrepareURL = p.PrepareURL
-	}
-	// Gövde diske yazılmadan önce çözülmesi gerekiyorsa (mega: AES-CTR).
-	if dec, ok := r.(site.StreamDecoder); ok {
-		down.Decode = dec.DecodeStream
-	}
-	if v, ok := r.(site.ResponseValidator); ok {
-		down.Validate = v.ValidateResponse
-	}
-
-	// Sınır HOST başına: bir albüm birden fazla CDN host'una yayılabiliyor
-	// ve tek bir genel sayaç yanlış yerde daraltma yapar.
-	limiter := snet.NewHostLimiter(cfg.MaxConcurrent)
-	policy := snet.Policy{
-		MaxAttempts: cfg.MaxRetries,
-		MaxElapsed:  cfg.MaxElapsed,
-		Backoff:     snet.Backoff{Base: cfg.BaseDelay, Max: cfg.MaxDelay},
-		Logf:        ev.Debugf,
-	}
+	// Worker URL başına kurulur: ad çakışma haritası albüm kapsamlı.
+	w := NewWorker(r, rc.cfg, rc.client, ev)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(rc.inFlight)
@@ -385,85 +348,24 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 			ev.ItemQueued(it)
 		}
 		g.Go(func() error {
-			// Zaten indirilmiş mi? Kayda tek başına GÜVENİLMİYOR: dosyanın
-			// gerçekten yerinde olduğu da kontrol ediliyor. Kullanıcı dosyayı
-			// silmişse kayda bakıp atlamak sessiz başarısızlık olur.
-			if e, ok := rc.ledger.Lookup(it.Dir, it.SourcePage, it.Filename); ok {
-				if fi, serr := os.Stat(filepath.Join(opt.OutDir, e.Path)); serr == nil && !fi.IsDir() {
-					already.Add(1)
-					if ev.ItemSkipped != nil {
-						ev.ItemSkipped(it, e)
-					}
-					ev.debugf("[%d] %s zaten kayıtlı, atlanıyor", it.Index+1, e.Filename)
-					return nil
-				}
-				ev.errorf("  kayıt %q diyor ama dosya yok, yeniden indiriliyor", e.Path)
-			}
-
-			release, aerr := limiter.Acquire(gctx, snet.HostOf(it.URL))
-			if aerr != nil {
-				return aerr
-			}
-			defer release()
-
-			if ev.ItemStarted != nil {
-				ev.ItemStarted(it)
-			}
-
-			var res dl.Result
-			derr := policy.Do(gctx, func(int) error {
-				var e error
-				res, e = down.Download(gctx, opt.OutDir, it)
-				return e
-			})
-
-			switch {
-			case derr == nil:
-				// Yol GÖRELİ kaydediliyor: çıktı klasörü taşındığında kayıt
-				// geçerli kalsın.
-				rel, relErr := filepath.Rel(opt.OutDir, res.Path)
-				if relErr != nil {
-					rel = filepath.Base(res.Path)
-				}
-				if lerr := rc.ledger.Add(store.Entry{
-					SourcePage: it.SourcePage,
-					Dir:        it.Dir,
-					Filename:   it.Filename,
-					Path:       rel,
-					Size:       res.Size,
-					SHA256:     res.SHA256,
-				}); lerr != nil {
-					// Dosya indi ama kaydı yazılamadı: indirme geçerli,
-					// idempotence bozuk. Sonraki koşu bunu yeniden indirir.
-					ev.errorf("  %s indi ama kaydı yazılamadı: %v", rel, lerr)
+			o := w.DownloadItem(gctx, opt.OutDir, rc.ledger, it, ev)
+			switch o.Kind {
+			case OutcomeDone:
+				done.Add(1)
+				if o.Degraded {
 					degrade.Add(1)
 				}
-				done.Add(1)
-				if ev.ItemDone != nil {
-					ev.ItemDone(it, res)
-				}
-				ev.infof("[%d] %s OK", it.Index+1, filepath.Base(res.Path))
-				return nil
-
-			case errors.Is(derr, snet.ErrStop):
-				// Captcha. Beklemek çözmez ve denemeye devam etmek durumu
-				// kötüleştirir; koşuyu durdur.
-				ev.errorf("DURDURULDU: %v", derr)
-				stopped.Store(true)
-				return derr // gctx iptal edilir, kalan işler durur
-
-			case errors.Is(derr, context.Canceled):
-				return derr
-
-			default:
-				// Albüm içinde ölü item albümü düşürmez.
-				ev.errorf("  %s: %v", it.Filename, derr)
+			case OutcomeSkipped:
+				already.Add(1)
+			case OutcomeFailed:
 				failed.Add(1)
-				if ev.ItemFailed != nil {
-					ev.ItemFailed(it, derr)
-				}
-				return nil
+			case OutcomeStopped:
+				stopped.Store(true)
+				return o.Err // gctx iptal edilir, kalan işler durur
+			case OutcomeCanceled:
+				return o.Err
 			}
+			return nil
 		})
 		return nil
 	})

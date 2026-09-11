@@ -69,6 +69,7 @@ func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 			defer wg.Done()
 			it := testItem(srv.URL+"/veri.bin", "ayni.bin")
 			it.Index = i
+			it.SourcePage = fmt.Sprintf("https://ornek.test/u/%d", i) // farkli item'lar
 			it.SHA256 = payloadSHA()
 			var res Result
 			res, errs[i] = d.Download(context.Background(), out, it)
@@ -132,6 +133,7 @@ func TestConcurrentDownloadsAcrossDirectories(t *testing.T) {
 				it := testItem(srv.URL+"/veri.bin", "ayni.bin")
 				it.Dir = fmt.Sprintf("album-%d", di)
 				it.Index = fi
+				it.SourcePage = fmt.Sprintf("https://ornek.test/u/%d-%d", di, fi)
 				it.SHA256 = payloadSHA()
 				if _, err := d.Download(context.Background(), out, it); err != nil {
 					t.Errorf("album-%d/%d: %v", di, fi, err)

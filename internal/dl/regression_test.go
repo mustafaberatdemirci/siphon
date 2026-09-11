@@ -225,10 +225,13 @@ func TestGeneratedDedupNameIsAlsoDeduped(t *testing.T) {
 	// Üçü de çakışıyor: b'nin üreteceği ad ("ayni (2).bin") c'nin düz adıyla aynı.
 	a := testItem(srv.URL+"/veri.bin", "ayni.bin")
 	a.Index = 0
+	a.SourcePage = "https://ornek.test/u/a"
 	b := testItem(srv.URL+"/veri.bin", "ayni.bin")
 	b.Index = 1
+	b.SourcePage = "https://ornek.test/u/b"
 	c := testItem(srv.URL+"/veri.bin", "ayni (2).bin")
 	c.Index = 2
+	c.SourcePage = "https://ornek.test/u/c"
 
 	for i, it := range []site.Item{a, b, c} {
 		if _, err := d.Download(context.Background(), out, it); err != nil {
