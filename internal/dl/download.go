@@ -127,6 +127,8 @@ type Downloader struct {
 	// nil değilse offset, boyut ve sha256 hep DÜZ METİN cinsindendir; CTR
 	// uzunluğu korduğu için Range ve Content-Length de aynı sayıları taşır.
 	Decode func(it site.Item, offset int64, saved []byte, r io.Reader) (site.DecodedStream, error)
+	// Throttle nil olabilir. Tüm indirmelerin paylaştığı bayt/saniye sınırı.
+	Throttle *Throttle
 	// Validate nil olabilir. Basarili bir yanitin GERCEKTEN istenen icerik
 	// olup olmadigini siteye ozgu bicimde dogrular.
 	//
@@ -612,8 +614,17 @@ func (d *Downloader) stream(
 		default:
 		}
 
-		n, rerr := body.Read(buf)
+		// Sınır varken parça küçülüyor; yoksa tam tampon.
+		n, rerr := body.Read(buf[:d.Throttle.chunkFor(len(buf))])
 		if n > 0 {
+			if terr := d.Throttle.Wait(ctx, n); terr != nil {
+				// Beklerken iptal: okunan parça diske yazılmadı, offset
+				// ilerlemedi; state olduğu gibi kaydedilir.
+				_ = f.Sync()
+				f.Close()
+				saveState(statePath, st, hasher)
+				return false, st, body, terr
+			}
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				_ = f.Sync()
 				f.Close()

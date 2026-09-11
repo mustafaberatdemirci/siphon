@@ -241,7 +241,7 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 	for _, u := range opt.URLs {
 		sum.URLs++
 
-		r, idx := pick(resolvers, u)
+		r, idx := Pick(resolvers, u)
 		if r == nil {
 			// Sessiz başarısızlık yok: atlanan URL çıkış kodunu etkiler.
 			ev.errorf("eşleşen resolver yok, atlanıyor: %s", u)
@@ -403,7 +403,8 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 
 // pick, URL'e uyan ilk resolver'ı ve onun config indeksini döndürür.
 // Registry.Build sırayı koruduğu için indeks cfgs ile birebir eşleşir.
-func pick(rs []site.Resolver, u string) (site.Resolver, int) {
+// Pick, URL'i tanıyan ilk resolver'ı ve config indeksini döndürür; yoksa nil, -1.
+func Pick(rs []site.Resolver, u string) (site.Resolver, int) {
 	for i, r := range rs {
 		if r.Match(u) {
 			return r, i
