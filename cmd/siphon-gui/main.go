@@ -34,7 +34,7 @@ import (
 
 func main() {
 	a := app.New()
-	w := a.NewWindow("Siphon — pixeldrain & bunkr indirici")
+	w := a.NewWindow("Siphon — pixeldrain, bunkr & mega indirici")
 	w.Resize(fyne.NewSize(920, 680))
 
 	ui := newUI(w)
@@ -104,7 +104,7 @@ func newUI(w fyne.Window) *ui {
 func (u *ui) downloadTab() fyne.CanvasObject {
 	u.links = widget.NewMultiLineEntry()
 	u.links.SetPlaceHolder("Linkleri buraya yapıştır — satır başına bir tane.\n" +
-		"https://pixeldrain.com/l/...\nhttps://bunkr.ws/a/...\n\n# ile başlayan satırlar yorumdur.")
+		"https://pixeldrain.com/l/...\nhttps://bunkr.ws/a/...\nhttps://mega.nz/file/...#...\n\n# ile başlayan satırlar yorumdur.")
 	u.links.Wrapping = fyne.TextWrapOff
 
 	u.outDir = widget.NewEntry()

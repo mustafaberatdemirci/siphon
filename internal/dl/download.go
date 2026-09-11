@@ -60,6 +60,11 @@ type State struct {
 	ValidatorType string `json:"validator_type"`
 	SHA256State   []byte `json:"sha256_state"`
 
+	// DecoderState, akış çözücüsünün (varsa) Offset anındaki durumu. sha256
+	// durumuyla aynı mantık: kaldığı yerden devam edebilmesi için çözücünün
+	// içi de diske yazılıyor. Çözücü yoksa boş.
+	DecoderState []byte `json:"decoder_state,omitempty"`
+
 	// TotalSize YALNIZCA sunucunun Content-Length'idir; bilinmiyorsa -1.
 	// resumable() buna bakar çünkü chunked yanıtta resume denenmez (tasarım
 	// kararı). Resolver'ın bildirdiği boyut ayrı tutulur, yoksa chunked
@@ -118,6 +123,10 @@ type Downloader struct {
 	// ölüyordu. Her DENEMEDE çağrıldığı için süresi dolmuş imza kendiliğinden
 	// tazeleniyor.
 	PrepareURL func(ctx context.Context, rawURL string) (string, error)
+	// Decode nil olabilir. Gövdeyi diske yazılmadan ÖNCE çözer (mega: AES-CTR).
+	// nil değilse offset, boyut ve sha256 hep DÜZ METİN cinsindendir; CTR
+	// uzunluğu korduğu için Range ve Content-Length de aynı sayıları taşır.
+	Decode func(it site.Item, offset int64, saved []byte, r io.Reader) (site.DecodedStream, error)
 	// Validate nil olabilir. Basarili bir yanitin GERCEKTEN istenen icerik
 	// olup olmadigini siteye ozgu bicimde dogrular.
 	//
@@ -205,6 +214,11 @@ func Retryable(err error) error {
 // `.part` temizlendiği için kullanıcı elle tekrar deneyebilir.
 var ErrSHA256Mismatch = errors.New("sha256 uyuşmuyor")
 
+// ErrIntegrity, akış çözücüsünün kendi bütünlük kontrolü (mega meta-MAC)
+// başarısız olduğunda döner. sha256 uyuşmazlığı gibi yeniden denenebilir
+// DEĞİL: anahtar yanlışsa tekrar indirmek aynı çöpü üretir.
+var ErrIntegrity = errors.New("bütünlük doğrulanamadı")
+
 // ErrIncomplete, gövde beklenen boyuttan kısa geldiğinde döner.
 var ErrIncomplete = errors.New("indirme eksik")
 
@@ -271,8 +285,12 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 
 	item := it
 	tried := false
+	var last site.DecodedStream
 	for {
-		done, newState, aerr := d.attempt(ctx, part, statePath, item, st, hasher)
+		done, newState, ds, aerr := d.attempt(ctx, part, statePath, item, st, hasher)
+		if ds != nil {
+			last = ds
+		}
 		if aerr == nil {
 			st = newState
 			if !done {
@@ -314,6 +332,17 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 	if total := st.expectedTotal(); total >= 0 && st.Offset != total {
 		return Result{}, Retryable(fmt.Errorf("%w: %d/%d bayt (%s)",
 			ErrIncomplete, st.Offset, total, filepath.Base(final)))
+	}
+
+	// Çözücünün kendi bütünlük kontrolü (mega: meta-MAC). sha256 ile aynı
+	// muamele: bozuk .part diskte kalırsa her koşu aynı hatayı tekrarlar.
+	if last != nil {
+		if verr := last.Verify(); verr != nil {
+			_ = os.Remove(part)
+			_ = os.Remove(statePath)
+			return Result{}, fmt.Errorf("%w: %v (%s) — .part silindi, tekrar denenebilir",
+				ErrIntegrity, verr, filepath.Base(final))
+		}
 	}
 
 	sum := hex.EncodeToString(hasher.Sum(nil))
@@ -365,6 +394,12 @@ func (d *Downloader) prepare(part, statePath string, it site.Item) (State, hash.
 	if st.Offset <= 0 {
 		return reset("")
 	}
+	// Çözücü varsa ve state onun durumunu taşımıyorsa resume GÜVENLİ DEĞİL:
+	// çözücü sıfırdan başlar, hash ve bütünlük kontrolü ise kaldığı yerden
+	// devam ettiğini sanır. Tek doğru tepki baştan başlamak.
+	if d.Decode != nil && len(st.DecoderState) == 0 {
+		return reset("çözücü durumu yok, resume edilemez")
+	}
 
 	fi, err := os.Stat(part)
 	switch {
@@ -400,7 +435,7 @@ func (e *urlExpiredError) Error() string { return fmt.Sprintf("imzalı URL geçe
 func (d *Downloader) attempt(
 	ctx context.Context, part, statePath string,
 	it site.Item, st State, hasher hash.Hash,
-) (bool, State, error) {
+) (bool, State, site.DecodedStream, error) {
 	// Adres isteğin tam öncesinde hazırlanıyor (imza gibi süreli parçalar
 	// için). Hata GEÇİCİ sayılıyor: imza servisi anlık düşmüş olabilir,
 	// dosyayla ilgili kalıcı bir sorun değil.
@@ -408,14 +443,14 @@ func (d *Downloader) attempt(
 	if d.PrepareURL != nil {
 		prepared, perr := d.PrepareURL(ctx, target)
 		if perr != nil {
-			return false, st, Retryable(perr)
+			return false, st, nil, Retryable(perr)
 		}
 		target = prepared
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return false, st, err
+		return false, st, nil, err
 	}
 	if d.UserAgent != "" {
 		req.Header.Set("User-Agent", d.UserAgent)
@@ -437,14 +472,14 @@ func (d *Downloader) attempt(
 	if err != nil {
 		// Taşıma hatası geçici kabul edilir: kopan bağlantı, DNS gecikmesi,
 		// TLS el sıkışma zaman aşımı. Kalıcı olanları HTTP durum kodu söyler.
-		return false, st, Retryable(err)
+		return false, st, nil, Retryable(err)
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if verr := d.validate(resp); verr != nil {
-			return false, st, verr
+			return false, st, nil, verr
 		}
 		// Kaynak değişmiş ya da sunucu Range desteklemiyor: baştan yaz.
 		if st.Offset > 0 {
@@ -453,44 +488,53 @@ func (d *Downloader) attempt(
 		st = mergeServerState(st, resp)
 		hasher.Reset()
 		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
-			return false, st, err
+			return false, st, nil, err
 		}
 		st.Offset = 0
-		return d.stream(ctx, part, statePath, resp.Body, st, hasher, it)
+		st.DecoderState = nil
+		ds, derr := d.decode(it, 0, nil, resp.Body)
+		if derr != nil {
+			return false, st, nil, derr
+		}
+		return d.stream(ctx, part, statePath, ds, st, hasher, it)
 
 	case http.StatusPartialContent:
 		if verr := d.validate(resp); verr != nil {
-			return false, st, verr
+			return false, st, nil, verr
 		}
 		start, total, perr := parseContentRange(resp.Header.Get("Content-Range"))
 		if perr != nil {
-			return false, st, fmt.Errorf("Content-Range ayrıştırılamadı: %w", perr)
+			return false, st, nil, fmt.Errorf("Content-Range ayrıştırılamadı: %w", perr)
 		}
 		if start != st.Offset {
 			// Sunucu istediğimiz yerden başlamadı. Yapıştırmak bozuk dosya üretir.
-			return false, st, fmt.Errorf("Content-Range %d'den başlıyor, %d bekleniyordu", start, st.Offset)
+			return false, st, nil, fmt.Errorf("Content-Range %d'den başlıyor, %d bekleniyordu", start, st.Offset)
 		}
 		if total >= 0 {
 			st.TotalSize = total
 		}
-		return d.stream(ctx, part, statePath, resp.Body, st, hasher, it)
+		ds, derr := d.decode(it, st.Offset, st.DecoderState, resp.Body)
+		if derr != nil {
+			return false, st, nil, derr
+		}
+		return d.stream(ctx, part, statePath, ds, st, hasher, it)
 
 	case http.StatusRequestedRangeNotSatisfiable:
 		// 416 "tamamlandı" DEMEK DEĞİL; yalnızca "offset >= mevcut uzunluk"
 		// demek. Ayrımı state yapar.
 		if total := st.expectedTotal(); total >= 0 && st.Offset == total {
 			d.logf("416: indirme zaten tamamlanmış, doğrulanıyor")
-			return true, st, nil
+			return true, st, nil, nil
 		}
 		d.logf("416 ama offset=%d beklenen=%d: .part bozuk, sıfırlanıyor", st.Offset, st.expectedTotal())
 		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
-			return false, st, err
+			return false, st, nil, err
 		}
 		_ = os.Remove(statePath)
 		hasher.Reset()
 		st = freshState()
 		st.ItemSize = it.Size
-		return false, st, Retryable(errors.New("range reddedildi, .part sıfırlandı"))
+		return false, st, nil, Retryable(errors.New("range reddedildi, .part sıfırlandı"))
 
 	case http.StatusForbidden, http.StatusGone:
 		// Siteye özgü sınıflandırıcı varsa önce ona sor: 403 her zaman
@@ -498,34 +542,58 @@ func (d *Downloader) attempt(
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 		if d.Classify != nil {
 			if cerr := d.Classify(resp, body); cerr != nil {
-				return false, st, cerr
+				return false, st, nil, cerr
 			}
 		}
-		return false, st, &urlExpiredError{status: resp.StatusCode}
+		return false, st, nil, &urlExpiredError{status: resp.StatusCode}
 
 	default:
+		// Siteye özgü sınıflandırıcı BURADA da soruluyor, yalnızca 403/410'da
+		// değil: mega bant genişliği kotasını 509 ile bildiriyor ve o, aşağıdaki
+		// genel kurala göre "5xx, geçici" sayılıp tekrar tekrar denenirdi.
+		if d.Classify != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+			if cerr := d.Classify(resp, body); cerr != nil {
+				return false, st, nil, cerr
+			}
+		}
 		err := fmt.Errorf("%s: HTTP %s", it.URL, resp.Status)
 		// 5xx ve 429 sunucu tarafı, geçici. 4xx'in kalanı bizim hatamız;
 		// tekrar denemek aynı cevabı getirir.
 		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-			return false, st, Retryable(err)
+			return false, st, nil, Retryable(err)
 		}
-		return false, st, err
+		return false, st, nil, err
 	}
 }
+
+// decode, çözücü varsa gövdeyi onunla sarar; yoksa gövdeyi olduğu gibi,
+// durumsuz ve doğrulamasız bir DecodedStream olarak döndürür.
+func (d *Downloader) decode(it site.Item, offset int64, saved []byte, r io.Reader) (site.DecodedStream, error) {
+	if d.Decode == nil {
+		return plainStream{r}, nil
+	}
+	return d.Decode(it, offset, saved, r)
+}
+
+// plainStream, çözücü olmayan siteler için kimlik dönüşümü.
+type plainStream struct{ io.Reader }
+
+func (plainStream) State() []byte { return nil }
+func (plainStream) Verify() error { return nil }
 
 // stream, gövdeyi `.part`'a yazar ve hash'i ilerletir.
 func (d *Downloader) stream(
 	ctx context.Context, part, statePath string,
-	body io.Reader, st State, hasher hash.Hash, it site.Item,
-) (bool, State, error) {
+	body site.DecodedStream, st State, hasher hash.Hash, it site.Item,
+) (bool, State, site.DecodedStream, error) {
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return false, st, err
+		return false, st, body, err
 	}
 	if _, err := f.Seek(st.Offset, io.SeekStart); err != nil {
 		f.Close()
-		return false, st, err
+		return false, st, body, err
 	}
 
 	// İlk bildirim hemen gidiyor: kullanıcı indirmenin BAŞLADIĞINI görmek
@@ -540,7 +608,7 @@ func (d *Downloader) stream(
 			_ = f.Sync()
 			f.Close()
 			saveState(statePath, st, hasher)
-			return false, st, ctx.Err()
+			return false, st, body, ctx.Err()
 		default:
 		}
 
@@ -550,10 +618,13 @@ func (d *Downloader) stream(
 				_ = f.Sync()
 				f.Close()
 				saveState(statePath, st, hasher)
-				return false, st, werr
+				return false, st, body, werr
 			}
 			hasher.Write(buf[:n])
 			st.Offset += int64(n)
+			// Çözücü durumu offset'le AYNI ANDA alınıyor: ikisi aynı bayt
+			// sayısını anlatmak zorunda, yoksa resume yanlış yerden çözer.
+			st.DecoderState = body.State()
 			if time.Since(lastReport) >= progressInterval {
 				d.report(it, st)
 				lastReport = time.Now()
@@ -567,7 +638,7 @@ func (d *Downloader) stream(
 			f.Close()
 			saveState(statePath, st, hasher)
 			// Gövde ortasında kopan okuma geçici; kaydedilen offset'ten devam edilir.
-			return false, st, Retryable(rerr)
+			return false, st, body, Retryable(rerr)
 		}
 	}
 
@@ -575,7 +646,7 @@ func (d *Downloader) stream(
 	closeErr := f.Close()
 	if err := errors.Join(syncErr, closeErr); err != nil {
 		saveState(statePath, st, hasher)
-		return false, st, err
+		return false, st, body, err
 	}
 	// Son bildirim: aralık yüzünden son parça atlanmış olabilir ve ilerleme
 	// çubuğunun %98'de kalması kullanıcıya "takıldı" der.
@@ -584,9 +655,9 @@ func (d *Downloader) stream(
 	// Beklenen boyut biliniyorsa eksik veri sessizce başarı sayılmaz.
 	if total := st.expectedTotal(); total >= 0 && st.Offset < total {
 		saveState(statePath, st, hasher)
-		return false, st, nil
+		return false, st, body, nil
 	}
-	return true, st, nil
+	return true, st, body, nil
 }
 
 // mergeServerState, 200 yanıtından taze sunucu bilgisi alır ve validator'ı seçer.

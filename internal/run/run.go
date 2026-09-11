@@ -169,6 +169,7 @@ func Setup(
 	for name, factory := range map[string]site.Factory{
 		site.PixeldrainName: site.NewPixeldrain,
 		site.BunkrName:      site.NewBunkr,
+		site.MegaName:       site.NewMega,
 	} {
 		if rerr := reg.Register(name, factory); rerr != nil {
 			return nil, nil, fmt.Errorf("registry: %w", rerr)
@@ -339,6 +340,10 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 	// imza) indiriciye bağlanıyor.
 	if p, ok := r.(site.URLPreparer); ok {
 		down.PrepareURL = p.PrepareURL
+	}
+	// Gövde diske yazılmadan önce çözülmesi gerekiyorsa (mega: AES-CTR).
+	if dec, ok := r.(site.StreamDecoder); ok {
+		down.Decode = dec.DecodeStream
 	}
 	if v, ok := r.(site.ResponseValidator); ok {
 		down.Validate = v.ValidateResponse

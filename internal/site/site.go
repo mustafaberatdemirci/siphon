@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -102,6 +103,12 @@ type Item struct {
 	SHA256     string            // pixeldrain verir, bunkr vermez, boş olabilir
 	Size       int64             // bilinmiyorsa -1
 	Index      int               // albüm içi sıra
+
+	// Secret, resolver'a özel gizli malzemedir; indirici dokunmaz, kayda
+	// yazılmaz, log'a basılmaz. mega'da içerik anahtarı + nonce + meta-MAC
+	// (32 bayt). Item'ın içinde taşınıyor ki yeniden çözümlemede ve resume'da
+	// ayrı bir yerden aranması gerekmesin.
+	Secret []byte
 }
 
 type ItemError struct {
@@ -303,6 +310,38 @@ type ResponseValidator interface {
 // tazelenir ve item'ı baştan çözmek gerekmez.
 type URLPreparer interface {
 	PrepareURL(ctx context.Context, rawURL string) (string, error)
+}
+
+// StreamDecoder, tel üzerinden gelen gövdeyi diske yazılmadan ÖNCE çözmesi
+// gereken resolver'lar için opsiyonel arayüzdür. İndirici bunu type assertion
+// ile kullanıyor.
+//
+// Neden gerekli: mega dosyaları istemci tarafında şifreli. Adres verip
+// "indir" demek diske şifreli çöp yazmak olur; anahtar adresteki #'ten sonra
+// duruyor ve sunucuya hiç gitmiyor. pixeldrain ve bunkr'da adres yeterliydi,
+// burada değil.
+//
+// offset, akışın dosyanın kaçıncı baytından başladığıdır (resume). saved,
+// önceki koşudan kalan çözücü durumudur; boş olabilir. Çözücü, offset > 0 iken
+// durumu geri yükleyemiyorsa HATA döndürmeli, sessizce sıfırdan başlamamalı:
+// bütünlük kontrolü o durumu varsayıyor.
+type StreamDecoder interface {
+	DecodeStream(it Item, offset int64, saved []byte, r io.Reader) (DecodedStream, error)
+}
+
+// DecodedStream, çözülmüş gövdedir. İndirici hash'i ve diske yazmayı bunun
+// üzerinden yapar; yani offset, boyut ve sha256 durumu hep DÜZ METİN
+// cinsindendir.
+type DecodedStream interface {
+	io.Reader
+	// State, resume için saklanacak çözücü durumunu döndürür. O ana kadar
+	// okunan bayt sayısıyla birebir uyumlu olmak zorunda; indirici bunu her
+	// yazmadan sonra alıp state dosyasına koyuyor.
+	State() []byte
+	// Verify, akış TAMAMLANDIĞINDA bütünlüğü doğrular. Hata dönerse indirici
+	// .part'ı siler: bozuk içeriği diskte bırakmak her koşuda aynı hatayı
+	// tekrarlatır.
+	Verify() error
 }
 
 // Factory, config'i resolver'a enjekte eder.

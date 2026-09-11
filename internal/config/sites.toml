@@ -168,3 +168,42 @@ fallback_api_endpoint = "https://apidl.bunkr.ru/api/_001_v2"
 # TAHMİN: güncel uca ulaşılabildiğinde gerçek yolu sunucu söylüyor ve bu
 # değer hiç kullanılmıyor.
 legacy_path_prefix = "/storage/media"
+
+[[site]]
+name = "mega"
+
+# mega'nın kendi alan adları. mega.io yalnızca tanıtım sitesi, link üretmiyor.
+domains = ["mega.nz", "mega.co.nz"]
+legacy_domains = []
+match_patterns = []
+
+# İndirme adresleri API'den geliyor ve her seferinde farklı bir depolama
+# sunucusuna işaret ediyor (gfs###n###.userstorage.mega.co.nz). Sinyal, kapı
+# değil: bunkr ile aynı kural.
+cdn_patterns = ["*.userstorage.mega.co.nz"]
+
+# mega Referer istemiyor.
+referer_policy = "none"
+
+user_agent = "siphon/0.1 (+https://github.com/mustafaberatdemirci/siphon)"
+
+# Anonim indirmede IP başına aktarım kotası var; paralelliği düşük tutmak
+# kotayı daha yavaş tüketmiyor ama 509 geldiğinde açık bağlantı sayısını
+# sınırlı tutuyor.
+max_concurrent = 2
+
+# Teşhis, API ucuna kasıtlı olarak geçersiz bir komut gönderir; negatif bir
+# sayı dönmesi "API ulaşılabilir ve konuşuyor" demektir. Gerçek bir dosya
+# tanıtıcısına ihtiyaç yok.
+canary_urls = ["https://g.api.mega.co.nz/cs"]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+# Dosyalar istemci tarafında şifreli (AES-128-CTR); anahtar linkin # kısmında.
+# Bu yüzden mega çözümleyicisi indirme akışını da çözüyor. API ucu buradan
+# değiştirilebilir; kripto şeması kodda (mega_crypto.go).
+[site.extra]
+api_endpoint = "https://g.api.mega.co.nz/cs"
