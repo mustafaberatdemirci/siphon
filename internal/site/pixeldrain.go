@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,12 +19,42 @@ import (
 const PixeldrainName = "pixeldrain"
 
 // NewPixeldrain, registry'ye verilecek fabrikadır.
+// ExtraPixeldrainAPIKey, sites.toml'daki [site.extra] api_key anahtarı.
+//
+// pixeldrain'in kendi belgesi: "Hotlinking is only allowed when either the
+// uploader or the downloader has a premium subscription." Üçüncü parti bir
+// indirici, tanım gereği hotlink. Bir dosyanın indirme sayısı görüntülenme
+// sayısının üç katını aşınca captcha kapısı iniyor ve bu DOSYA BAŞINA bir
+// sayaç: IP değiştirmek (VPN) hiçbir şey değiştirmiyor.
+//
+// Tasarlanmış çıkış yolu ücretli hesabın API anahtarı. HTTP Basic ile
+// gönderiliyor: kullanıcı adı boş, parola anahtar. Hem API çağrılarına hem
+// TRANSFER isteklerine ekleniyor; sınır asıl transferde biniyor.
+//
+// Captcha'yı çözmeye veya görüntülenme sayısını şişirmeye ÇALIŞMIYORUZ:
+// birincisi kapsam dışı, ikincisi sitenin erişim kontrolünü kandırmak.
+const ExtraPixeldrainAPIKey = "api_key"
+
 func NewPixeldrain(cfg SiteConfig) Resolver {
-	return &pixeldrain{cfg: cfg.WithDefaults()}
+	cfg = cfg.WithDefaults()
+	return &pixeldrain{
+		cfg:    cfg,
+		apiKey: strings.TrimSpace(cfg.ExtraOr(ExtraPixeldrainAPIKey, "")),
+	}
 }
 
 type pixeldrain struct {
-	cfg SiteConfig
+	cfg    SiteConfig
+	apiKey string // boşsa anonim
+}
+
+// authHeader, API anahtarı varsa HTTP Basic başlığının değerini üretir.
+// Anahtar log'a, kayda veya hata kanıtına ASLA yazılmıyor; yalnızca başlık.
+func (p *pixeldrain) authHeader() string {
+	if p.apiKey == "" {
+		return ""
+	}
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(":"+p.apiKey))
 }
 
 // APIError, pixeldrain'in hata zarfıdır. Value alanı kararların dayanağıdır;
@@ -168,6 +199,9 @@ func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) e
 	}
 	if p.cfg.UserAgent != "" {
 		req.Header.Set("User-Agent", p.cfg.UserAgent)
+	}
+	if a := p.authHeader(); a != "" {
+		req.Header.Set("Authorization", a)
 	}
 	// RefererPolicy pixeldrain'de "none" olmalı: yanlış Referer tam olarak
 	// hotlink_detected tetikler. Politika açıkça origin/item_page ise uygulanır.
@@ -336,21 +370,26 @@ func (p *pixeldrain) albumPage(host, id string) string {
 // ama bunkr item sayfası Referer'ını transferde ZORUNLU kıldığı için mekanizma
 // şimdiden doğru yerde olmak zorunda.
 func (p *pixeldrain) itemHeaders(itemPage string) map[string]string {
+	h := map[string]string{}
 	switch p.cfg.RefererPolicy {
 	case RefererItemPage:
-		if itemPage == "" {
-			return nil
+		if itemPage != "" {
+			h["Referer"] = itemPage
 		}
-		return map[string]string{"Referer": itemPage}
 	case RefererOrigin:
-		u, err := url.Parse(itemPage)
-		if err != nil || u.Host == "" {
-			return nil
+		if u, err := url.Parse(itemPage); err == nil && u.Host != "" {
+			h["Referer"] = u.Scheme + "://" + u.Host + "/"
 		}
-		return map[string]string{"Referer": u.Scheme + "://" + u.Host + "/"}
-	default:
+	}
+	// Ücretli hesabın anahtarı transfer isteğine de gidiyor: hotlink ve
+	// captcha sınırı tam olarak bu istekte biniyor, API çağrısında değil.
+	if a := p.authHeader(); a != "" {
+		h["Authorization"] = a
+	}
+	if len(h) == 0 {
 		return nil
 	}
+	return h
 }
 
 // Resolve, albüm için TEK istek atar ve gömülü files[] dizisinden Item üretir.

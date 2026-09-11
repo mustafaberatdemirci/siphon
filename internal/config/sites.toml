@@ -56,6 +56,30 @@ base_delay = "1s"
 max_delay = "60s"
 max_elapsed = "10m"
 
+# ÜCRETLİ HESAP ANAHTARI (isteğe bağlı).
+#
+# pixeldrain'in belgesi: "Hotlinking is only allowed when either the uploader
+# or the downloader has a premium subscription." Üçüncü parti bir indirici
+# tanım gereği hotlink. Bir dosyanın indirme sayısı görüntülenme sayısının
+# ÜÇ KATINI aşınca captcha kapısı iniyor (file_rate_limited_captcha_required)
+# ve bu dosya başına bir sayaç: VPN ile IP değiştirmek hiçbir şey değiştirmez.
+#
+# Anahtar BU DOSYAYA YAZILMAZ (binary'ye gömülü ve repoda). exe'nin yanına
+# ya da çalışma dizinine ayrı bir sites.toml koyun; yalnızca değiştirmek
+# istediğiniz anahtarı yazmanız yeterli, gerisi gömülü kopyayla birleşir:
+#
+#   schema_version = 1
+#   [[site]]
+#   name = "pixeldrain"
+#   [site.extra]
+#   api_key = "buraya-anahtar"
+#
+# Anahtar pixeldrain.com > hesap > API keys sayfasından alınır. HTTP Basic ile
+# gönderilir (kullanıcı adı boş, parola anahtar); log'a ve kayda yazılmaz.
+#
+# Captcha'yı çözmek veya görüntülenme sayısını şişirmek KAPSAM DIŞI: birincisi
+# projenin ilk günkü sınırı, ikincisi sitenin erişim kontrolünü kandırmak.
+
 [[site]]
 name = "bunkr"
 

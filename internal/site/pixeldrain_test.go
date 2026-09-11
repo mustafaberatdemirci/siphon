@@ -2,6 +2,7 @@ package site
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -468,5 +469,65 @@ func TestPixeldrainImplementsStatusClassifier(t *testing.T) {
 	var r Resolver = NewPixeldrain(testCfg())
 	if _, ok := r.(StatusClassifier); !ok {
 		t.Fatal("pixeldrain StatusClassifier arayuzunu karsilamiyor")
+	}
+}
+
+// --- Ucretli hesap API anahtari ---
+
+// pixeldrain'in belgesi: hotlink yalnizca ucretli hesapla serbest ve sinir
+// DOSYA BASINA bir sayac (indirme > 3 x goruntulenme). Tasarlanmis cikis yolu
+// API anahtari: HTTP Basic, kullanici adi bos, parola anahtar. Hem API
+// cagrisina hem TRANSFER istegine gitmeli; sinir asil transferde biniyor.
+func TestPixeldrainAPIKeyIsSentAsBasicAuth(t *testing.T) {
+	var gotAuth string
+	p, _ := newTestResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"id":"xyz789","name":"tek.bin","size":42}`))
+	})
+	p.apiKey = "gizli-anahtar"
+
+	var it Item
+	if _, err := p.Resolve(context.Background(), "https://pixeldrain.com/u/xyz789",
+		func(i Item) error { it = i; return nil }); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	// Belgedeki bicim: Basic base64(":" + api_key)
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte(":gizli-anahtar"))
+	if gotAuth != want {
+		t.Errorf("API cagrisinda Authorization = %q, %q bekleniyordu", gotAuth, want)
+	}
+	if it.Headers["Authorization"] != want {
+		t.Errorf("transfer basliginda Authorization = %q; sinir asil burada biniyor", it.Headers["Authorization"])
+	}
+}
+
+// Anahtar yoksa hicbir Authorization basligi gitmemeli: bos Basic gondermek
+// anonim istegi "kimlik dogrulama basarisiz" durumuna dusurebilir.
+func TestPixeldrainNoAPIKeyMeansNoAuthHeader(t *testing.T) {
+	var gotAuth string
+	p, _ := newTestResolver(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"id":"xyz789","name":"tek.bin","size":42}`))
+	})
+	var it Item
+	_, _ = p.Resolve(context.Background(), "https://pixeldrain.com/u/xyz789",
+		func(i Item) error { it = i; return nil })
+	if gotAuth != "" {
+		t.Errorf("anahtarsiz Authorization gitti: %q", gotAuth)
+	}
+	if _, ok := it.Headers["Authorization"]; ok {
+		t.Error("anahtarsiz transfer basliginda Authorization var")
+	}
+}
+
+// Anahtar config'ten (Extra) okunmali; bosluklar kirpilmali.
+func TestPixeldrainAPIKeyFromConfig(t *testing.T) {
+	cfg := testCfg()
+	cfg.Extra = map[string]string{ExtraPixeldrainAPIKey: "  abc123  "}
+	p := NewPixeldrain(cfg).(*pixeldrain)
+	if p.apiKey != "abc123" {
+		t.Errorf("apiKey = %q", p.apiKey)
 	}
 }
