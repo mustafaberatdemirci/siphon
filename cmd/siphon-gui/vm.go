@@ -264,7 +264,7 @@ func waitingMeta(j queue.Job, now time.Time) string {
 	if left < time.Minute {
 		return "kota doldu  ·  birazdan yeniden denenecek"
 	}
-	return fmt.Sprintf("kota doldu  ·  %s'de yeniden denenecek (%s)  ·  IP değiştirdiysen ▶",
+	return fmt.Sprintf("kota doldu  ·  VPN değişince ya da %s'de kendiliğinden sürer (%s)  ·  ▶ şimdi dene",
 		j.RetryAt.Local().Format("15:04"), site.FormatWait(left))
 }
 

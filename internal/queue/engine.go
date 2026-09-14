@@ -44,10 +44,22 @@ type Options struct {
 	// Arka plan goroutine'lerinden gelir; arayüz kendi iş parçacığına taşımalı.
 	OnChange func(Job)
 
+	// QuotaProbeEvery, kota bekleyen iş varken sitenin "payım var mı" diye
+	// ne sıklıkla sorulacağı; 0 ise DefaultQuotaProbeEvery.
+	QuotaProbeEvery time.Duration
+
 	// Testler için: verilirse config yüklenmez, bunlar kullanılır.
 	Resolvers []site.Resolver
 	Configs   []site.SiteConfig
 }
+
+// DefaultQuotaProbeEvery: MegaBasterd de IP'yi 30 saniyede bir yokluyor;
+// tek bir küçük JSON çağrısı, bant genişliği harcamıyor.
+const DefaultQuotaProbeEvery = 30 * time.Second
+
+// maxQuotaProbeEvery, arka arkaya boşa çıkan serbest bırakmalardan sonra
+// yoklamanın seyrelebileceği üst sınır.
+const maxQuotaProbeEvery = 10 * time.Minute
 
 // Engine, kuyruğun kendisi.
 type Engine struct {
@@ -80,6 +92,11 @@ type Engine struct {
 	// başladı?" sorusuna cevap; kotadan önce başlamış ve yalnızca bitmesine
 	// izin verilmiş bir aktarım kotanın açıldığını kanıtlamaz.
 	holdSince map[string]time.Time
+	// Kota yoklaması (site.QuotaProber olan siteler için):
+	probing     map[string]bool          // şu anda yoklanan siteler
+	nextProbe   map[string]time.Time     // sıradaki yoklama zamanı
+	probeEvery  map[string]time.Duration // sitenin güncel yoklama aralığı
+	lastRelease map[string]time.Time     // bekleyenlerin en son ne zaman salındığı
 
 	wake chan struct{}
 
@@ -91,6 +108,18 @@ type Engine struct {
 func New(opt Options) (*Engine, error) {
 	if opt.MaxActive <= 0 {
 		opt.MaxActive = DefaultMaxActive
+	}
+	// Log kancaları isteğe bağlı; motor içinde her çağrıda nil kontrolü
+	// yerine bir kez boşla dolduruluyor.
+	noop := func(string, ...any) {}
+	if opt.Events.Debugf == nil {
+		opt.Events.Debugf = noop
+	}
+	if opt.Events.Infof == nil {
+		opt.Events.Infof = noop
+	}
+	if opt.Events.Errorf == nil {
+		opt.Events.Errorf = noop
 	}
 	e := &Engine{
 		opt:       opt,
@@ -104,6 +133,15 @@ func New(opt Options) (*Engine, error) {
 		wipeWant:  map[string]bool{},
 		ledgers:   map[string]*store.Ledger{},
 		wake:      make(chan struct{}, 1),
+
+		holdSince:   map[string]time.Time{},
+		probing:     map[string]bool{},
+		nextProbe:   map[string]time.Time{},
+		probeEvery:  map[string]time.Duration{},
+		lastRelease: map[string]time.Time{},
+	}
+	if e.opt.QuotaProbeEvery <= 0 {
+		e.opt.QuotaProbeEvery = DefaultQuotaProbeEvery
 	}
 	if e.client == nil {
 		e.client = snet.NewClient()
@@ -428,10 +466,15 @@ func (e *Engine) Run(ctx context.Context) {
 	timer.Stop()
 	defer timer.Stop()
 	for {
-		e.releaseDue(time.Now())
+		now := time.Now()
+		e.releaseDue(now)
 		e.dispatch(ctx)
-		// Bekleyen iş varsa en yakın RetryAt'te uyan.
-		if next, ok := e.nextRetry(); ok {
+		// Bekleyen iş varsa: en yakın RetryAt'te ya da sıradaki yoklamada uyan.
+		next, ok := e.nextRetry()
+		if pn, pok := e.startProbes(ctx, now); pok && (!ok || pn.Before(next)) {
+			next, ok = pn, true
+		}
+		if ok {
 			if !timer.Stop() {
 				select {
 				case <-timer.C:
@@ -476,6 +519,7 @@ func (e *Engine) releaseDue(now time.Time) {
 			j.RetryAt = time.Time{}
 			j.Error = ""
 			delete(e.holdSince, j.Site)
+			e.lastRelease[j.Site] = now
 			snaps = append(snaps, *j)
 		}
 	}
@@ -485,6 +529,80 @@ func (e *Engine) releaseDue(now time.Time) {
 	}
 	if len(snaps) > 0 {
 		e.scheduleSave()
+	}
+}
+
+// startProbes, kilidi kendisi alır: kota bekleyen işi olan ve QuotaProber
+// uygulayan her site için sırası gelmişse arka planda bir yoklama başlatır.
+// Sıradaki en erken yoklama zamanını döndürür (zamanlayıcı için).
+//
+// MegaBasterd'in "IP değişti mi" döngüsünün karşılığı; fark, IP'yi dış bir
+// servise sormak yerine siteye "payım var mı" diye sormak. VPN değişince de
+// süre erken dolunca da cevap "evet" olur ve işler ▶ beklemeden sürer.
+func (e *Engine) startProbes(ctx context.Context, now time.Time) (time.Time, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	waitingSites := map[string]bool{}
+	for _, j := range e.jobs {
+		if j.State == StateWaiting {
+			waitingSites[j.Site] = true
+		}
+	}
+	var next time.Time
+	for name := range waitingSites {
+		w, ok := e.workers[name]
+		if !ok {
+			continue
+		}
+		p, ok := w.Resolver.(site.QuotaProber)
+		if !ok || e.probing[name] {
+			continue
+		}
+		at, scheduled := e.nextProbe[name]
+		if !scheduled {
+			at = now.Add(e.probeEvery[name])
+			e.nextProbe[name] = at
+		}
+		if at.After(now) {
+			if next.IsZero() || at.Before(next) {
+				next = at
+			}
+			continue
+		}
+		e.probing[name] = true
+		every := e.probeEvery[name]
+		if every <= 0 {
+			every = e.opt.QuotaProbeEvery
+		}
+		e.nextProbe[name] = now.Add(every)
+		if next.IsZero() || e.nextProbe[name].Before(next) {
+			next = e.nextProbe[name]
+		}
+		go e.probe(ctx, name, p)
+	}
+	return next, !next.IsZero()
+}
+
+// probe, siteye payı sorar; varsa bekleyenleri salar.
+func (e *Engine) probe(ctx context.Context, name string, p site.QuotaProber) {
+	avail, err := p.QuotaAvailable(ctx)
+	e.mu.Lock()
+	delete(e.probing, name)
+	var snaps []Job
+	if err == nil && avail {
+		snaps = e.releaseSite(name, time.Now())
+	}
+	e.mu.Unlock()
+	if err != nil {
+		e.opt.Events.Debugf("kota yoklaması (%s): %v", name, err)
+	}
+	for _, s := range snaps {
+		e.changed(s)
+	}
+	if len(snaps) > 0 {
+		e.opt.Events.Infof("%s: pay açıldı, %d bekleyen iş kuyruğa döndü", name, len(snaps))
+		e.scheduleSave()
+		e.kick()
 	}
 }
 
@@ -504,10 +622,20 @@ func (e *Engine) enterQuotaWait(j *Job, wait time.Duration, msg string) []Job {
 	}
 	now := time.Now()
 	until := now.Add(wait)
-	if e.holdSince == nil {
-		e.holdSince = map[string]time.Time{}
-	}
 	e.holdSince[j.Site] = now
+	// Yoklama az önce "pay var" deyip salmış ve hemen yine kota geldiyse
+	// yoklamayı seyrelt; API ile CDN aynı fikirde olmayabiliyor.
+	every := e.opt.QuotaProbeEvery
+	if last, ok := e.lastRelease[j.Site]; ok && now.Sub(last) < 2*time.Minute {
+		if prev := e.probeEvery[j.Site]; prev > 0 {
+			every = prev * 2
+		}
+		if every > maxQuotaProbeEvery {
+			every = maxQuotaProbeEvery
+		}
+	}
+	e.probeEvery[j.Site] = every
+	e.nextProbe[j.Site] = now.Add(every)
 	var snaps []Job
 	for _, o := range e.jobs {
 		if o.Site != j.Site {
@@ -533,6 +661,7 @@ func (e *Engine) releaseSite(siteName string, started time.Time) []Job {
 		return nil
 	}
 	delete(e.holdSince, siteName)
+	e.lastRelease[siteName] = time.Now()
 	var snaps []Job
 	for _, o := range e.jobs {
 		if o.Site == siteName && o.State == StateWaiting {
@@ -613,6 +742,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 			live.FinishedAt = time.Now()
 			live.Error = ""
 			extra = e.releaseSite(live.Site, started)
+			delete(e.probeEvery, live.Site) // seyreltme sıfırlansın
 		case run.OutcomeSkipped:
 			live.State = StateSkipped
 			live.Done = outcome.Entry.Size

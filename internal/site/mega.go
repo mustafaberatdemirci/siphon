@@ -308,31 +308,61 @@ func (m *mega) quotaWait(ctx context.Context) time.Duration {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	var wait time.Duration
-	results, err := m.call(ctx, "", []any{map[string]any{"a": "uq", "xfer": 1}})
-	if err == nil && len(results) > 0 {
-		var uq struct {
-			ResetIn   int64 `json:"bt"`  // sıfırlanmaya kalan saniye
-			Remaining int64 `json:"tar"` // kalan pay (bayt)
+	if st, err := m.quotaStatus(ctx); err == nil && st.ResetIn > 0 {
+		wait = time.Duration(st.ResetIn) * time.Second
+		// Sınırlar: API'nin saçma bir değeri kuyruğu günlerce kilitlemesin.
+		if wait < time.Minute {
+			wait = time.Minute
 		}
-		if derr := m.decodeResult(results[0], &uq, m.api); derr == nil && uq.ResetIn > 0 {
-			wait = time.Duration(uq.ResetIn) * time.Second
-			// Sınırlar: API'nin saçma bir değeri kuyruğu günlerce kilitlemesin.
-			if wait < time.Minute {
-				wait = time.Minute
-			}
-			if wait > 6*time.Hour {
-				wait = 6 * time.Hour
-			}
+		if wait > 6*time.Hour {
+			wait = 6 * time.Hour
 		}
 	}
 	m.quotaMu.Lock()
 	m.quotaCached = wait
 	m.quotaMu.Unlock()
 	return wait
+}
+
+// megaQuota, "uq" yanıtının işimize yarayan alanları. Remaining işaretçi:
+// alan hiç yoksa (bu IP'den henüz hiç indirilmemiş) ile sıfır (pay bitmiş)
+// farklı anlamlar.
+type megaQuota struct {
+	ResetIn   int64  `json:"bt"`  // sıfırlanmaya kalan saniye
+	Remaining *int64 `json:"tar"` // kalan pay (bayt)
+}
+
+// quotaStatus, kotayı API'ye sorar (10 sn zaman aşımı).
+func (m *mega) quotaStatus(ctx context.Context) (megaQuota, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	results, err := m.call(ctx, "", []any{map[string]any{"a": "uq", "xfer": 1}})
+	if err != nil {
+		return megaQuota{}, err
+	}
+	if len(results) == 0 {
+		return megaQuota{}, Errorf(LayerParse, m.api, "uq boş dizi döndü")
+	}
+	var st megaQuota
+	if err := m.decodeResult(results[0], &st, m.api); err != nil {
+		return megaQuota{}, err
+	}
+	return st, nil
+}
+
+// QuotaAvailable, site.QuotaProber: bu IP'nin şu anda aktarım payı var mı?
+//
+// MegaBasterd aynı işi dış bir "IP'm ne?" servisine sorup IP değişimini
+// izleyerek yapıyor. Burada MEGA'nın kendi cevabı kullanılıyor: IP değişince
+// de, süre dolunca da "uq" payın olduğunu söyler; üçüncü bir tarafa gidilmez.
+// Yanıtta "tar" yoksa bu IP'den hiç indirilmemiş demektir: pay var.
+func (m *mega) QuotaAvailable(ctx context.Context) (bool, error) {
+	st, err := m.quotaStatus(ctx)
+	if err != nil {
+		return false, err
+	}
+	return st.Remaining == nil || *st.Remaining > 0, nil
 }
 
 func (m *mega) callOnce(ctx context.Context, folder string, payload []byte) ([]json.RawMessage, error) {

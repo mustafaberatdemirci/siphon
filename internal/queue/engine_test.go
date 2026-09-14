@@ -131,6 +131,28 @@ type fakeResolver struct {
 
 	mu          sync.Mutex
 	resolveOnes int
+	quotaOK     bool // QuotaAvailable'in cevabi ("VPN degisti, pay var")
+	probes      int
+}
+
+// QuotaAvailable, site.QuotaProber (mega'nin "uq" sorgusu gibi).
+func (r *fakeResolver) QuotaAvailable(context.Context) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.probes++
+	return r.quotaOK, nil
+}
+
+func (r *fakeResolver) setQuotaOK(ok bool) {
+	r.mu.Lock()
+	r.quotaOK = ok
+	r.mu.Unlock()
+}
+
+func (r *fakeResolver) probeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.probes
 }
 
 // fakeCaptchaErr, site.StatusClassifier'in captcha sinyali: politika bunu
@@ -883,6 +905,82 @@ func TestQuotaResumeOneFailingKeepsSiblingsWaiting(t *testing.T) {
 	}
 	if got := jobByName(h.e, "b.bin"); got.State != StateWaiting || got.ID != b.ID {
 		t.Errorf("b %s, beklemede kalmaliydi", got.State)
+	}
+}
+
+// MegaBasterd davranisi: kullanici VPN'i degistirir, BASKA HICBIR SEY YAPMAZ,
+// indirmeler kendiliginden surer. Kuyruk bekleyen is varken siteye "payim var
+// mi" diye soruyor; "evet" gelince bekleyenler taze cozumlemeyle kuyruga doner.
+func TestQuotaProbeResumesWithoutUserAction(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateWaiting, 10*time.Second)
+	}
+	// Yoklama surmeli ama pay yokken kimse baslamamali.
+	time.Sleep(350 * time.Millisecond)
+	if r.probeCount() < 2 {
+		t.Fatalf("yoklama yapilmiyor: %d", r.probeCount())
+	}
+	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
+		t.Fatalf("pay yokken is %s oldu", got)
+	}
+	before := r.resolveOneCount()
+
+	// VPN degisti: CDN izin veriyor, API "pay var" diyor. Kullanici hicbir sey yapmiyor.
+	f.setQuota(false)
+	r.setQuotaOK(true)
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateDone, 10*time.Second)
+	}
+	if r.resolveOneCount() <= before {
+		t.Error("salinan isler taze cozumleme yapmadi (adres eski IP'ye bagliydi)")
+	}
+}
+
+// API "pay var" der ama CDN yine 509 verirse yoklama seyrelmeli (2x, 10 dk
+// tavan), sonsuz bir "sal-509-bekle" dongusu her 30 saniyede istek harcamasin.
+func TestQuotaProbeBacksOffWhenReleaseFailsAgain(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
+	r := &fakeResolver{f: f, quotaWait: time.Hour, quotaOK: true} // API hep "var" diyor
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	id := jobByName(h.e, "a.bin").ID
+	h.waitState(id, StateWaiting, 10*time.Second)
+
+	// Ikinci ve ucuncu kez beklemeye dusmesini bekle (sal -> 509 -> bekle).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && f.hitCount("a.bin") < 3 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if f.hitCount("a.bin") < 3 {
+		t.Fatalf("yoklama isi yeniden denemedi: %d istek", f.hitCount("a.bin"))
+	}
+	h.e.mu.Lock()
+	every := h.e.probeEvery["fake"]
+	h.e.mu.Unlock()
+	if every < 400*time.Millisecond {
+		t.Errorf("yoklama seyrelmedi: %s (en az 4x beklenirdi)", every)
 	}
 }
 

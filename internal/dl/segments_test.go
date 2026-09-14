@@ -42,6 +42,10 @@ type segServer struct {
 	holdAll chan struct{} // nil degilse govdeler ilk 4 KB'den sonra bekler
 	limit   int32         // >0 ise bu kadardan fazla es zamanli istek 503 alir
 	rejects int32
+	// slow: kabul edilen aralik istekleri govdeyi yazmadan once bu kadar
+	// bekler. Yerel sunucu 256 KB'lik parcayi mikrosaniyelerde bitiriyor;
+	// beklemeden es zamanlilik hic olusmuyor ve "limit" testi bos donuyordu.
+	slow time.Duration
 }
 
 func newSegServer(t *testing.T, size int) *segServer {
@@ -75,6 +79,9 @@ func (s *segServer) serve(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&s.rejects, 1)
 		http.Error(w, "cok fazla baglanti", http.StatusServiceUnavailable)
 		return
+	}
+	if s.slow > 0 && r.Header.Get("Range") != "bytes=0-0" {
+		time.Sleep(s.slow)
 	}
 
 	w.Header().Set("ETag", s.etag)
@@ -387,6 +394,7 @@ func TestLinearPartIsNotConvertedToSegments(t *testing.T) {
 func TestSegmentedAdaptsToServerConnectionLimit(t *testing.T) {
 	s := newSegServer(t, 1<<20)
 	atomic.StoreInt32(&s.limit, 2)
+	s.slow = 50 * time.Millisecond
 	out := tempDir(t)
 	// Logf birden fazla parca goroutine'inden gelir; kilitsiz append yaris.
 	var logMu sync.Mutex

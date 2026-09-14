@@ -100,6 +100,14 @@ func (e *QuotaError) Error() string {
 
 func (e *QuotaError) Unwrap() error { return e.Err }
 
+// QuotaProber, sitenin "bu IP'nin şu anda aktarım payı var mı" sorusuna
+// ucuz bir API çağrısıyla cevap verebildiğini söyler. Kuyruk, kota bekleyen
+// iş varken bunu aralıklarla sorar: kullanıcı VPN değiştirdiğinde ya da süre
+// erken dolduğunda işler kendiliğinden sürer, ▶ beklenmez. İsteğe bağlı.
+type QuotaProber interface {
+	QuotaAvailable(ctx context.Context) (bool, error)
+}
+
 // QuotaOf, zincirdeki QuotaError'ı döndürür.
 func QuotaOf(err error) (*QuotaError, bool) {
 	var q *QuotaError
