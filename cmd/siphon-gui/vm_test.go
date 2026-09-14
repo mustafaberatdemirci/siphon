@@ -152,6 +152,20 @@ func TestWaitingMetaShowsRetryClock(t *testing.T) {
 	}
 }
 
+// Bildirim govdesi: ne yapilacagi ve yapilmazsa ne olacagi.
+func TestQuotaHoldMessage(t *testing.T) {
+	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
+	got := quotaHoldMessage(now.Add(5*time.Hour+6*time.Minute), now)
+	for _, want := range []string{"VPN", "kendiliğinden", "20:31", "5 sa 6 dk"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q icinde %q yok", got, want)
+		}
+	}
+	if got := quotaHoldMessage(time.Time{}, now); !strings.Contains(got, "kendiliğinden") || strings.Contains(got, "yeniden denenecek") {
+		t.Errorf("saatsiz mesaj: %q", got)
+	}
+}
+
 // --- Satir bicimlendirme ---
 
 func TestRowMetaByState(t *testing.T) {

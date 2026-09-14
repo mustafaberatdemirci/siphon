@@ -49,6 +49,14 @@ func main() {
 		},
 		OnChange: vm.Apply,
 		OnNotice: vm.Notify,
+		// Kota dolunca sistem bildirimi: kullanıcı pencereye bakmıyor olsa da
+		// "VPN'i değiştir" haberini alsın; değiştirince kuyruk kendiliğinden
+		// sürer (yoklama). Komut kutusu doluysa zaten otomatik.
+		OnQuotaHold: func(siteName string, retryAt time.Time) {
+			a.SendNotification(fyne.NewNotification(
+				"Siphon — "+siteName+" kotası doldu",
+				quotaHoldMessage(retryAt, time.Now())))
+		},
 	})
 	if err != nil {
 		// Config yüklenemedi: pencere açılsın ama sebebini söylesin.

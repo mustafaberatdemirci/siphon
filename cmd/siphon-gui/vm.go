@@ -268,6 +268,15 @@ func waitingMeta(j queue.Job, now time.Time) string {
 		j.RetryAt.Local().Format("15:04"), site.FormatWait(left))
 }
 
+// quotaHoldMessage, kota bildiriminin gövdesi: ne oldu, ne yapılabilir.
+func quotaHoldMessage(retryAt, now time.Time) string {
+	if retryAt.IsZero() || retryAt.Before(now) {
+		return "VPN sunucusunu değiştirirsen indirmeler kendiliğinden sürer."
+	}
+	return fmt.Sprintf("VPN sunucusunu değiştirirsen indirmeler kendiliğinden sürer; değiştirmezsen %s'de (%s sonra) yeniden denenecek.",
+		retryAt.Local().Format("15:04"), site.FormatWait(retryAt.Sub(now)))
+}
+
 // rowMeta, satırın sağ üstündeki bilgi: duruma göre boyut/hız/kalan ya da hata.
 func rowMeta(r row) string {
 	j := r.Job

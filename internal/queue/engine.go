@@ -48,6 +48,11 @@ type Options struct {
 	// OnNotice, kullanıcıya gösterilmeye değer tek satırlık olaylar: kota
 	// komutu çalıştı/başarısız oldu, pay açıldı. İsteğe bağlı.
 	OnNotice func(string)
+	// OnQuotaHold, bir sitenin kotası dolup işler beklemeye alındığında
+	// (site başına en sık 10 dk'da bir) çağrılır. Arayüz bunu sistem
+	// bildirimine çeviriyor: kullanıcı uygulamaya bakmıyor olsa da "VPN'i
+	// değiştir" haberini alsın. İsteğe bağlı.
+	OnQuotaHold func(siteName string, retryAt time.Time)
 
 	// QuotaProbeEvery, kota bekleyen iş varken sitenin "payım var mı" diye
 	// ne sıklıkla sorulacağı; 0 ise DefaultQuotaProbeEvery.
@@ -73,6 +78,11 @@ const QuotaCommandCooldown = 2 * time.Minute
 // quotaCommandProbeDelay: komut bitince yoklama bu kadar sonra yapılır;
 // VPN tünelinin oturması için kısa bir pay.
 const quotaCommandProbeDelay = 3 * time.Second
+
+// quotaHoldNotifyEvery: aynı site için OnQuotaHold en sık bu aralıkla.
+// Yoklama "var" deyip CDN yine 509 verirse bekleme yeniden kurulur; her
+// seferinde bildirim yağmasın.
+const quotaHoldNotifyEvery = 10 * time.Minute
 
 // Engine, kuyruğun kendisi.
 type Engine struct {
@@ -115,6 +125,7 @@ type Engine struct {
 	quotaCmdRunning bool
 	quotaCmdLast    time.Time
 	runCtx          context.Context // Run'ın bağlamı; komut ve yoklamalar buna bağlı
+	quotaNotified   map[string]time.Time
 
 	wake chan struct{}
 
@@ -157,6 +168,8 @@ func New(opt Options) (*Engine, error) {
 		nextProbe:   map[string]time.Time{},
 		probeEvery:  map[string]time.Duration{},
 		lastRelease: map[string]time.Time{},
+
+		quotaNotified: map[string]time.Time{},
 	}
 	if e.opt.QuotaProbeEvery <= 0 {
 		e.opt.QuotaProbeEvery = DefaultQuotaProbeEvery
@@ -823,10 +836,27 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 		}
 	}
 	if quotaHit {
+		e.notifyQuotaHold(snap.Site, snap.RetryAt)
 		e.maybeRunQuotaCommand()
 	}
 	e.scheduleSave()
 	e.kick()
+}
+
+// notifyQuotaHold, OnQuotaHold'u site başına seyrek çağırır.
+func (e *Engine) notifyQuotaHold(siteName string, retryAt time.Time) {
+	if e.opt.OnQuotaHold == nil {
+		return
+	}
+	e.mu.Lock()
+	last := e.quotaNotified[siteName]
+	if time.Since(last) < quotaHoldNotifyEvery {
+		e.mu.Unlock()
+		return
+	}
+	e.quotaNotified[siteName] = time.Now()
+	e.mu.Unlock()
+	go e.opt.OnQuotaHold(siteName, retryAt)
 }
 
 // ---------- Kota komutu ----------

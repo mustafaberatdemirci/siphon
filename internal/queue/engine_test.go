@@ -1047,6 +1047,47 @@ func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 	}
 }
 
+// Kota dolunca OnQuotaHold BIR kez cagrilmali (uc is ayni anda 509 alsa da);
+// arayuz bunu sistem bildirimine ceviriyor.
+func TestQuotaHoldNotifiesOnce(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 3)
+	h.e.opt.QuotaProbeEvery = time.Hour
+	got := make(chan string, 8)
+	h.e.opt.OnQuotaHold = func(site string, at time.Time) {
+		if at.IsZero() {
+			t.Error("RetryAt bos geldi")
+		}
+		got <- site
+	}
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateWaiting, 10*time.Second)
+	}
+	select {
+	case s := <-got:
+		if s != "fake" {
+			t.Errorf("site = %q", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnQuotaHold cagrilmadi")
+	}
+	select {
+	case <-got:
+		t.Error("OnQuotaHold ikinci kez cagrildi; site basina 10 dk'da bir olmali")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 // Basarisiz komut kuyrugu bozmamali: is beklemede kalir, bildirim sebebi ve
 // komutun ciktisini soyler, sonraki kota yine (sogumadan sonra) deneyebilir.
 func TestQuotaCommandFailureIsReported(t *testing.T) {

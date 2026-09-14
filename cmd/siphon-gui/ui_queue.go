@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 )
 
@@ -119,12 +120,14 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 
 	toolbar := container.NewHBox(q.pauseAll, clearBtn, openBtn, widget.NewLabel("   "), speedBox, widget.NewLabel("  "), segBox)
 
-	// --- Kota komutu ---
-	// mega'nın IP başına kotası dolunca çalıştırılacak komut; tipik olarak VPN
-	// sunucusunu değiştiren bir betik (MegaBasterd'in "509'da komut çalıştır"
-	// özelliği). Boşsa kapalı. Komut bitince pay hemen yoklanır.
+	// --- VPN değiştirme komutu (isteğe bağlı) ---
+	// mega'nın IP başına kotası dolunca çalıştırılır; VPN sunucusunu
+	// değiştiren bir komut (MegaBasterd'in "509'da komut çalıştır" özelliği).
+	// BOŞ OLMASI NORMAL: o zaman kota dolunca sistem bildirimi gelir,
+	// kullanıcı VPN'i kendi programından değiştirir, kuyruk 30 sn içinde
+	// fark edip sürer. Kutu yalnızca bu adımı otomatikleştirmek isteyene.
 	q.quotaCmd = widget.NewEntry()
-	q.quotaCmd.SetPlaceHolder(`boş = kapalı   ·   ör. "C:\vpn\degistir.bat"  ya da  nordvpn -c`)
+	q.quotaCmd.SetPlaceHolder("isteğe bağlı — boşsa kota dolunca bildirim gelir, VPN'i sen değiştirirsin")
 	if saved := prefs.String(prefQuotaCmd); saved != "" {
 		q.quotaCmd.SetText(saved)
 		eng.SetQuotaCommand(saved)
@@ -133,7 +136,8 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 		eng.SetQuotaCommand(v)
 		prefs.SetString(prefQuotaCmd, strings.TrimSpace(v))
 	}
-	quotaRow := container.NewBorder(nil, nil, widget.NewLabel("Kota dolunca çalıştır"), nil, q.quotaCmd)
+	tryBtn := widget.NewButton("Dene", q.tryQuotaCommand)
+	quotaRow := container.NewBorder(nil, nil, widget.NewLabel("VPN değiştirme komutu"), tryBtn, q.quotaCmd)
 
 	// --- Liste ---
 	q.list = widget.NewList(
@@ -256,6 +260,42 @@ func (q *queueTab) togglePauseAll() {
 		q.pauseAll.SetText("▶ Tümünü sürdür")
 	}
 	q.vm.Replace(q.eng.Jobs())
+}
+
+// tryQuotaCommand, kutudaki komutu şimdi çalıştırıp sonucunu gösterir:
+// kullanıcı kota dolmasını beklemeden komutun doğru olduğunu görsün.
+func (q *queueTab) tryQuotaCommand() {
+	line := strings.TrimSpace(q.quotaCmd.Text)
+	if line == "" {
+		dialog.ShowInformation("Komut yok",
+			"Bu kutu isteğe bağlı. Boş bırakırsan kota dolunca bir bildirim gelir; VPN'i kendi programından değiştirirsin, indirmeler kendiliğinden sürer.\n\n"+
+				"Doldurursan Siphon kota dolunca bu komutu senin yerine çalıştırır. Hangi VPN'i kullandığına göre değişir; ör. NordVPN: \"C:\\Program Files\\NordVPN\\NordVPN.exe\" -c",
+			q.win)
+		return
+	}
+	q.vm.Notify("Komut deneniyor: " + line)
+	go func() {
+		start := time.Now()
+		out, err := hook.Run(context.Background(), line, 0)
+		took := time.Since(start).Round(time.Second)
+		fyne.Do(func() {
+			switch {
+			case err != nil && out != "":
+				dialog.ShowError(fmt.Errorf("komut başarısız (%v):\n\n%s", err, out), q.win)
+				q.vm.Notify("Komut başarısız: " + firstLine(err.Error()))
+			case err != nil:
+				dialog.ShowError(fmt.Errorf("komut başarısız: %v", err), q.win)
+				q.vm.Notify("Komut başarısız: " + firstLine(err.Error()))
+			default:
+				msg := fmt.Sprintf("Komut %s içinde bitti.", took)
+				if out != "" {
+					msg += "\n\nÇıktı:\n" + out
+				}
+				dialog.ShowInformation("Komut çalıştı", msg, q.win)
+				q.vm.Notify(fmt.Sprintf("Komut çalıştı (%s).", took))
+			}
+		})
+	}()
 }
 
 // openFolder, son inen dosyayı klasöründe seçili açar; yoksa çıktı kökünü.
