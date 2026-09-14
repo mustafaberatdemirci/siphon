@@ -68,8 +68,13 @@ type Engine struct {
 	wipeWant  map[string]bool               // kaldırılan iş bitince yarım dosyası silinsin mi?
 	ledgers   map[string]*store.Ledger      // outDir -> kayıt
 	pausedAll bool
-	closing   bool
-	segments  int // kullanıcının istediği bağlantı/dosya
+	// pausedByCaptcha: genel duraklatmayı kullanıcı değil, bir captcha
+	// koydu. Fark önemli: kullanıcı tek bir işe "devam" dediğinde captcha
+	// duraklatması kalkmalı (niyet açık: VPN değiştirdi, tekrar deniyor),
+	// kullanıcının kendi "Tümünü duraklat"ı ise korunmalı.
+	pausedByCaptcha bool
+	closing         bool
+	segments        int // kullanıcının istediği bağlantı/dosya
 
 	wake chan struct{}
 
@@ -237,11 +242,26 @@ func (e *Engine) Resume(id string) {
 	}
 	j.State = StateQueued
 	j.Error = ""
+	// Kullanıcı açıkça "devam" dedi. Duraklatmayı bir captcha koyduysa
+	// kaldır; aksi halde iş "sırada" görünür ama hiç başlamaz ve kullanıcı
+	// "engellendi" sanır (ölçüldü: VPN değiştirip ▶'ye basınca tam bu oldu).
+	if e.pausedAll && e.pausedByCaptcha {
+		e.pausedAll = false
+		e.pausedByCaptcha = false
+	}
 	snap := *j
 	e.mu.Unlock()
 	e.changed(snap)
 	e.scheduleSave()
 	e.kick()
+}
+
+// PausedByCaptcha, genel duraklatmanın bir captcha'dan geldiğini söyler;
+// arayüz düğme etiketinde sebebi gösteriyor.
+func (e *Engine) PausedByCaptcha() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pausedAll && e.pausedByCaptcha
 }
 
 // Remove, işi kuyruktan çıkarır. deleteFiles true ise yarım dosya ve durumu
@@ -292,6 +312,7 @@ func wipePartial(path string) {
 func (e *Engine) PauseAll() {
 	e.mu.Lock()
 	e.pausedAll = true
+	e.pausedByCaptcha = false
 	ids := make([]string, 0, len(e.active))
 	for id := range e.active {
 		ids = append(ids, id)
@@ -306,6 +327,7 @@ func (e *Engine) PauseAll() {
 func (e *Engine) ResumeAll() {
 	e.mu.Lock()
 	e.pausedAll = false
+	e.pausedByCaptcha = false
 	var snaps []Job
 	for _, j := range e.jobs {
 		if j.State == StatePaused {
@@ -498,7 +520,11 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 		}
 		if outcome.Kind == run.OutcomeStopped {
 			// Captcha tüm siteyi etkiler; başka işleri boşuna başlatma.
-			e.pausedAll = true
+			// Kullanıcı duraklatması zaten açıksa ona dokunma.
+			if !e.pausedAll {
+				e.pausedAll = true
+				e.pausedByCaptcha = true
+			}
 		}
 	}
 	var snap Job

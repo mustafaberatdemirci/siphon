@@ -154,12 +154,18 @@ func (q *queueTab) refreshLoop() {
 		}
 		summary := q.vm.Summary()
 		paused := q.eng.Paused()
+		captcha := q.eng.PausedByCaptcha()
 		fyne.Do(func() {
 			q.list.Refresh()
 			q.status.SetText(summary)
-			if paused {
+			switch {
+			case captcha:
+				// Sebep görünür olmalı: captcha kuyruğu durdurdu, kullanıcı
+				// bir işe ▶ deyince ya da buraya basınca devam eder.
+				q.pauseAll.SetText("▶ Captcha yüzünden duraklatıldı — sürdür")
+			case paused:
 				q.pauseAll.SetText("▶ Tümünü sürdür")
-			} else {
+			default:
 				q.pauseAll.SetText("⏸ Tümünü duraklat")
 			}
 		})

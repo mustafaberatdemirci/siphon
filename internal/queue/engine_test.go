@@ -30,15 +30,16 @@ type fakeSite struct {
 	srv   *httptest.Server
 	files map[string][]byte // ad -> icerik
 
-	mu    sync.Mutex
-	hold  map[string]chan struct{} // ad -> serbest birakma kanali
-	hits  map[string]int
-	delay time.Duration
+	mu     sync.Mutex
+	hold   map[string]chan struct{} // ad -> serbest birakma kanali
+	hits   map[string]int
+	delay  time.Duration
+	forbid map[string]bool // ad -> 403 don (captcha simulasyonu)
 }
 
 func newFakeSite(t *testing.T, names ...string) *fakeSite {
 	t.Helper()
-	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}}
+	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}, forbid: map[string]bool{}}
 	for _, n := range names {
 		b := make([]byte, 96*1024)
 		_, _ = rand.Read(b)
@@ -72,7 +73,12 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	ch := f.hold[name]
 	delete(f.hold, name)
 	delay := f.delay
+	forbid := f.forbid[name]
 	f.mu.Unlock()
+	if forbid {
+		http.Error(w, `{"value":"file_rate_limited_captcha_required"}`, http.StatusForbidden)
+		return
+	}
 
 	w.Header().Set("ETag", `"v1"`)
 	if ch != nil {
@@ -105,7 +111,24 @@ func (f *fakeSite) hitCount(name string) int {
 }
 
 // fakeResolver: "album://x" -> tum dosyalar; "file://<ad>" -> tek dosya.
-type fakeResolver struct{ f *fakeSite }
+type fakeResolver struct {
+	f       *fakeSite
+	captcha bool // true ise 403 "captcha gerekli" olarak siniflanir (pixeldrain gibi)
+}
+
+// fakeCaptchaErr, site.StatusClassifier'in captcha sinyali: politika bunu
+// gorunce ErrStop ile kosuyu durdurur.
+type fakeCaptchaErr struct{}
+
+func (fakeCaptchaErr) Error() string         { return "captcha gerekli (sahte)" }
+func (fakeCaptchaErr) CaptchaRequired() bool { return true }
+
+func (r *fakeResolver) ClassifyStatus(resp *http.Response, _ []byte) error {
+	if r.captcha && resp.StatusCode == http.StatusForbidden {
+		return fakeCaptchaErr{}
+	}
+	return nil
+}
 
 func (r *fakeResolver) Match(u string) bool {
 	return strings.HasPrefix(u, "album://") || strings.HasPrefix(u, "file://")
@@ -646,4 +669,69 @@ func TestSetSegmentsRespectsSiteCap(t *testing.T) {
 	if got := e.workers["fake"].Down.Segments; got != 1 || e.Segments() != 1 {
 		t.Errorf("0 istenince etkin = %d, istek = %d; ikisi de 1 olmaliydi", got, e.Segments())
 	}
+}
+
+// KULLANICININ YASADIGI: captcha kuyrugu durdurdu, VPN degistirdi, ise
+// tekrar basti -> is "sirada" gorunuyor ama hic baslamiyordu, cunku genel
+// duraklatma acikti. Tek bir isin "devam"i captcha duraklatmasini kaldirmali.
+func TestCaptchaPauseIsClearedBySingleResume(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	f.mu.Lock()
+	f.forbid["a.bin"] = true
+	f.mu.Unlock()
+	h := newHarness(t, f, "", 1)
+	// resolver'i captcha kipine al
+	h.e.resolvers[0].(*fakeResolver).captcha = true
+	h.e.workers["fake"] = newWorkerFor(t, h, true)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateStopped, 10*time.Second)
+	if !h.e.Paused() || !h.e.PausedByCaptcha() {
+		t.Fatal("captcha sonrasi genel duraklatma acilmadi")
+	}
+
+	// "VPN degistirdi": sunucu artik izin veriyor. Kullanici tek ise ▶ basiyor.
+	f.mu.Lock()
+	f.forbid["a.bin"] = false
+	f.mu.Unlock()
+	h.e.Resume(a.ID)
+
+	h.waitState(a.ID, StateDone, 10*time.Second)
+	if h.e.Paused() {
+		t.Error("tek isin devami captcha duraklatmasini kaldirmadi")
+	}
+}
+
+// Kullanicinin KENDI "Tumunu duraklat"i ise tek bir isin devamiyla kalkmamali:
+// niyet farkli, digerleri duraklatilmis kalmali.
+func TestUserPauseAllSurvivesSingleResume(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	h := newHarness(t, f, "", 1)
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.e.PauseAll()
+	a := jobByName(h.e, "a.bin")
+	h.e.Pause(a.ID) // queued -> paused
+	h.e.Resume(a.ID)
+	if !h.e.Paused() {
+		t.Fatal("kullanicinin genel duraklatmasi tek isin devamiyla kalkti")
+	}
+	if h.e.PausedByCaptcha() {
+		t.Fatal("kullanici duraklatmasi captcha sanildi")
+	}
+}
+
+// newWorkerFor, sahte resolver'in ClassifyStatus'unu tasiyan bir Worker kurar
+// (harness varsayilan olarak captcha'siz resolver ile kuruluyor).
+func newWorkerFor(t *testing.T, h *harness, captcha bool) *run.Worker {
+	t.Helper()
+	cfg := site.SiteConfig{Name: "fake", MaxConcurrent: 8, MaxRetries: 2}.WithDefaults()
+	r := &fakeResolver{f: h.f, captcha: captcha}
+	ev := run.Events{Progress: h.e.onProgress}
+	return run.NewWorker(r, cfg, h.f.srv.Client(), ev)
 }
