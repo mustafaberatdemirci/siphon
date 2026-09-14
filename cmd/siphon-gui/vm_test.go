@@ -106,6 +106,30 @@ func TestSummaryCountsAndTotalRate(t *testing.T) {
 	}
 }
 
+// Bildirim, yenileme dongusunun ozetiyle ezilmemeli: kuyruk bosken kalici,
+// kuyruk doluyken ozetle yan yana ve 30 sn sonra ozete birakir.
+func TestStatusLineKeepsNoticeOverSummary(t *testing.T) {
+	vm := newViewModel()
+	vm.TakeDirty()
+	vm.Notify("Eklenemedi: klasör boş")
+	if !vm.TakeDirty() {
+		t.Fatal("bildirim yeniden cizim istemedi")
+	}
+	now := time.Now()
+	if got := vm.statusLine(now.Add(time.Hour)); got != "Eklenemedi: klasör boş" {
+		t.Errorf("bos kuyrukta bildirim kaybolmus: %q", got)
+	}
+	vm.mu.Lock()
+	vm.apply(job("a", queue.StateQueued, 0, 5), now)
+	vm.mu.Unlock()
+	if got := vm.statusLine(now); !strings.HasPrefix(got, "Eklenemedi: klasör boş  ·  1 sırada") {
+		t.Errorf("dolu kuyrukta bildirim + ozet bekleniyordu: %q", got)
+	}
+	if got := vm.statusLine(now.Add(noticeTTL + time.Second)); got != "1 sırada" {
+		t.Errorf("suresi dolan bildirim kalkmali: %q", got)
+	}
+}
+
 // --- Satir bicimlendirme ---
 
 func TestRowMetaByState(t *testing.T) {

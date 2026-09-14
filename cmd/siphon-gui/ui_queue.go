@@ -93,7 +93,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.speed.OnChanged = func(s string) {
 		bps, err := parseSpeedLimit(s)
 		if err != nil {
-			q.status.SetText(err.Error())
+			q.vm.Notify(err.Error())
 			return
 		}
 		eng.SetSpeedLimit(bps)
@@ -130,7 +130,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 		},
 	)
 
-	q.status = widget.NewLabel(vm.Summary())
+	q.status = widget.NewLabel(vm.StatusLine())
 	q.status.Wrapping = fyne.TextWrapWord
 
 	top := container.NewVBox(
@@ -152,7 +152,7 @@ func (q *queueTab) refreshLoop() {
 		if !q.vm.TakeDirty() {
 			continue
 		}
-		summary := q.vm.Summary()
+		summary := q.vm.StatusLine()
 		paused := q.eng.Paused()
 		captcha := q.eng.PausedByCaptcha()
 		fyne.Do(func() {
@@ -186,32 +186,46 @@ func (q *queueTab) add() {
 		return
 	}
 	q.addBtn.Disable()
-	q.status.SetText(fmt.Sprintf("%d link çözümleniyor...", len(urls)))
-	q.links.SetText("")
+	q.vm.Notify(fmt.Sprintf("%d link çözümleniyor...", len(urls)))
 
 	go func() {
 		var added int
-		var errs []string
+		var errs, failed []string
 		for _, u := range urls {
 			n, err := q.eng.Add(context.Background(), u, outDir)
 			added += n
-			if err != nil {
+			switch {
+			case err != nil:
 				errs = append(errs, firstLine(err.Error()))
+				failed = append(failed, u)
+			case n == 0:
+				// Çözümleme hatasız bitti ama dosya çıkmadı: boş klasör ya da
+				// tüm dosyalar atlandı. "0 dosya eklendi" sebep söylemiyor.
+				errs = append(errs, "indirilecek dosya bulunamadı: "+u)
+				failed = append(failed, u)
 			}
 		}
 		q.vm.Replace(q.eng.Jobs())
+		q.vm.Notify(addSummary(added, errs))
 		fyne.Do(func() {
 			q.addBtn.Enable()
-			switch {
-			case len(errs) > 0 && added == 0:
-				q.status.SetText("Eklenemedi: " + strings.Join(errs, " | "))
-			case len(errs) > 0:
-				q.status.SetText(fmt.Sprintf("%d dosya eklendi; %d link hatalı: %s", added, len(errs), strings.Join(errs, " | ")))
-			default:
-				q.status.SetText(fmt.Sprintf("%d dosya kuyruğa eklendi.", added))
-			}
+			// Eklenemeyen linkler kutuda kalır; kullanıcı düzeltip yeniden
+			// dener, kopyalamak zorunda kalmaz. Eklenenler temizlenir.
+			q.links.SetText(strings.Join(failed, "\n"))
 		})
 	}()
+}
+
+// addSummary, Ekle sonucunun tek satırı.
+func addSummary(added int, errs []string) string {
+	switch {
+	case len(errs) > 0 && added == 0:
+		return "Eklenemedi: " + strings.Join(errs, " | ")
+	case len(errs) > 0:
+		return fmt.Sprintf("%d dosya eklendi; %d link eklenemedi: %s", added, len(errs), strings.Join(errs, " | "))
+	default:
+		return fmt.Sprintf("%d dosya kuyruğa eklendi.", added)
+	}
 }
 
 func (q *queueTab) togglePauseAll() {
@@ -244,12 +258,12 @@ func (q *queueTab) openFolder() {
 	target, sel, reason := pickOpenTarget(lastPath, lastDir, normalizeDir(q.outDir.Text))
 	if target == "" {
 		if reason != "" {
-			q.status.SetText(reason)
+			q.vm.Notify(reason)
 		}
 		return
 	}
 	if err := openInExplorer(target, sel); err != nil {
-		q.status.SetText("Klasör açılamadı: " + err.Error())
+		q.vm.Notify("Klasör açılamadı: " + err.Error())
 	}
 }
 

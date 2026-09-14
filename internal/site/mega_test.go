@@ -38,6 +38,21 @@ type megaFakeNode struct {
 type megaFakeFolder struct {
 	key   []byte // 16
 	nodes []megaFakeNode
+	// root, kok klasorun DUGUM handle'i. Gercek API'de bu, linkteki
+	// (paylasim) handle'indan HER ZAMAN farkli; "k" etiketleri ve "p"
+	// zinciri bununla calisir. Bos birakilirsa ilk dugum kok sayilir.
+	root string
+	// foreign, sahibinin ayni agaci daha ustten de paylastigi durumu
+	// canlandirir: her dugumun "k" alaninda ONCE bu paylasimin (bizde
+	// anahtari olmayan) girdisi, sonra bizimki gelir. Canli gozlem.
+	foreign []byte
+}
+
+func (fo megaFakeFolder) rootHandle() string {
+	if fo.root != "" {
+		return fo.root
+	}
+	return fo.nodes[0].handle
 }
 
 type megaFakeAPI struct {
@@ -127,14 +142,16 @@ func (f *megaFakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 				if n.isFolder {
 					typ = 1
 				}
-				m := map[string]any{"h": n.handle, "p": n.parent, "t": typ, "a": at, "k": folder + ":" + megacrypto.B64Encode(enc)}
+				// Gercek API: etiket = kok DUGUM handle'i (link handle'i degil);
+				// kok dugum de kendi "k"sini tasir.
+				k := fo.rootHandle() + ":" + megacrypto.B64Encode(enc)
+				if fo.foreign != nil {
+					fenc, _ := megacrypto.EncryptNodeKey(fo.foreign, n.packed)
+					k = "OwNeRdIr:" + megacrypto.B64Encode(fenc) + "/" + k
+				}
+				m := map[string]any{"h": n.handle, "p": n.parent, "t": typ, "a": at, "k": k}
 				if !n.isFolder {
 					m["s"] = n.size
-				}
-				// Kok klasorun kendi anahtari k alaninda gelmez; kok, link
-				// anahtariyla cozulur.
-				if n.handle == folder {
-					delete(m, "k")
 				}
 				nodes = append(nodes, m)
 			}
@@ -334,18 +351,59 @@ func TestMegaDecodeStreamRejectsMissingSecret(t *testing.T) {
 func setupFolder(t *testing.T, api *megaFakeAPI) (folderKey []byte, packedA, packedB, packedC []byte) {
 	t.Helper()
 	folderKey = randBytes(t, 16)
+	rootKey := randBytes(t, 16) // paylasim anahtari != kokun kendi anahtari (canli gozlem)
 	subKey := randBytes(t, 16)
 	packedA = packedKeyFor(t, []byte("a"))
 	packedB = packedKeyFor(t, []byte("b"))
 	packedC = packedKeyFor(t, []byte("c"))
-	api.folders["FoLdErHa"] = megaFakeFolder{key: folderKey, nodes: []megaFakeNode{
-		{handle: "FoLdErHa", parent: "", name: "Kök Klasör", isFolder: true, packed: folderKey},
-		{handle: "SuBfOlDr", parent: "FoLdErHa", name: "Alt", isFolder: true, packed: subKey},
-		{handle: "NoDeAAAA", parent: "FoLdErHa", name: "a.mp4", packed: packedA, size: 100},
-		{handle: "NoDeBBBB", parent: "FoLdErHa", name: "b.mp4", packed: packedB, size: 200},
+	// Link handle'i "FoLdErHa", kok DUGUM "RoOtNoDe", kokun ebeveyni
+	// "OwNeRdIr" (sahibinin hesabinda, listede yok) — canli API'nin sekli.
+	api.folders["FoLdErHa"] = megaFakeFolder{key: folderKey, root: "RoOtNoDe", nodes: []megaFakeNode{
+		{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Kök Klasör", isFolder: true, packed: rootKey},
+		{handle: "SuBfOlDr", parent: "RoOtNoDe", name: "Alt", isFolder: true, packed: subKey},
+		{handle: "NoDeAAAA", parent: "RoOtNoDe", name: "a.mp4", packed: packedA, size: 100},
+		{handle: "NoDeBBBB", parent: "RoOtNoDe", name: "b.mp4", packed: packedB, size: 200},
 		{handle: "NoDeCCCC", parent: "SuBfOlDr", name: "c.mp4", packed: packedC, size: 300},
 	}}
 	return
+}
+
+// ÖLÇÜLDÜ (mega.nz/folder/VVplxTBY): sahibi agaci daha ustten de
+// paylasmissa her dugumun "k" alaninda once o paylasimin girdisi gelir.
+// Eski kod "link handle'iyla eslesen, yoksa ILK" diyordu; link handle'i
+// hicbir zaman dugum handle'i olmadigi icin hep yabanci anahtari secti ve
+// 373 dosyanin tamami "ad cozulemedi" diye atlandi. Kuyruk bos kaldi.
+func TestMegaFolderPicksOwnShareKeyNotForeign(t *testing.T) {
+	api := newMegaFakeAPI(t)
+	folderKey, _, _, _ := setupFolder(t, api)
+	fo := api.folders["FoLdErHa"]
+	fo.foreign = randBytes(t, 16)
+	api.folders["FoLdErHa"] = fo
+	m := newMegaWith(t, api)
+
+	var got []Item
+	itemErrs, err := m.Resolve(context.Background(), "https://mega.nz/folder/FoLdErHa#"+megacrypto.B64Encode(folderKey),
+		func(it Item) error { got = append(got, it); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(itemErrs) != 0 {
+		t.Fatalf("item hatalari: %v", itemErrs)
+	}
+	if len(got) != 3 {
+		t.Fatalf("%d item cozuldu, 3 bekleniyordu", len(got))
+	}
+	byName := map[string]Item{}
+	for _, it := range got {
+		byName[it.Filename] = it
+	}
+	// Klasor adlari da dogru anahtarla cozulmeli; kok, link anahtariyla.
+	if d := byName["c.mp4"].Dir; d != "Kök Klasör/Alt" {
+		t.Errorf("c.mp4 dizini = %q", d)
+	}
+	if d := byName["a.mp4"].Dir; d != "Kök Klasör" {
+		t.Errorf("a.mp4 dizini = %q", d)
+	}
 }
 
 func TestMegaResolveFolder(t *testing.T) {
@@ -459,10 +517,10 @@ func TestMegaResolveOneRejectsBareFolder(t *testing.T) {
 func TestMegaFolderBatchesGetCalls(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	folderKey := randBytes(t, 16)
-	nodes := []megaFakeNode{{handle: "FoLdErHa", name: "Kök", isFolder: true, packed: folderKey}}
+	nodes := []megaFakeNode{{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Kök", isFolder: true, packed: folderKey}}
 	for i := 0; i < 120; i++ {
 		nodes = append(nodes, megaFakeNode{
-			handle: fmt.Sprintf("NoDe%04d", i), parent: "FoLdErHa",
+			handle: fmt.Sprintf("NoDe%04d", i), parent: "RoOtNoDe",
 			name: fmt.Sprintf("d%d.bin", i), packed: packedKeyFor(t, []byte{byte(i)}), size: 1,
 		})
 	}

@@ -436,24 +436,31 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		return nil, Errorf(LayerParse, src, "klasör boş veya listelenemedi")
 	}
 
-	// Klasör adları: her klasör düğümünün özniteliği klasör anahtarıyla
-	// (dosyalarda olduğu gibi türetilmiş anahtarla DEĞİL, doğrudan 16 baytla)
-	// çözülüyor. Alt klasörlerin kendi anahtarı da "k" alanında geliyor.
 	byHandle := map[string]megaNode{}
-	folderName := map[string]string{}
 	for _, n := range tree.Nodes {
 		byHandle[n.Handle] = n
-		if n.Type == 1 {
-			fk := ref.key
-			if n.Handle != ref.handle {
-				if dk, derr := m.nodeKey(ref, n); derr == nil && len(dk) == 16 {
-					fk = dk
-				}
+	}
+	root := megaRootOf(tree.Nodes, byHandle)
+
+	// Klasör adları: her klasör düğümünün özniteliği klasör anahtarıyla
+	// (dosyalarda olduğu gibi türetilmiş anahtarla DEĞİL, doğrudan 16 baytla)
+	// çözülüyor. ÖLÇÜLDÜ: kök de dahil — paylaşım anahtarı (linkteki) kökün
+	// kendi anahtarı DEĞİL, kökün anahtarı da "k" alanında sarılı geliyor.
+	// Link anahtarı yalnızca son çare adayı (kökte "k" yoksa).
+	folderName := map[string]string{}
+	for _, n := range tree.Nodes {
+		if n.Type != 1 {
+			continue
+		}
+		folderName[n.Handle] = n.Handle
+		cands := append(m.nodeKeyCandidates(ref, root, n), ref.key)
+		for _, dk := range cands {
+			if len(dk) != 16 {
+				continue
 			}
-			if a, aerr := megacrypto.DecryptAttrs(fk, n.Attrs); aerr == nil && a.Name != "" {
+			if a, aerr := megacrypto.DecryptAttrs(dk, n.Attrs); aerr == nil && a.Name != "" {
 				folderName[n.Handle] = a.Name
-			} else {
-				folderName[n.Handle] = n.Handle
+				break
 			}
 		}
 	}
@@ -469,7 +476,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 				break
 			}
 			parts = append([]string{folderName[cur]}, parts...)
-			if cur == ref.handle {
+			if cur == root {
 				break
 			}
 			cur = n.Parent
@@ -486,7 +493,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 				return true
 			}
 			n, ok := byHandle[cur]
-			if !ok || cur == ref.handle {
+			if !ok || cur == root {
 				return false
 			}
 			cur = n.Parent
@@ -502,23 +509,13 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		if ref.node != "" && n.Handle != ref.node && !under(n.Parent) {
 			continue
 		}
-		packed, err := m.nodeKey(ref, n)
-		if err != nil {
-			m.cfg.Logln("mega: %s düğümünün anahtarı çözülemedi: %v", n.Handle, err)
-			continue
-		}
-		key, err := megacrypto.UnpackFileKey(packed)
+		packed, name, err := m.fileKeyOf(ref, root, n)
 		if err != nil {
 			m.cfg.Logln("mega: %s düğümü: %v", n.Handle, err)
 			continue
 		}
-		attrs, err := megacrypto.DecryptAttrs(key.AES, n.Attrs)
-		if err != nil || attrs.Name == "" {
-			m.cfg.Logln("mega: %s düğümünün adı çözülemedi: %v", n.Handle, err)
-			continue
-		}
 		out = append(out, megaEntry{
-			node: n.Handle, packed: packed, name: attrs.Name, size: n.Size, dir: pathOf(n.Parent),
+			node: n.Handle, packed: packed, name: name, size: n.Size, dir: pathOf(n.Parent),
 		})
 	}
 
@@ -530,33 +527,86 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 	return out, nil
 }
 
-// nodeKey, düğümün "k" alanındaki şifreli anahtarı klasör anahtarıyla açar.
-// Alan "<paylaşım>:<anahtar>" biçiminde, birden fazlaysa "/" ile ayrılmış.
-func (m *mega) nodeKey(ref megaRef, n megaNode) ([]byte, error) {
-	if n.Key == "" {
-		return nil, errors.New("k alanı boş")
+// megaRootOf, klasör linkinin kök düğümünü bulur.
+//
+// ÖLÇÜLDÜ: linkteki handle (mega.nz/folder/<handle>) PAYLAŞIMIN handle'ı,
+// kök klasörün düğüm handle'ı DEĞİL; ikisi hiçbir zaman eşit değil.
+// "k" alanındaki etiketler ve "p" zinciri düğüm handle'ıyla çalıştığı için
+// kök ağaçtan çıkarılıyor: ebeveyni listede olmayan klasör. API kökü ilk
+// sırada döndürüyor; belirsizlikte o alınıyor.
+func megaRootOf(nodes []megaNode, byHandle map[string]megaNode) string {
+	for _, n := range nodes {
+		if n.Type == 1 {
+			if _, ok := byHandle[n.Parent]; !ok {
+				return n.Handle
+			}
+		}
 	}
-	chosen := ""
+	return nodes[0].Handle
+}
+
+// nodeKeyCandidates, düğümün "k" alanındaki anahtarları klasör anahtarıyla
+// açıp tercih sırasıyla döndürür.
+//
+// Alan "<paylaşım>:<anahtar>" biçiminde, birden fazlaysa "/" ile ayrılmış.
+// ÖLÇÜLDÜ: sahibi klasörü daha üstten de paylaşmışsa ilk etiket o üst
+// paylaşıma ait olur ve anahtarı bizde yoktur; onunla "açılan" anahtar
+// sessizce çöp çıkar. Bu yüzden kök etiketli aday öne alınıyor ve çağıran,
+// adayları özniteliği çözerek doğruluyor — hangisi "MEGA" önekini veriyorsa
+// doğru anahtar o.
+func (m *mega) nodeKeyCandidates(ref megaRef, root string, n megaNode) [][]byte {
+	var preferred, others [][]byte
 	for _, part := range strings.Split(n.Key, "/") {
 		i := strings.Index(part, ":")
 		if i < 0 {
 			continue
 		}
-		if part[:i] == ref.handle || chosen == "" {
-			chosen = part[i+1:]
-			if part[:i] == ref.handle {
-				break
-			}
+		enc, err := megacrypto.B64Decode(part[i+1:])
+		if err != nil {
+			continue
+		}
+		dec, err := megacrypto.DecryptNodeKey(ref.key, enc)
+		if err != nil {
+			continue
+		}
+		if part[:i] == root {
+			preferred = append(preferred, dec)
+		} else {
+			others = append(others, dec)
 		}
 	}
-	if chosen == "" {
-		return nil, errors.New("k alanında anahtar yok")
+	return append(preferred, others...)
+}
+
+// fileKeyOf, dosya düğümünün paketli anahtarını ve adını verir; adaylar
+// arasından özniteliği çözebileni seçer.
+func (m *mega) fileKeyOf(ref megaRef, root string, n megaNode) (packed []byte, name string, err error) {
+	if n.Key == "" {
+		return nil, "", errors.New("k alanı boş")
 	}
-	enc, err := megacrypto.B64Decode(chosen)
-	if err != nil {
-		return nil, err
+	cands := m.nodeKeyCandidates(ref, root, n)
+	if len(cands) == 0 {
+		return nil, "", errors.New("k alanında anahtar yok")
 	}
-	return megacrypto.DecryptNodeKey(ref.key, enc)
+	var last error
+	for _, c := range cands {
+		key, uerr := megacrypto.UnpackFileKey(c)
+		if uerr != nil {
+			last = uerr
+			continue
+		}
+		attrs, aerr := megacrypto.DecryptAttrs(key.AES, n.Attrs)
+		if aerr != nil {
+			last = aerr
+			continue
+		}
+		if attrs.Name == "" {
+			last = errors.New("öznitelikte dosya adı yok")
+			continue
+		}
+		return c, attrs.Name, nil
+	}
+	return nil, "", fmt.Errorf("%d anahtar adayının hiçbiri özniteliği çözmedi: %v", len(cands), last)
 }
 
 // resolveFolder, klasördeki dosyaları toplu "g" çağrılarıyla çözer ve yield eder.

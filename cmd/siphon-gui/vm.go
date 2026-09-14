@@ -22,7 +22,16 @@ type viewModel struct {
 	speed map[string]*speedo
 	rate  map[string]float64
 	dirty bool
+
+	// notice, bir eylemin sonucu ("Eklenemedi: …", "Klasör açılamadı: …").
+	// Durum satırına doğrudan yazılmıyor; StatusLine onu özetle birleştiriyor.
+	notice   string
+	noticeAt time.Time
 }
+
+// noticeTTL: kuyruk doluyken bildirim bu kadar sonra özete yerini bırakır.
+// Kuyruk boşken gösterecek başka şey yok, bildirim kalır.
+const noticeTTL = 30 * time.Second
 
 func newViewModel() *viewModel {
 	return &viewModel{
@@ -130,7 +139,43 @@ func (vm *viewModel) Rows() []row {
 	return out
 }
 
-// Summary, alt durum satırı: "2 aktif · 5 sırada · 12 bitti · 24.3 MB/s".
+// Notify, bir eylemin sonucunu durum satırına koyar ve yeniden çizim ister.
+//
+// ÖLÇÜLDÜ: eylem "Eklenemedi: …" yazıp modeli değiştirince 150 ms sonra
+// yenileme döngüsü satırı özetle ("Kuyruk boş…") eziyordu; kullanıcı mega
+// klasörünün neden eklenmediğini hiç göremedi. Bildirim artık modelde
+// duruyor ve her çizimde yeniden yazılıyor.
+func (vm *viewModel) Notify(msg string) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	vm.notice = msg
+	vm.noticeAt = time.Now()
+	vm.dirty = true
+}
+
+// StatusLine, alt durum satırının tamamı: bildirim (varsa ve tazeyse) ve özet.
+func (vm *viewModel) StatusLine() string {
+	return vm.statusLine(time.Now())
+}
+
+func (vm *viewModel) statusLine(now time.Time) string {
+	summary := vm.Summary()
+	vm.mu.Lock()
+	notice, at, empty := vm.notice, vm.noticeAt, len(vm.order) == 0
+	vm.mu.Unlock()
+	if notice == "" {
+		return summary
+	}
+	if empty {
+		return notice
+	}
+	if now.Sub(at) > noticeTTL {
+		return summary
+	}
+	return notice + "  ·  " + summary
+}
+
+// Summary, kuyruğun özeti: "2 aktif · 5 sırada · 12 bitti · 24.3 MB/s".
 func (vm *viewModel) Summary() string {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()

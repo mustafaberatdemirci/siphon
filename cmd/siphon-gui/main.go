@@ -64,7 +64,7 @@ func main() {
 		close(engineDone)
 	}()
 
-	qt, queueView := newQueueTab(w, a.Preferences(), eng, vm)
+	_, queueView := newQueueTab(w, a.Preferences(), eng, vm)
 	_, doctorView := newDoctorTab()
 	w.SetContent(container.NewAppTabs(
 		container.NewTabItem("İndir", queueView),
@@ -76,7 +76,7 @@ func main() {
 	// kendiliğinden devam eder. Motorun bitmesi beklenmezse son durum diske
 	// yazılamayabilirdi.
 	w.SetCloseIntercept(func() {
-		qt.status.SetText("Kapatılıyor, yarım işler kaydediliyor...")
+		vm.Notify("Kapatılıyor, yarım işler kaydediliyor...")
 		cancel()
 		go func() {
 			select {
