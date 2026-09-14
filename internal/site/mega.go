@@ -325,12 +325,16 @@ func (m *mega) quotaWait(ctx context.Context) time.Duration {
 	return wait
 }
 
-// megaQuota, "uq" yanıtının işimize yarayan alanları. Remaining işaretçi:
-// alan hiç yoksa (bu IP'den henüz hiç indirilmemiş) ile sıfır (pay bitmiş)
-// farklı anlamlar.
+// megaQuota, "uq" yanıtının işimize yarayan alanı.
+//
+// ÖLÇÜLDÜ (2026-09-14): "tar" alanı "kalan pay" DEĞİL. Kota doluyken de
+// (tah son kovada 5 GiB) boşken de (tah sıfır, indirme başarılı) tar=0
+// geldi. Bu yüzden "pay var mı" sorusu API'ye SORULMUYOR; kuyruk bekleyen
+// bir dosyayı gerçekten deneyerek öğreniyor. Yalnızca bt kullanılıyor ve
+// o da bir üst sınır olarak: kotayı dolduran kova pencereden çıkınca
+// sıfırlanır, bt bununla tutarlı çıktı (5 sa 6 dk, sonra 5 sa 14 dk).
 type megaQuota struct {
-	ResetIn   int64  `json:"bt"`  // sıfırlanmaya kalan saniye
-	Remaining *int64 `json:"tar"` // kalan pay (bayt)
+	ResetIn int64 `json:"bt"` // pencerenin dönmesine kalan saniye
 }
 
 // quotaStatus, kotayı API'ye sorar (10 sn zaman aşımı).
@@ -349,20 +353,6 @@ func (m *mega) quotaStatus(ctx context.Context) (megaQuota, error) {
 		return megaQuota{}, err
 	}
 	return st, nil
-}
-
-// QuotaAvailable, site.QuotaProber: bu IP'nin şu anda aktarım payı var mı?
-//
-// MegaBasterd aynı işi dış bir "IP'm ne?" servisine sorup IP değişimini
-// izleyerek yapıyor. Burada MEGA'nın kendi cevabı kullanılıyor: IP değişince
-// de, süre dolunca da "uq" payın olduğunu söyler; üçüncü bir tarafa gidilmez.
-// Yanıtta "tar" yoksa bu IP'den hiç indirilmemiş demektir: pay var.
-func (m *mega) QuotaAvailable(ctx context.Context) (bool, error) {
-	st, err := m.quotaStatus(ctx)
-	if err != nil {
-		return false, err
-	}
-	return st.Remaining == nil || *st.Remaining > 0, nil
 }
 
 func (m *mega) callOnce(ctx context.Context, folder string, payload []byte) ([]json.RawMessage, error) {

@@ -68,10 +68,8 @@ type megaFakeAPI struct {
 	bareErrs []int    // siradaki cagrilarda tum govde olarak donecek hata kodlari
 	nodeErr  map[string]int
 	// quotaResetSec > 0 ise "uq" komutu {"bt": quotaResetSec, "tar": 0} doner
-	// (canli API'nin kota doluyken verdigi sekil); quotaRemaining > 0 ise
-	// {"tar": quotaRemaining}; ikisi de 0 ise {} (hic kullanilmamis IP).
-	quotaResetSec  int64
-	quotaRemaining int64
+	// (canli API'nin kota doluyken verdigi sekil); 0 ise -2.
+	quotaResetSec int64
 }
 
 func newMegaFakeAPI(t *testing.T) *megaFakeAPI {
@@ -165,13 +163,10 @@ func (f *megaFakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 			results = append(results, map[string]any{"f": nodes})
 		case "uq":
 			f.record("uq")
-			switch {
-			case f.quotaResetSec > 0:
+			if f.quotaResetSec > 0 {
 				results = append(results, map[string]any{"bt": f.quotaResetSec, "tar": 0})
-			case f.quotaRemaining > 0:
-				results = append(results, map[string]any{"tar": f.quotaRemaining})
-			default:
-				results = append(results, map[string]any{})
+			} else {
+				results = append(results, -2)
 			}
 		default:
 			results = append(results, -2)
@@ -752,30 +747,6 @@ func TestMegaDiagnoseUnreachable(t *testing.T) {
 	res, _ := m.Diagnose(context.Background())
 	if !hasFail(res) {
 		t.Fatalf("ulasilamayan API'de FAIL bekleniyordu: %+v", res)
-	}
-}
-
-// QuotaAvailable: "tar" 0 -> yok; "tar" > 0 -> var; alan yok -> var.
-func TestMegaQuotaAvailable(t *testing.T) {
-	api := newMegaFakeAPI(t)
-	m := newMegaWith(t, api)
-	ctx := context.Background()
-
-	api.quotaResetSec = 1000
-	if ok, err := m.QuotaAvailable(ctx); err != nil || ok {
-		t.Errorf("tar=0 iken ok=%v err=%v", ok, err)
-	}
-	api.quotaResetSec, api.quotaRemaining = 0, 5<<30
-	if ok, err := m.QuotaAvailable(ctx); err != nil || !ok {
-		t.Errorf("tar>0 iken ok=%v err=%v", ok, err)
-	}
-	api.quotaRemaining = 0
-	if ok, err := m.QuotaAvailable(ctx); err != nil || !ok {
-		t.Errorf("tar yokken ok=%v err=%v", ok, err)
-	}
-	api.bareErrs = []int{-2}
-	if _, err := m.QuotaAvailable(ctx); err == nil {
-		t.Error("API hatasi yutuldu")
 	}
 }
 

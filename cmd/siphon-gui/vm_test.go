@@ -166,6 +166,38 @@ func TestQuotaHoldMessage(t *testing.T) {
 	}
 }
 
+// Serit yalnizca kota bekleyen is varken; sayi, site ve en erken saat.
+func TestQuotaBanner(t *testing.T) {
+	vm := newViewModel()
+	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
+	if got := vm.quotaBanner(now); got != "" {
+		t.Fatalf("bos kuyrukta serit: %q", got)
+	}
+	vm.mu.Lock()
+	a := job("a", queue.StateWaiting, 0, 5)
+	a.Site, a.RetryAt = "mega", now.Add(2*time.Hour)
+	b := job("b", queue.StateWaiting, 0, 5)
+	b.Site, b.RetryAt = "mega", now.Add(time.Hour)
+	vm.apply(a, now)
+	vm.apply(b, now)
+	vm.apply(job("c", queue.StateRunning, 1, 5), now)
+	vm.mu.Unlock()
+	got := vm.quotaBanner(now)
+	for _, want := range []string{"mega", "2 dosya", "VPN", "16:25", "1 sa"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q icinde %q yok", got, want)
+		}
+	}
+	vm.mu.Lock()
+	a.State, b.State = queue.StateDone, queue.StateDone
+	vm.apply(a, now)
+	vm.apply(b, now)
+	vm.mu.Unlock()
+	if got := vm.quotaBanner(now); got != "" {
+		t.Errorf("bekleyen kalmayinca serit kalkmadi: %q", got)
+	}
+}
+
 // --- Satir bicimlendirme ---
 
 func TestRowMetaByState(t *testing.T) {

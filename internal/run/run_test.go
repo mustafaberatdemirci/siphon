@@ -202,19 +202,9 @@ func TestQuotaHaltsTheAlbum(t *testing.T) {
 	}
 }
 
-// quotaProbeResolver: quotaResolver + QuotaAvailable (mega gibi).
-type quotaProbeResolver struct {
-	quotaResolver
-	avail atomic.Bool
-}
-
-func (r *quotaProbeResolver) QuotaAvailable(context.Context) (bool, error) {
-	return r.avail.Load(), nil
-}
-
-// -on-quota: kota dolunca komut çalışır, site pay verince AYNI URL yeniden
-// koşulur ve kayıt inenleri atlar. Sunucu ilk N isteği karşılıyor, sonra 509
-// veriyor, komut çalışınca (işaret dosyası) tekrar açılıyor.
+// -on-quota: kota dolunca komut çalışır, AYNI URL yeniden koşulur ve kayıt
+// inenleri atlar. Sunucu ilk N isteği karşılıyor, sonra 509 veriyor, komut
+// çalışınca (işaret dosyası) tekrar açılıyor.
 func TestOnQuotaCommandThenRetriesSameURL(t *testing.T) {
 	outDir := tempDir(t)
 	marker := filepath.Join(tempDir(t), "vpn.txt")
@@ -242,23 +232,11 @@ func TestOnQuotaCommandThenRetriesSameURL(t *testing.T) {
 	defer srv.Close()
 
 	const n = 5
-	r := &quotaProbeResolver{quotaResolver: quotaResolver{fakeResolver{items: fakeItems(srv.URL, n)}}}
+	r := &quotaResolver{fakeResolver{items: fakeItems(srv.URL, n)}}
 	rc := newRunCtx(t, outDir, r, Events{})
 	rc.inFlight = 1
 	rc.opt.OnQuota = `echo degisti> "` + marker + `"`
-	rc.opt.QuotaProbeEvery = 50 * time.Millisecond
-	rc.opt.QuotaProbeMax = 5 * time.Second
-
-	// Yoklama komut bittikten sonra "var" desin: komutun ürettiği dosyaya bak.
-	go func() {
-		for {
-			if _, err := os.Stat(marker); err == nil {
-				r.avail.Store(true)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
+	rc.opt.QuotaRetryDelay = 10 * time.Millisecond
 
 	var sum Summary
 	res := runURL(context.Background(), rc, &sum)

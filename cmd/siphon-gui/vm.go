@@ -130,6 +130,42 @@ func (vm *viewModel) Row(i int) (row, bool) {
 	return row{Job: vm.jobs[id], Rate: vm.rate[id]}, true
 }
 
+// QuotaBanner, listenin üstündeki uyarı şeridinin metni; kota bekleyen iş
+// yoksa "". Bildirimlere bağımlı olmayan, pencere açılınca göze çarpan
+// tek yer burası.
+func (vm *viewModel) QuotaBanner() string {
+	return vm.quotaBanner(time.Now())
+}
+
+func (vm *viewModel) quotaBanner(now time.Time) string {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	var n int
+	var siteName string
+	var earliest time.Time
+	for _, id := range vm.order {
+		j := vm.jobs[id]
+		if j.State != queue.StateWaiting {
+			continue
+		}
+		n++
+		siteName = j.Site
+		if !j.RetryAt.IsZero() && (earliest.IsZero() || j.RetryAt.Before(earliest)) {
+			earliest = j.RetryAt
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	when := ""
+	if !earliest.IsZero() && earliest.After(now) {
+		when = fmt.Sprintf("; değiştirmezsen %s'de (%s sonra) kendiliğinden denenecek",
+			earliest.Local().Format("15:04"), site.FormatWait(earliest.Sub(now)))
+	}
+	return fmt.Sprintf("%s kotası doldu — %d dosya bekliyor. VPN'de konumu değiştir; değişince indirmeler kendiliğinden sürer%s.",
+		siteName, n, when)
+}
+
 func (vm *viewModel) Rows() []row {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()

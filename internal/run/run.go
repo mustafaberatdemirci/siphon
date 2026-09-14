@@ -43,12 +43,11 @@ type Options struct {
 	MaxInFlight int
 	// OnQuota, sitenin IP başına kotası dolunca çalıştırılacak kabuk komutu
 	// (ör. VPN sunucusunu değiştiren betik). Boşsa kota albümü durdurur.
-	// Doluysa: komut çalışır, site pay verene kadar yoklanır (QuotaProbeEvery
-	// aralıkla, en çok QuotaProbeMax), pay gelince aynı URL yeniden koşulur;
-	// kayıt inenleri atlar. En çok MaxQuotaRounds tur.
+	// Doluysa: komut çalışır, QuotaRetryDelay beklenir, aynı URL yeniden
+	// koşulur; kayıt inenleri atlar. Yine kota gelirse komut yine çalışır;
+	// en çok MaxQuotaRounds tur.
 	OnQuota         string
-	QuotaProbeEvery time.Duration // 0 = 30 sn
-	QuotaProbeMax   time.Duration // 0 = 5 dk
+	QuotaRetryDelay time.Duration // 0 = 3 sn (tünelin oturması için)
 }
 
 // MaxQuotaRounds: kota komutu + yoklama + yeniden koşu döngüsünün URL başına
@@ -324,8 +323,9 @@ func runURL(ctx context.Context, rc runCtx, sum *Summary) oneResult {
 	}
 }
 
-// afterQuotaCommand, kota komutunu çalıştırır ve site pay verene kadar
-// yoklar. true dönerse yeniden koşmaya değer.
+// afterQuotaCommand, kota komutunu çalıştırır; true dönerse yeniden koşmaya
+// değer. Pay API'ye sorulmuyor (güvenilir alan yok, bkz. site/mega.go);
+// yeniden koşunun kendisi yoklamadır.
 func afterQuotaCommand(ctx context.Context, rc runCtx, round int) bool {
 	ev, opt := rc.ev, rc.opt
 	ev.infof("kota doldu, komut çalıştırılıyor (%d/%d): %s", round, MaxQuotaRounds, opt.OnQuota)
@@ -340,43 +340,11 @@ func afterQuotaCommand(ctx context.Context, rc runCtx, round int) bool {
 		return false
 	}
 	ev.infof("kota komutu bitti (%s)", time.Since(start).Round(time.Second))
-
-	prober, ok := rc.resolver.(site.QuotaProber)
-	if !ok {
-		// Site pay sorgusu bilmiyor; komut çalıştı, bir kez daha deneriz.
-		return true
+	delay := opt.QuotaRetryDelay
+	if delay <= 0 {
+		delay = 3 * time.Second
 	}
-	every, max := opt.QuotaProbeEvery, opt.QuotaProbeMax
-	if every <= 0 {
-		every = 30 * time.Second
-	}
-	if max <= 0 {
-		max = 5 * time.Minute
-	}
-	deadline := time.Now().Add(max)
-	// İlk yoklama kısa bir gecikmeyle: tünelin oturması için.
-	wait := 3 * time.Second
-	if wait > every {
-		wait = every
-	}
-	for {
-		if err := snet.Sleep(ctx, wait); err != nil {
-			return false
-		}
-		avail, perr := prober.QuotaAvailable(ctx)
-		switch {
-		case perr != nil:
-			ev.debugf("kota yoklaması: %v", perr)
-		case avail:
-			ev.infof("pay açıldı")
-			return true
-		}
-		if time.Now().After(deadline) {
-			ev.errorf("kota %s içinde açılmadı; bırakılıyor", max)
-			return false
-		}
-		wait = every
-	}
+	return snet.Sleep(ctx, delay) == nil
 }
 
 type runCtx struct {

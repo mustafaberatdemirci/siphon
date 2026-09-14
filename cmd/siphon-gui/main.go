@@ -29,6 +29,7 @@ const appID = "io.github.mustafaberatdemirci.siphon"
 
 func main() {
 	a := app.NewWithID(appID)
+	registerToastIdentity(appID)
 	w := a.NewWindow("Siphon — pixeldrain, bunkr & mega indirici")
 	w.Resize(fyne.NewSize(980, 720))
 
@@ -53,9 +54,13 @@ func main() {
 		// "VPN'i değiştir" haberini alsın; değiştirince kuyruk kendiliğinden
 		// sürer (yoklama). Komut kutusu doluysa zaten otomatik.
 		OnQuotaHold: func(siteName string, retryAt time.Time) {
-			a.SendNotification(fyne.NewNotification(
-				"Siphon — "+siteName+" kotası doldu",
-				quotaHoldMessage(retryAt, time.Now())))
+			msg := quotaHoldMessage(retryAt, time.Now())
+			vm.Notify(siteName + " kotası doldu — " + msg)
+			// Üç kanal, çünkü hiçbiri tek başına garanti değil: bildirimler
+			// hesap genelinde kapalı olabilir (ölçüldü), pencere arkada
+			// olabilir, ses kapalı olabilir.
+			a.SendNotification(fyne.NewNotification("Siphon — "+siteName+" kotası doldu", msg))
+			fyne.Do(func() { requestAttention(w) })
 		},
 	})
 	if err != nil {

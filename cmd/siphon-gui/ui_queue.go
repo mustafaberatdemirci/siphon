@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mustafaberatdemirci/siphon/internal/hook"
@@ -41,10 +42,13 @@ type queueTab struct {
 	speed    *widget.Entry
 	quotaCmd *widget.Entry
 	segments *widget.Select
-	addBtn   *widget.Button
-	pauseAll *widget.Button
-	list     *widget.List
-	status   *widget.Label
+
+	banner     *fyne.Container
+	bannerText *widget.Label
+	addBtn     *widget.Button
+	pauseAll   *widget.Button
+	list       *widget.List
+	status     *widget.Label
 }
 
 func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm *viewModel) (*queueTab, fyne.CanvasObject) {
@@ -138,6 +142,24 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	}
 	tryBtn := widget.NewButton("Dene", q.tryQuotaCommand)
 	quotaRow := container.NewBorder(nil, nil, widget.NewLabel("VPN değiştirme komutu"), tryBtn, q.quotaCmd)
+	// Ana ekranda değil: çoğu kullanıcının (komut satırı olmayan VPN'ler,
+	// ör. Kaspersky) işine yaramıyor ve kafa karıştırıyordu (ölçüldü).
+	advanced := widget.NewAccordion(widget.NewAccordionItem("Gelişmiş", quotaRow))
+
+	// --- Kota şeridi ---
+	// Kota bekleyen iş varken listenin üstünde durur; bildirim ayarından
+	// bağımsız, pencere açılınca ilk görülen şey. "Şimdi dene" VPN'i
+	// değiştirmiş kullanıcının 30 sn'lik yoklamayı beklememesi için.
+	q.bannerText = widget.NewLabel("")
+	q.bannerText.Wrapping = fyne.TextWrapWord
+	q.bannerText.TextStyle = fyne.TextStyle{Bold: true}
+	retryBtn := widget.NewButton("Şimdi dene", func() {
+		eng.RetryWaiting()
+		vm.Replace(eng.Jobs())
+	})
+	retryBtn.Importance = widget.HighImportance
+	q.banner = container.NewBorder(nil, nil, widget.NewIcon(theme.WarningIcon()), retryBtn, q.bannerText)
+	q.banner.Hide()
 
 	// --- Liste ---
 	q.list = widget.NewList(
@@ -158,8 +180,9 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	top := container.NewVBox(
 		container.NewBorder(nil, nil, widget.NewLabel("Linkler"), q.addBtn, linkBox),
 		container.NewBorder(nil, nil, widget.NewLabel("Klasör"), pick, q.outDir),
-		quotaRow,
 		toolbar,
+		advanced,
+		q.banner,
 	)
 	root := container.NewBorder(top, q.status, nil, nil, q.list)
 
@@ -178,9 +201,16 @@ func (q *queueTab) refreshLoop() {
 		summary := q.vm.StatusLine()
 		paused := q.eng.Paused()
 		captcha := q.eng.PausedByCaptcha()
+		banner := q.vm.QuotaBanner()
 		fyne.Do(func() {
 			q.list.Refresh()
 			q.status.SetText(summary)
+			if banner == "" {
+				q.banner.Hide()
+			} else {
+				q.bannerText.SetText(banner)
+				q.banner.Show()
+			}
 			switch {
 			case captcha:
 				// Sebep görünür olmalı: captcha kuyruğu durdurdu, kullanıcı

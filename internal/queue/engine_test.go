@@ -131,28 +131,6 @@ type fakeResolver struct {
 
 	mu          sync.Mutex
 	resolveOnes int
-	quotaOK     bool // QuotaAvailable'in cevabi ("VPN degisti, pay var")
-	probes      int
-}
-
-// QuotaAvailable, site.QuotaProber (mega'nin "uq" sorgusu gibi).
-func (r *fakeResolver) QuotaAvailable(context.Context) (bool, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.probes++
-	return r.quotaOK, nil
-}
-
-func (r *fakeResolver) setQuotaOK(ok bool) {
-	r.mu.Lock()
-	r.quotaOK = ok
-	r.mu.Unlock()
-}
-
-func (r *fakeResolver) probeCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.probes
 }
 
 // fakeCaptchaErr, site.StatusClassifier'in captcha sinyali: politika bunu
@@ -909,10 +887,14 @@ func TestQuotaResumeOneFailingKeepsSiblingsWaiting(t *testing.T) {
 }
 
 // MegaBasterd davranisi: kullanici VPN'i degistirir, BASKA HICBIR SEY YAPMAZ,
-// indirmeler kendiliginden surer. Kuyruk bekleyen is varken siteye "payim var
-// mi" diye soruyor; "evet" gelince bekleyenler taze cozumlemeyle kuyruga doner.
+// indirmeler kendiliginden surer. Kuyruk bekleyen is varken en KUCUK bekleyen
+// dosyayi araliklarla gercekten deniyor; inince digerleri de kuyruga doner.
+//
+// API'ye "payim var mi" diye sorulmuyor: canli olcumde "uq" kota doluyken de
+// boşken de ayni cevabi verdi.
 func TestQuotaProbeResumesWithoutUserAction(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	f.files["c.bin"] = f.files["c.bin"][:16*1024] // en kucuk: yoklama bunu secmeli
 	f.setQuota(true)
 	h := newHarness(t, f, "", 1)
 	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
@@ -928,19 +910,23 @@ func TestQuotaProbeResumesWithoutUserAction(t *testing.T) {
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateWaiting, 10*time.Second)
 	}
-	// Yoklama surmeli ama pay yokken kimse baslamamali.
-	time.Sleep(350 * time.Millisecond)
-	if r.probeCount() < 2 {
-		t.Fatalf("yoklama yapilmiyor: %d", r.probeCount())
+	// Kota doluyken yoklama surmeli (c.bin denenir, 509 alir, yine bekler);
+	// buyuk dosyalara dokunulmamali.
+	hitsA, hitsB := f.hitCount("a.bin"), f.hitCount("b.bin")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && f.hitCount("c.bin") < 2 {
+		time.Sleep(10 * time.Millisecond)
 	}
-	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
-		t.Fatalf("pay yokken is %s oldu", got)
+	if f.hitCount("c.bin") < 2 {
+		t.Fatalf("yoklama yapilmiyor: c.bin %d istek", f.hitCount("c.bin"))
+	}
+	if f.hitCount("a.bin") != hitsA || f.hitCount("b.bin") != hitsB {
+		t.Error("yoklama en kucuk dosya yerine buyukleri de denedi")
 	}
 	before := r.resolveOneCount()
 
-	// VPN degisti: CDN izin veriyor, API "pay var" diyor. Kullanici hicbir sey yapmiyor.
+	// VPN degisti: CDN izin veriyor. Kullanici hicbir sey yapmiyor.
 	f.setQuota(false)
-	r.setQuotaOK(true)
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateDone, 10*time.Second)
 	}
@@ -949,14 +935,14 @@ func TestQuotaProbeResumesWithoutUserAction(t *testing.T) {
 	}
 }
 
-// API "pay var" der ama CDN yine 509 verirse yoklama seyrelmeli (2x, 10 dk
-// tavan), sonsuz bir "sal-509-bekle" dongusu her 30 saniyede istek harcamasin.
-func TestQuotaProbeBacksOffWhenReleaseFailsAgain(t *testing.T) {
+// Kota dolu kaldikca yoklama seyrelmeli (2x, 10 dk tavan): sonsuz bir
+// "dene-509-bekle" dongusu her 30 saniyede istek harcamasin.
+func TestQuotaProbeBacksOffWhileQuotaStaysFull(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	f.setQuota(true)
 	h := newHarness(t, f, "", 1)
 	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
-	r := &fakeResolver{f: f, quotaWait: time.Hour, quotaOK: true} // API hep "var" diyor
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
 	h.e.resolvers[0] = r
 	h.e.workers["fake"] = newWorkerWith(t, h, r)
 	h.start()
@@ -968,7 +954,6 @@ func TestQuotaProbeBacksOffWhenReleaseFailsAgain(t *testing.T) {
 	id := jobByName(h.e, "a.bin").ID
 	h.waitState(id, StateWaiting, 10*time.Second)
 
-	// Ikinci ve ucuncu kez beklemeye dusmesini bekle (sal -> 509 -> bekle).
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && f.hitCount("a.bin") < 3 {
 		time.Sleep(10 * time.Millisecond)
@@ -981,6 +966,9 @@ func TestQuotaProbeBacksOffWhenReleaseFailsAgain(t *testing.T) {
 	h.e.mu.Unlock()
 	if every < 400*time.Millisecond {
 		t.Errorf("yoklama seyrelmedi: %s (en az 4x beklenirdi)", every)
+	}
+	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
+		t.Errorf("yoklama sonrasi durum %s, waiting olmali", got)
 	}
 }
 
@@ -1032,7 +1020,6 @@ func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 
 	// Komut bitince yoklama one cekilmeli (normalde 1 saat sonraydi).
 	f.setQuota(false)
-	r.setQuotaOK(true)
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateDone, 15*time.Second)
 	}
