@@ -130,6 +130,28 @@ func TestStatusLineKeepsNoticeOverSummary(t *testing.T) {
 	}
 }
 
+// Kota bekleyen satir: saat ve kalan sure gorunur, ▶ ipucu var; sure bosken
+// "birazdan"; RetryAt yoksa dogrudan "simdi dene".
+func TestWaitingMetaShowsRetryClock(t *testing.T) {
+	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
+	j := queue.Job{State: queue.StateWaiting, RetryAt: now.Add(5*time.Hour + 6*time.Minute)}
+	got := waitingMeta(j, now)
+	for _, want := range []string{"20:31", "5 sa 6 dk", "▶"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q icinde %q yok", got, want)
+		}
+	}
+	if got := waitingMeta(queue.Job{State: queue.StateWaiting, RetryAt: now.Add(20 * time.Second)}, now); !strings.Contains(got, "birazdan") {
+		t.Errorf("kisa bekleme: %q", got)
+	}
+	if got := waitingMeta(queue.Job{State: queue.StateWaiting}, now); !strings.Contains(got, "şimdi dene") {
+		t.Errorf("RetryAt'siz: %q", got)
+	}
+	if label, act := actionFor(queue.StateWaiting); label != "▶" || act != actionResume {
+		t.Errorf("bekleyen satirin dugmesi %q/%v", label, act)
+	}
+}
+
 // --- Satir bicimlendirme ---
 
 func TestRowMetaByState(t *testing.T) {

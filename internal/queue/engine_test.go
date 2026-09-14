@@ -35,6 +35,7 @@ type fakeSite struct {
 	hits   map[string]int
 	delay  time.Duration
 	forbid map[string]bool // ad -> 403 don (captcha simulasyonu)
+	quota  bool            // true ise her dosyaya 509 (mega kota simulasyonu)
 }
 
 func newFakeSite(t *testing.T, names ...string) *fakeSite {
@@ -74,9 +75,14 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	delete(f.hold, name)
 	delay := f.delay
 	forbid := f.forbid[name]
+	quota := f.quota
 	f.mu.Unlock()
 	if forbid {
 		http.Error(w, `{"value":"file_rate_limited_captcha_required"}`, http.StatusForbidden)
+		return
+	}
+	if quota {
+		http.Error(w, "Bandwidth Limit Exceeded", 509)
 		return
 	}
 
@@ -104,6 +110,12 @@ func (f *fakeSite) holdNext(name string) chan struct{} {
 	return ch
 }
 
+func (f *fakeSite) setQuota(on bool) {
+	f.mu.Lock()
+	f.quota = on
+	f.mu.Unlock()
+}
+
 func (f *fakeSite) hitCount(name string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -114,6 +126,11 @@ func (f *fakeSite) hitCount(name string) int {
 type fakeResolver struct {
 	f       *fakeSite
 	captcha bool // true ise 403 "captcha gerekli" olarak siniflanir (pixeldrain gibi)
+	// quotaWait, 509'a eklenen sifirlanma suresi (mega'nin "uq" cevabi gibi).
+	quotaWait time.Duration
+
+	mu          sync.Mutex
+	resolveOnes int
 }
 
 // fakeCaptchaErr, site.StatusClassifier'in captcha sinyali: politika bunu
@@ -127,7 +144,16 @@ func (r *fakeResolver) ClassifyStatus(resp *http.Response, _ []byte) error {
 	if r.captcha && resp.StatusCode == http.StatusForbidden {
 		return fakeCaptchaErr{}
 	}
+	if resp.StatusCode == 509 {
+		return &site.QuotaError{Wait: r.quotaWait, Err: site.Errorf(site.LayerCDN, "fake", "kota doldu (sahte 509)")}
+	}
 	return nil
+}
+
+func (r *fakeResolver) resolveOneCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.resolveOnes
 }
 
 func (r *fakeResolver) Match(u string) bool {
@@ -171,6 +197,9 @@ func (r *fakeResolver) Resolve(ctx context.Context, u string, yield func(site.It
 }
 
 func (r *fakeResolver) ResolveOne(ctx context.Context, sourcePage string) (site.Item, error) {
+	r.mu.Lock()
+	r.resolveOnes++
+	r.mu.Unlock()
 	name := strings.TrimPrefix(sourcePage, "file://")
 	if _, ok := r.f.files[name]; !ok {
 		return site.Item{}, fmt.Errorf("yok: %s", name)
@@ -730,8 +759,167 @@ func TestUserPauseAllSurvivesSingleResume(t *testing.T) {
 // (harness varsayilan olarak captcha'siz resolver ile kuruluyor).
 func newWorkerFor(t *testing.T, h *harness, captcha bool) *run.Worker {
 	t.Helper()
+	return newWorkerWith(t, h, &fakeResolver{f: h.f, captcha: captcha})
+}
+
+func newWorkerWith(t *testing.T, h *harness, r *fakeResolver) *run.Worker {
+	t.Helper()
 	cfg := site.SiteConfig{Name: "fake", MaxConcurrent: 8, MaxRetries: 2}.WithDefaults()
-	r := &fakeResolver{f: h.f, captcha: captcha}
 	ev := run.Events{Progress: h.e.onProgress}
 	return run.NewWorker(r, cfg, h.f.srv.Client(), ev)
+}
+
+// --- Kota (mega 509) ---
+
+// Kota dolunca is HATA degil BEKLEME'ye dusmeli, ayni sitenin siradakileri de
+// beklemeli (hepsi ayni 509'u alacakti), ve sitenin bildirdigi surede
+// kendiliginden yeniden denenmeli. Yeniden deneme TAZE cozumlemeyle yapilir:
+// mega'nin indirme adresi isteyen IP'ye bagli.
+//
+// Kullanicinin gordugu: "hata: mega aktarim kotasi doldu" satirlari oylece
+// kaliyor, digerleri inerken bunlar hic denenmiyordu.
+func TestQuotaPutsSiteOnHoldAndRetriesAtResetTime(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	r := &fakeResolver{f: f, quotaWait: 400 * time.Millisecond}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
+	if !strings.Contains(a.Error, "kota") {
+		t.Errorf("bekleyen isin sebebi yok: %q", a.Error)
+	}
+	if a.RetryAt.IsZero() {
+		t.Error("RetryAt bos")
+	}
+	// Siradakiler de bekliyor, hem de ayni anda.
+	for _, n := range []string{"b.bin", "c.bin"} {
+		j := h.waitState(jobByName(h.e, n).ID, StateWaiting, 2*time.Second)
+		if !j.RetryAt.Equal(a.RetryAt) {
+			t.Errorf("%s RetryAt %v, a ile ayni olmali (%v)", n, j.RetryAt, a.RetryAt)
+		}
+	}
+	if h.e.Paused() {
+		t.Error("kota genel duraklatma ACMAMALI; baska siteler devam edebilir")
+	}
+	before := r.resolveOneCount()
+
+	// Sure doluyor; kota acilmis olsun.
+	f.setQuota(false)
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateDone, 10*time.Second)
+	}
+	if r.resolveOneCount() <= before {
+		t.Error("yeniden denemede taze cozumleme yapilmadi (IP'ye bagli adres eskimis olabilirdi)")
+	}
+}
+
+// Kullanici VPN degistirip bekleyen tek ise ▶ derse: o is hemen denenir, basarili
+// olursa sitenin diger bekleyenleri de serbest kalir (kotanin acildigi kanitlandi).
+func TestQuotaResumeOneProbesAndReleasesSiblings(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
+	h.waitState(jobByName(h.e, "c.bin").ID, StateWaiting, 2*time.Second)
+
+	// VPN degisti, kullanici a'ya ▶ basti.
+	f.setQuota(false)
+	h.e.Resume(a.ID)
+	h.waitState(a.ID, StateDone, 10*time.Second)
+	// b ve c bir saat beklememeli.
+	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
+	h.waitState(jobByName(h.e, "c.bin").ID, StateDone, 10*time.Second)
+}
+
+// Kota hala doluyken ▶ denenirse is yeniden beklemeye duser, diger bekleyenler
+// serbest KALMAZ; kuyruk sifirlanma saatini korur.
+func TestQuotaResumeOneFailingKeepsSiblingsWaiting(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
+	b := h.waitState(jobByName(h.e, "b.bin").ID, StateWaiting, 2*time.Second)
+	hitsB := f.hitCount("b.bin")
+
+	h.e.Resume(a.ID)
+	// a denendi ve yine 509 aldi -> yeniden bekliyor.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.hitCount("a.bin") >= 2 && jobByName(h.e, "a.bin").State == StateWaiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
+		t.Fatalf("a %s, yeniden waiting olmaliydi", got)
+	}
+	if f.hitCount("b.bin") != hitsB {
+		t.Error("basarisiz deneme b'yi de bosuna baslatti")
+	}
+	if got := jobByName(h.e, "b.bin"); got.State != StateWaiting || got.ID != b.ID {
+		t.Errorf("b %s, beklemede kalmaliydi", got.State)
+	}
+}
+
+// Bekleme uygulama kapanip acilinca yerinde kalmali: RetryAt diske yaziliyor,
+// suresi gecmisse acilista kuyruga doner.
+func TestQuotaWaitSurvivesRestart(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	f.setQuota(true)
+	state := filepath.Join(testutil.TempDir(t), "queue.json")
+	h := newHarness(t, f, state, 1)
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
+	h.stop()
+
+	jobs, err := load(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].State != StateWaiting || !jobs[0].RetryAt.Equal(a.RetryAt) {
+		t.Fatalf("yeniden yuklenen is: %+v", jobs[0])
+	}
+
+	// Sifirlanma zamani gecmis olsun: acilista dogrudan kuyruga donmeli ve inmeli.
+	jobs[0].RetryAt = time.Now().Add(-time.Second)
+	if err := save(state, jobs); err != nil {
+		t.Fatal(err)
+	}
+	f.setQuota(false)
+	h2 := newHarness(t, f, state, 1)
+	h2.out = h.out
+	h2.start()
+	defer h2.stop()
+	h2.waitState(a.ID, StateDone, 10*time.Second)
 }

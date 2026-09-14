@@ -77,6 +77,56 @@ func LayerOf(err error) (Layer, bool) {
 	return "", false
 }
 
+// QuotaError, sitenin IP başına aktarım kotasının dolduğunu söyler.
+//
+// Ne kalıcı ne de "hemen tekrar dene" türünden bir hata: dosya yerinde,
+// erişim var, yalnızca bu IP'nin bu saatlik payı bitmiş. Doğru tepki
+// beklemek (ya da IP değiştirmek) ve sonra yeniden çözümleyip denemek.
+// Retryable DEĞİL: yeniden deneme politikası dakikalar içinde döner, kota
+// saatlerce dolu kalır; bekleme kuyruğun işi.
+//
+// Wait, sitenin bildirdiği sıfırlanma süresi; 0 ise bilinmiyor.
+type QuotaError struct {
+	Wait time.Duration
+	Err  error
+}
+
+func (e *QuotaError) Error() string {
+	if e.Wait > 0 {
+		return fmt.Sprintf("%v — yaklaşık %s sonra sıfırlanır", e.Err, FormatWait(e.Wait))
+	}
+	return e.Err.Error()
+}
+
+func (e *QuotaError) Unwrap() error { return e.Err }
+
+// QuotaOf, zincirdeki QuotaError'ı döndürür.
+func QuotaOf(err error) (*QuotaError, bool) {
+	var q *QuotaError
+	if errors.As(err, &q) {
+		return q, true
+	}
+	return nil, false
+}
+
+// FormatWait, süreyi kullanıcı diliyle yazar: "5 sa 6 dk", "12 dk".
+func FormatWait(d time.Duration) string {
+	d = d.Round(time.Minute)
+	if d < time.Minute {
+		return "1 dk"
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%d sa %d dk", h, m)
+	case h > 0:
+		return fmt.Sprintf("%d sa", h)
+	default:
+		return fmt.Sprintf("%d dk", m)
+	}
+}
+
 type LayerStatus string
 
 const (

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
+	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
 // viewModel, kuyruğun ekranda gösterilecek hali. Motorun olayları buraya
@@ -182,7 +183,7 @@ func (vm *viewModel) Summary() string {
 	if len(vm.order) == 0 {
 		return "Kuyruk boş. Link yapıştırıp Ekle'ye bas."
 	}
-	var active, queued, paused, done, failed int
+	var active, queued, waiting, paused, done, failed int
 	var total float64
 	for _, id := range vm.order {
 		j := vm.jobs[id]
@@ -194,6 +195,8 @@ func (vm *viewModel) Summary() string {
 			queued++
 		case queue.StatePaused, queue.StateStopped:
 			paused++
+		case queue.StateWaiting:
+			waiting++
 		case queue.StateDone, queue.StateSkipped:
 			done++
 		case queue.StateFailed:
@@ -206,6 +209,9 @@ func (vm *viewModel) Summary() string {
 	}
 	if queued > 0 {
 		parts = append(parts, fmt.Sprintf("%d sırada", queued))
+	}
+	if waiting > 0 {
+		parts = append(parts, fmt.Sprintf("%d kota bekliyor", waiting))
 	}
 	if paused > 0 {
 		parts = append(parts, fmt.Sprintf("%d duraklatıldı", paused))
@@ -241,8 +247,25 @@ func stateLabel(s queue.State) string {
 		return "zaten inmiş"
 	case queue.StateStopped:
 		return "durduruldu"
+	case queue.StateWaiting:
+		return "kota bekliyor"
 	}
 	return string(s)
+}
+
+// waitingMeta, kota bekleyen satır: ne zaman kendiliğinden deneneceği ve
+// kullanıcının ne yapabileceği. Saat MUTLAK yazılıyor ("20:31'de"): liste
+// yalnızca değişiklikte çizildiği için geri sayım donuk kalırdı.
+func waitingMeta(j queue.Job, now time.Time) string {
+	if j.RetryAt.IsZero() {
+		return "kota doldu  ·  ▶ ile şimdi dene"
+	}
+	left := j.RetryAt.Sub(now)
+	if left < time.Minute {
+		return "kota doldu  ·  birazdan yeniden denenecek"
+	}
+	return fmt.Sprintf("kota doldu  ·  %s'de yeniden denenecek (%s)  ·  IP değiştirdiysen ▶",
+		j.RetryAt.Local().Format("15:04"), site.FormatWait(left))
 }
 
 // rowMeta, satırın sağ üstündeki bilgi: duruma göre boyut/hız/kalan ya da hata.
@@ -270,6 +293,8 @@ func rowMeta(r row) string {
 			return fmt.Sprintf("%s / %s  ·  duraklatıldı", humanBytes(j.Done), humanBytes(j.Size))
 		}
 		return "duraklatıldı"
+	case queue.StateWaiting:
+		return waitingMeta(j, time.Now())
 	case queue.StateFailed, queue.StateStopped:
 		msg := firstLine(j.Error)
 		if len([]rune(msg)) > 70 {
@@ -321,7 +346,7 @@ func actionFor(s queue.State) (label string, act rowAction) {
 	switch s {
 	case queue.StateRunning, queue.StateQueued:
 		return "⏸", actionPause
-	case queue.StatePaused, queue.StateFailed, queue.StateStopped:
+	case queue.StatePaused, queue.StateFailed, queue.StateStopped, queue.StateWaiting:
 		return "▶", actionResume
 	default:
 		return "✓", actionNone

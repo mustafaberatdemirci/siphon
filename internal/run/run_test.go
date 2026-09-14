@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,6 +161,44 @@ func TestItemQueuedArrivesBeforeAnyDownloadFinishes(t *testing.T) {
 	}
 	if res.done != n {
 		t.Fatalf("inen dosya = %d, %d bekleniyordu", res.done, n)
+	}
+}
+
+// quotaResolver, 509'u kota olarak sınıflar (mega gibi).
+type quotaResolver struct{ fakeResolver }
+
+func (quotaResolver) ClassifyStatus(resp *http.Response, _ []byte) error {
+	if resp.StatusCode == 509 {
+		return &site.QuotaError{Wait: time.Hour, Err: site.Errorf(site.LayerCDN, "fake", "kota doldu (sahte)")}
+	}
+	return nil
+}
+
+// Kota dolunca albüm DURMALI: 373 dosyalık bir mega klasöründe kalan her
+// item sırayla aynı 509'u alır, hiçbiri inmez, yalnızca istek harcanır.
+// Sunucu kaç istek gördüğünü sayıyor; 509 sonrası yeni item başlamamalı.
+func TestQuotaHaltsTheAlbum(t *testing.T) {
+	outDir := tempDir(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "Bandwidth Limit Exceeded", 509)
+	}))
+	defer srv.Close()
+
+	const n = 40
+	rc := newRunCtx(t, outDir, &quotaResolver{fakeResolver{items: fakeItems(srv.URL, n)}}, Events{})
+	rc.inFlight = 1 // sıralı: ilk 509'dan sonra kaç item daha denendiği net ölçülsün
+	res := runOne(context.Background(), rc)
+
+	if !res.halted {
+		t.Fatal("kota albümü durdurmadı")
+	}
+	if h := hits.Load(); h > 2 {
+		t.Errorf("509 sonrası %d istek daha atıldı; albüm ilk kotada durmalıydı", h-1)
+	}
+	if res.failed != 1 {
+		t.Errorf("failed = %d, 1 bekleniyordu (kota alan item)", res.failed)
 	}
 }
 

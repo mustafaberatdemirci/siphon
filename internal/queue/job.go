@@ -25,6 +25,7 @@ const (
 	StateFailed  State = "failed"  // kalıcı hata; devam denenebilir
 	StateSkipped State = "skipped" // kayıt zaten vardı, dosya yerinde
 	StateStopped State = "stopped" // captcha: kullanıcı müdahalesi gerekiyor
+	StateWaiting State = "waiting" // sitenin kotası doldu; RetryAt'te kendiliğinden denenecek
 )
 
 // Active, işin şu anda kaynak tüketip tüketmediği.
@@ -33,9 +34,10 @@ func (s State) Active() bool { return s == StateRunning }
 // Finished, işin bir daha kendiliğinden başlamayacağı.
 func (s State) Finished() bool { return s == StateDone || s == StateSkipped }
 
-// Resumable, kullanıcının "devam" diyebileceği durumlar.
+// Resumable, kullanıcının "devam" diyebileceği durumlar. Waiting de burada:
+// kullanıcı IP değiştirdiyse sıfırlanma saatini beklemek istemez, ▶ der.
 func (s State) Resumable() bool {
-	return s == StatePaused || s == StateFailed || s == StateStopped
+	return s == StatePaused || s == StateFailed || s == StateStopped || s == StateWaiting
 }
 
 // Job, kuyruktaki tek bir dosya. Diske JSON olarak yazılıyor; bu yüzden
@@ -62,6 +64,9 @@ type Job struct {
 	Error      string    `json:"error,omitempty"`
 	AddedAt    time.Time `json:"added_at"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
+	// RetryAt, Waiting durumunda işin kendiliğinden kuyruğa döneceği an.
+	// Kalıcı: uygulama kapanıp açılsa da bekleme yerinde kalır.
+	RetryAt time.Time `json:"retry_at,omitempty"`
 }
 
 // jobID, işin kararlı kimliği: aynı dosya aynı klasöre ikinci kez eklenirse

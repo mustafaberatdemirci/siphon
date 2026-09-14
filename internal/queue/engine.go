@@ -75,6 +75,11 @@ type Engine struct {
 	pausedByCaptcha bool
 	closing         bool
 	segments        int // kullanıcının istediği bağlantı/dosya
+	// holdSince: site -> kotanın dolduğu an. Bir iş başarıyla bitince
+	// sitenin bekleyenlerini serbest bırakmak için "bu iş kotadan SONRA mı
+	// başladı?" sorusuna cevap; kotadan önce başlamış ve yalnızca bitmesine
+	// izin verilmiş bir aktarım kotanın açıldığını kanıtlamaz.
+	holdSince map[string]time.Time
 
 	wake chan struct{}
 
@@ -242,6 +247,7 @@ func (e *Engine) Resume(id string) {
 	}
 	j.State = StateQueued
 	j.Error = ""
+	j.RetryAt = time.Time{}
 	// Kullanıcı açıkça "devam" dedi. Duraklatmayı bir captcha koyduysa
 	// kaldır; aksi halde iş "sırada" görünür ama hiç başlamaz ve kullanıcı
 	// "engellendi" sanır (ölçüldü: VPN değiştirip ▶'ye basınca tam bu oldu).
@@ -330,8 +336,10 @@ func (e *Engine) ResumeAll() {
 	e.pausedByCaptcha = false
 	var snaps []Job
 	for _, j := range e.jobs {
-		if j.State == StatePaused {
+		if j.State == StatePaused || j.State == StateWaiting {
 			j.State = StateQueued
+			j.RetryAt = time.Time{}
+			j.Error = ""
 			snaps = append(snaps, *j)
 		}
 	}
@@ -416,15 +424,125 @@ func (e *Engine) Jobs() []Job {
 // eder; onlar kuyruk dosyasına "queued" olarak yazılır ve bir sonraki açılışta
 // kendiliğinden devam eder.
 func (e *Engine) Run(ctx context.Context) {
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	for {
+		e.releaseDue(time.Now())
 		e.dispatch(ctx)
+		// Bekleyen iş varsa en yakın RetryAt'te uyan.
+		if next, ok := e.nextRetry(); ok {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(time.Until(next) + 50*time.Millisecond)
+		}
 		select {
 		case <-ctx.Done():
 			e.shutdown()
 			return
 		case <-e.wake:
+		case <-timer.C:
 		}
 	}
+}
+
+// DefaultQuotaWait, site sıfırlanma süresini söylemezse yeniden deneme aralığı.
+const DefaultQuotaWait = 10 * time.Minute
+
+// nextRetry, bekleyen işlerin en erken RetryAt'i.
+func (e *Engine) nextRetry() (time.Time, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var next time.Time
+	for _, j := range e.jobs {
+		if j.State == StateWaiting && (next.IsZero() || j.RetryAt.Before(next)) {
+			next = j.RetryAt
+		}
+	}
+	return next, !next.IsZero()
+}
+
+// releaseDue, süresi dolan bekleyen işleri kuyruğa geri koyar.
+func (e *Engine) releaseDue(now time.Time) {
+	e.mu.Lock()
+	var snaps []Job
+	for _, j := range e.jobs {
+		if j.State == StateWaiting && !j.RetryAt.After(now) {
+			j.State = StateQueued
+			j.RetryAt = time.Time{}
+			j.Error = ""
+			delete(e.holdSince, j.Site)
+			snaps = append(snaps, *j)
+		}
+	}
+	e.mu.Unlock()
+	for _, s := range snaps {
+		e.changed(s)
+	}
+	if len(snaps) > 0 {
+		e.scheduleSave()
+	}
+}
+
+// enterQuotaWait, kilit altında: kota dolduğunda işi ve aynı sitenin sıradaki
+// işlerini beklemeye alır. Dönen anlık görüntüler kilit dışında yayımlanır.
+//
+// Aynı sitenin sıradakileri de bekliyor: kota IP başına ve site geneli;
+// her biri sırayla başlayıp aynı 509'u alacaktı. Çalışanlara DOKUNULMUYOR:
+// mega başlamış aktarımı kesmiyor, bitmesine izin vermek kazanç.
+//
+// Çözülmüş Item atılıyor: mega'nın indirme adresi onu isteyen IP'ye bağlı.
+// Kullanıcı VPN değiştirip ▶ dediğinde taze bir "g" gerekir; eski adres
+// yalnızca bir 403 turu harcatırdı.
+func (e *Engine) enterQuotaWait(j *Job, wait time.Duration, msg string) []Job {
+	if wait <= 0 {
+		wait = DefaultQuotaWait
+	}
+	now := time.Now()
+	until := now.Add(wait)
+	if e.holdSince == nil {
+		e.holdSince = map[string]time.Time{}
+	}
+	e.holdSince[j.Site] = now
+	var snaps []Job
+	for _, o := range e.jobs {
+		if o.Site != j.Site {
+			continue
+		}
+		if o != j && o.State != StateQueued {
+			continue
+		}
+		o.State = StateWaiting
+		o.RetryAt = until
+		o.Error = msg
+		delete(e.items, o.ID)
+		snaps = append(snaps, *o)
+	}
+	return snaps
+}
+
+// releaseSite, kilit altında: sitenin bekleyen işlerini kuyruğa döndürür.
+// Kotadan SONRA başlamış bir iş başarıyla indiyse (süre dolmuş ya da
+// kullanıcı IP değiştirip ▶ demiş) diğerlerinin beklemesi için sebep kalmadı.
+func (e *Engine) releaseSite(siteName string, started time.Time) []Job {
+	if since, held := e.holdSince[siteName]; !held || started.Before(since) {
+		return nil
+	}
+	delete(e.holdSince, siteName)
+	var snaps []Job
+	for _, o := range e.jobs {
+		if o.Site == siteName && o.State == StateWaiting {
+			o.State = StateQueued
+			o.RetryAt = time.Time{}
+			o.Error = ""
+			snaps = append(snaps, *o)
+		}
+	}
+	return snaps
 }
 
 func (e *Engine) kick() {
@@ -466,6 +584,7 @@ func (e *Engine) dispatch(ctx context.Context) {
 
 // runJob, tek bir işi baştan sona sürer ve sonucu kuyruğa işler.
 func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item, haveItem bool) {
+	started := time.Now()
 	e.changed(j)
 	e.scheduleSave()
 
@@ -479,6 +598,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 	wipe := e.wipeWant[j.ID]
 	delete(e.wipeWant, j.ID)
 	closing := e.closing
+	var extra []Job // aynı sitenin etkilenen diğer işleri
 	if still {
 		live.Path, live.Filename = j.Path, j.Filename
 		if j.Size > 0 {
@@ -492,6 +612,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 			live.Filename = filepath.Base(outcome.Result.Path)
 			live.FinishedAt = time.Now()
 			live.Error = ""
+			extra = e.releaseSite(live.Site, started)
 		case run.OutcomeSkipped:
 			live.State = StateSkipped
 			live.Done = outcome.Entry.Size
@@ -513,6 +634,10 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 				live.State = StateQueued
 			}
 		default:
+			if q, ok := site.QuotaOf(outcome.Err); ok {
+				extra = e.enterQuotaWait(live, q.Wait, outcome.Err.Error())
+				break
+			}
 			live.State = StateFailed
 			if outcome.Err != nil {
 				live.Error = outcome.Err.Error()
@@ -538,6 +663,11 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 	}
 	if still {
 		e.changed(snap)
+	}
+	for _, x := range extra {
+		if x.ID != snap.ID {
+			e.changed(x)
+		}
 	}
 	e.scheduleSave()
 	e.kick()

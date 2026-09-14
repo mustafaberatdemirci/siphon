@@ -359,6 +359,15 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 				already.Add(1)
 			case OutcomeFailed:
 				failed.Add(1)
+				if _, quota := site.QuotaOf(o.Err); quota {
+					// Kota IP başına ve site geneli: kalan yüzlerce item
+					// sırayla aynı 509'u alırdı. Albümü durdur; kullanıcı
+					// süre dolunca ya da IP değiştirince yeniden çalıştırır,
+					// kayıt inenleri atlar.
+					ev.errorf("DURDURULDU: %v", o.Err)
+					stopped.Store(true)
+					return o.Err
+				}
 			case OutcomeStopped:
 				stopped.Store(true)
 				return o.Err // gctx iptal edilir, kalan işler durur

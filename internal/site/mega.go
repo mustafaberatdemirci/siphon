@@ -61,6 +61,11 @@ type mega struct {
 	// yenilemek zorunda kaldığında klasörü baştan listelememek için.
 	mu       sync.Mutex
 	nodeKeys map[string][]byte
+
+	// Kota sorgusu önbelleği: bkz. quotaWait.
+	quotaMu     sync.Mutex
+	quotaAt     time.Time
+	quotaCached time.Duration
 }
 
 // ---------- Link tanıma ----------
@@ -215,7 +220,7 @@ func megaAPIError(code int, evidence string) error {
 	case -16:
 		return Errorf(LayerItemPage, evidence, "dosya engellenmiş (%d): telif veya kötüye kullanım bildirimi", code)
 	case -17:
-		return Errorf(LayerCDN, evidence, "mega aktarım kotası doldu (%d): IP başına sınır, birkaç saat sonra tekrar deneyin", code)
+		return &QuotaError{Err: Errorf(LayerCDN, evidence, "mega aktarım kotası doldu (%d): IP başına sınır", code)}
 	default:
 		return Errorf(LayerFetch, evidence, "API hatası %d", code)
 	}
@@ -255,11 +260,79 @@ func (m *mega) call(ctx context.Context, folder string, cmds []any) ([]json.RawM
 		last = err
 		var tr *megaTransient
 		if !errors.As(err, &tr) {
-			return nil, err
+			return nil, m.withQuotaWait(ctx, err)
 		}
 		m.cfg.Logln("mega: %v, tekrar deneniyor (%d/%d)", err, attempt+1, attempts)
 	}
 	return nil, Errorf(LayerFetch, m.api, "API art arda geçici hata verdi: %v", last)
+}
+
+// ---------- Kota ----------
+
+// quotaProbeTTL: art arda gelen 509'lar için API bir kez sorulur.
+const quotaProbeTTL = time.Minute
+
+// withQuotaWait, kota hatasına sitenin bildirdiği sıfırlanma süresini ekler.
+// ctx nil olabilir (ClassifyStatus'ün bağlamı yok); o zaman kısa zaman
+// aşımlı bir arka plan bağlamı kullanılır.
+func (m *mega) withQuotaWait(ctx context.Context, err error) error {
+	q, ok := QuotaOf(err)
+	if !ok || q.Wait > 0 {
+		return err
+	}
+	q.Wait = m.quotaWait(ctx)
+	return err
+}
+
+// quotaWait, "uq" (kullanıcı kotası) komutuyla sıfırlanma süresini sorar.
+//
+// ÖLÇÜLDÜ (2026-09-14, kota doluyken): anonim çağrı {"a":"uq","xfer":1}
+// şunu döndürdü: bt=18349 (sıfırlanmaya kalan saniye), tar=0 (kalan pay),
+// tah=[0,0,0,0,0,5368709120] (son 6 saatin kovaları; tam 5 GiB harcanmış).
+// Kota IP başına ve yaklaşık 6 saatlik kayan pencerede ~5 GiB.
+//
+// Bilinemezse 0 döner; çağıran kendi varsayılanını kullanır.
+func (m *mega) quotaWait(ctx context.Context) time.Duration {
+	m.quotaMu.Lock()
+	if time.Since(m.quotaAt) < quotaProbeTTL {
+		d := m.quotaCached
+		m.quotaMu.Unlock()
+		return d
+	}
+	// Zaman damgası ÇAĞRIDAN ÖNCE atılıyor: "uq" çağrısının kendisi kota
+	// hatası dönerse call() yine buraya gelir; damga onu önbellekten (0)
+	// çevirir, sonsuz döngü olmaz.
+	m.quotaAt, m.quotaCached = time.Now(), 0
+	m.quotaMu.Unlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var wait time.Duration
+	results, err := m.call(ctx, "", []any{map[string]any{"a": "uq", "xfer": 1}})
+	if err == nil && len(results) > 0 {
+		var uq struct {
+			ResetIn   int64 `json:"bt"`  // sıfırlanmaya kalan saniye
+			Remaining int64 `json:"tar"` // kalan pay (bayt)
+		}
+		if derr := m.decodeResult(results[0], &uq, m.api); derr == nil && uq.ResetIn > 0 {
+			wait = time.Duration(uq.ResetIn) * time.Second
+			// Sınırlar: API'nin saçma bir değeri kuyruğu günlerce kilitlemesin.
+			if wait < time.Minute {
+				wait = time.Minute
+			}
+			if wait > 6*time.Hour {
+				wait = 6 * time.Hour
+			}
+		}
+	}
+	m.quotaMu.Lock()
+	m.quotaCached = wait
+	m.quotaMu.Unlock()
+	return wait
 }
 
 func (m *mega) callOnce(ctx context.Context, folder string, payload []byte) ([]json.RawMessage, error) {
@@ -315,7 +388,7 @@ func (m *mega) decodeResult(raw json.RawMessage, out any, evidence string) error
 		if err != nil {
 			return Errorf(LayerParse, evidence, "API sonucu anlaşılamadı: %.60s", t)
 		}
-		return megaAPIError(code, evidence)
+		return m.withQuotaWait(nil, megaAPIError(code, evidence))
 	}
 	if err := json.Unmarshal(t, out); err != nil {
 		return Errorf(LayerParse, evidence, "API sonucu JSON değil: %v", err)
@@ -725,19 +798,22 @@ func (m *mega) DecodeStream(it Item, offset int64, saved []byte, r io.Reader) (D
 // ClassifyStatus, site.StatusClassifier.
 //
 // 509, mega'nın IP başına aktarım kotası. Genel kurala göre "5xx, geçici"
-// sayılıp tekrar tekrar denenirdi; oysa kota dolduysa saatlerce dolu kalır ve
-// her deneme sayaçta yer tutar. Kalıcı hata olarak bildiriliyor.
+// sayılıp dakikalar içinde tekrar tekrar denenirdi; oysa kota saatlerce
+// dolu kalır. QuotaError olarak bildiriliyor: yeniden deneme politikası
+// durur, kuyruk işi "kota bekliyor"a alır ve sıfırlanma zamanında (ya da
+// kullanıcı IP değiştirip ▶ deyince) yeniden çözümleyip dener.
 //
 // 403 ise nil dönüyor: indirici onu "adres süresi dolmuş" sayıp ResolveOne
-// ile tazeliyor, mega'nın geçici adresleri için doğru tepki bu.
+// ile tazeliyor. ÖLÇÜLDÜ: "g" yanıtındaki "ip" alanı indirme adresini
+// isteyen IP'ye BAĞLAR; VPN değişince eski adres 403 verir, taze "g" gerekir.
 func (m *mega) ClassifyStatus(resp *http.Response, body []byte) error {
 	if resp.StatusCode == 509 {
 		evidence := ""
 		if resp.Request != nil && resp.Request.URL != nil {
 			evidence = resp.Request.URL.Host
 		}
-		return Errorf(LayerCDN, evidence,
-			"mega aktarım kotası doldu (HTTP 509): IP başına sınır, birkaç saat sonra tekrar deneyin")
+		return m.withQuotaWait(nil, &QuotaError{Err: Errorf(LayerCDN, evidence,
+			"mega aktarım kotası doldu (HTTP 509): IP başına sınır")})
 	}
 	return nil
 }

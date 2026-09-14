@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/megacrypto"
 )
@@ -62,9 +64,12 @@ type megaFakeAPI struct {
 	cdn     string
 
 	mu       sync.Mutex
-	calls    []string // "g:p=<h>", "g:n=<h>", "f"
+	calls    []string // "g:p=<h>", "g:n=<h>", "f", "uq"
 	bareErrs []int    // siradaki cagrilarda tum govde olarak donecek hata kodlari
 	nodeErr  map[string]int
+	// quotaResetSec > 0 ise "uq" komutu {"bt": quotaResetSec, "tar": 0} doner
+	// (canli API'nin kota doluyken verdigi sekil); 0 ise -2.
+	quotaResetSec int64
 }
 
 func newMegaFakeAPI(t *testing.T) *megaFakeAPI {
@@ -156,6 +161,13 @@ func (f *megaFakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 				nodes = append(nodes, m)
 			}
 			results = append(results, map[string]any{"f": nodes})
+		case "uq":
+			f.record("uq")
+			if f.quotaResetSec > 0 {
+				results = append(results, map[string]any{"bt": f.quotaResetSec, "tar": 0})
+			} else {
+				results = append(results, -2)
+			}
 		default:
 			results = append(results, -2)
 		}
@@ -611,8 +623,49 @@ func TestMegaQuotaIsNotRetried(t *testing.T) {
 	if !strings.Contains(err.Error(), "kota") {
 		t.Errorf("hata mesaji kotayi soylemiyor: %v", err)
 	}
-	if len(api.bareErrs) != 3 {
+	if _, ok := QuotaOf(err); !ok {
+		t.Errorf("kota hatasi QuotaError degil: %T %v", err, err)
+	}
+	// Iki cagri: "g" (-17) ve sifirlanma suresi icin "uq" (o da -17 aldi ve
+	// yeniden giris kilidi sayesinde ucuncu bir cagri dogurmadi).
+	if len(api.bareErrs) != 2 {
 		t.Errorf("kota hatasi tekrar denendi: kalan %d", len(api.bareErrs))
+	}
+}
+
+// Kota hatasi, API'nin bildirdigi sifirlanma suresini tasimali: kuyruk bu
+// sureye gore bekler, kullanici "birkac saat" yerine "5 sa 6 dk" gorur.
+func TestMegaQuotaCarriesResetTime(t *testing.T) {
+	api := newMegaFakeAPI(t)
+	api.bareErrs = []int{-17}
+	api.quotaResetSec = 18349 // canli olcum
+	m := newMegaWith(t, api)
+
+	_, err := m.Resolve(context.Background(), "https://mega.nz/file/FiLeHaNd#"+megacrypto.B64Encode(make([]byte, 32)),
+		func(Item) error { return nil })
+	q, ok := QuotaOf(err)
+	if !ok {
+		t.Fatalf("QuotaError bekleniyordu: %v", err)
+	}
+	if q.Wait != 18349*time.Second {
+		t.Errorf("Wait = %s, 18349s bekleniyordu", q.Wait)
+	}
+	if !strings.Contains(err.Error(), "5 sa 6 dk") {
+		t.Errorf("mesajda sure yok: %v", err)
+	}
+	if api.count("uq") != 1 {
+		t.Errorf("uq %d kez soruldu, 1 bekleniyordu", api.count("uq"))
+	}
+
+	// 509 da ayni yoldan gecmeli ve bir dakika icinde API'ye yeniden sormamali.
+	resp := &http.Response{StatusCode: 509, Request: &http.Request{URL: mustURL("http://gfs1.userstorage.mega.co.nz/dl/x")}}
+	cerr := m.ClassifyStatus(resp, nil)
+	q2, ok := QuotaOf(cerr)
+	if !ok || q2.Wait != 18349*time.Second {
+		t.Errorf("509 icin QuotaError/Wait yanlis: %v", cerr)
+	}
+	if api.count("uq") != 1 {
+		t.Errorf("509 sonrasi uq yeniden soruldu: %d", api.count("uq"))
 	}
 }
 
@@ -695,4 +748,12 @@ func TestMegaDiagnoseUnreachable(t *testing.T) {
 	if !hasFail(res) {
 		t.Fatalf("ulasilamayan API'de FAIL bekleniyordu: %+v", res)
 	}
+}
+
+func mustURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }
