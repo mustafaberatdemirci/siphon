@@ -48,6 +48,7 @@ func main() {
 			Errorf: func(f string, a ...any) { log.Printf("HATA "+f, a...) },
 		},
 		OnChange: vm.Apply,
+		OnNotice: vm.Notify,
 	})
 	if err != nil {
 		// Config yüklenemedi: pencere açılsın ama sebebini söylesin.

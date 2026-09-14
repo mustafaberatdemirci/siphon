@@ -24,6 +24,7 @@ const (
 	prefOutDir     = "out_dir"
 	prefSpeedLimit = "speed_limit_mbps"
 	prefSegments   = "segments"
+	prefQuotaCmd   = "quota_command"
 )
 
 // queueTab, "İndir" sekmesi: link ekleme, kuyruk listesi, satır başına
@@ -37,6 +38,7 @@ type queueTab struct {
 	links    *widget.Entry
 	outDir   *widget.Entry
 	speed    *widget.Entry
+	quotaCmd *widget.Entry
 	segments *widget.Select
 	addBtn   *widget.Button
 	pauseAll *widget.Button
@@ -117,6 +119,22 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 
 	toolbar := container.NewHBox(q.pauseAll, clearBtn, openBtn, widget.NewLabel("   "), speedBox, widget.NewLabel("  "), segBox)
 
+	// --- Kota komutu ---
+	// mega'nın IP başına kotası dolunca çalıştırılacak komut; tipik olarak VPN
+	// sunucusunu değiştiren bir betik (MegaBasterd'in "509'da komut çalıştır"
+	// özelliği). Boşsa kapalı. Komut bitince pay hemen yoklanır.
+	q.quotaCmd = widget.NewEntry()
+	q.quotaCmd.SetPlaceHolder(`boş = kapalı   ·   ör. "C:\vpn\degistir.bat"  ya da  nordvpn -c`)
+	if saved := prefs.String(prefQuotaCmd); saved != "" {
+		q.quotaCmd.SetText(saved)
+		eng.SetQuotaCommand(saved)
+	}
+	q.quotaCmd.OnChanged = func(v string) {
+		eng.SetQuotaCommand(v)
+		prefs.SetString(prefQuotaCmd, strings.TrimSpace(v))
+	}
+	quotaRow := container.NewBorder(nil, nil, widget.NewLabel("Kota dolunca çalıştır"), nil, q.quotaCmd)
+
 	// --- Liste ---
 	q.list = widget.NewList(
 		func() int { return vm.Len() },
@@ -136,6 +154,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	top := container.NewVBox(
 		container.NewBorder(nil, nil, widget.NewLabel("Linkler"), q.addBtn, linkBox),
 		container.NewBorder(nil, nil, widget.NewLabel("Klasör"), pick, q.outDir),
+		quotaRow,
 		toolbar,
 	)
 	root := container.NewBorder(top, q.status, nil, nil, q.list)

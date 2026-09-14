@@ -202,6 +202,80 @@ func TestQuotaHaltsTheAlbum(t *testing.T) {
 	}
 }
 
+// quotaProbeResolver: quotaResolver + QuotaAvailable (mega gibi).
+type quotaProbeResolver struct {
+	quotaResolver
+	avail atomic.Bool
+}
+
+func (r *quotaProbeResolver) QuotaAvailable(context.Context) (bool, error) {
+	return r.avail.Load(), nil
+}
+
+// -on-quota: kota dolunca komut çalışır, site pay verince AYNI URL yeniden
+// koşulur ve kayıt inenleri atlar. Sunucu ilk N isteği karşılıyor, sonra 509
+// veriyor, komut çalışınca (işaret dosyası) tekrar açılıyor.
+func TestOnQuotaCommandThenRetriesSameURL(t *testing.T) {
+	outDir := tempDir(t)
+	marker := filepath.Join(tempDir(t), "vpn.txt")
+	var served atomic.Int32
+	quotaOn := atomic.Bool{}
+	quotaOn.Store(false)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(marker); err == nil {
+			quotaOn.Store(false) // "VPN değişti"
+		}
+		if served.Load() >= 2 && !quotaOn.Load() {
+			// 2 dosya indi; komut çalışmadıysa kota dolsun.
+			if _, err := os.Stat(marker); err != nil {
+				quotaOn.Store(true)
+			}
+		}
+		if quotaOn.Load() {
+			http.Error(w, "Bandwidth Limit Exceeded", 509)
+			return
+		}
+		served.Add(1)
+		w.Header().Set("Content-Length", "4")
+		_, _ = w.Write([]byte("veri"))
+	}))
+	defer srv.Close()
+
+	const n = 5
+	r := &quotaProbeResolver{quotaResolver: quotaResolver{fakeResolver{items: fakeItems(srv.URL, n)}}}
+	rc := newRunCtx(t, outDir, r, Events{})
+	rc.inFlight = 1
+	rc.opt.OnQuota = `echo degisti> "` + marker + `"`
+	rc.opt.QuotaProbeEvery = 50 * time.Millisecond
+	rc.opt.QuotaProbeMax = 5 * time.Second
+
+	// Yoklama komut bittikten sonra "var" desin: komutun ürettiği dosyaya bak.
+	go func() {
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				r.avail.Store(true)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	var sum Summary
+	res := runURL(context.Background(), rc, &sum)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("kota komutu çalışmadı")
+	}
+	if sum.Done != n {
+		t.Fatalf("toplam inen %d, %d bekleniyordu (ikinci tur kalanları indirmeli)", sum.Done, n)
+	}
+	if sum.Skipped != 2 {
+		t.Errorf("ikinci turda kayıt %d dosyayı atladı, 2 bekleniyordu", sum.Skipped)
+	}
+	if res.quota {
+		t.Error("son tur yine kotada bitti")
+	}
+}
+
 // Kuyruğa giren her item MUTLAKA Done, Failed veya Skipped ile kapanmalı;
 // aksi halde ilerleme çubuğu yüzde yüze hiç ulaşmaz.
 func TestEveryQueuedItemIsAccountedFor(t *testing.T) {

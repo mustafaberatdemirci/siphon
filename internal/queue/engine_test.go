@@ -984,6 +984,111 @@ func TestQuotaProbeBacksOffWhenReleaseFailsAgain(t *testing.T) {
 	}
 }
 
+// Kota komutu (MegaBasterd "509'da komut calistir"): kota dolunca kullanicinin
+// komutu BIR kez calisir (ayni anda uc is 509 alsa da), bitince yoklama one
+// cekilir ve pay varsa isler ▶ beklemeden surer. Bildirimler OnNotice'a gider.
+func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 3)        // uc is ayni anda 509 alsin
+	h.e.opt.QuotaProbeEvery = time.Hour // normal yoklama devre disi; komut one cekmeli
+	var mu sync.Mutex
+	var notices []string
+	h.e.opt.OnNotice = func(s string) {
+		mu.Lock()
+		notices = append(notices, s)
+		mu.Unlock()
+	}
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	marker := filepath.Join(testutil.TempDir(t), "vpn calisti.txt")
+	// "echo x>> dosya" hem cmd'de hem sh'de calisir; her calisma bir satir ekler.
+	h.e.SetQuotaCommand(`echo degisti>> "` + marker + `"`)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateWaiting, 10*time.Second)
+	}
+	// Komut calisip bitmis olmali.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(marker); err == nil && len(b) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("kota komutu calismadi: %v", err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(b)), "\n") + 1; lines != 1 {
+		t.Errorf("komut %d kez calisti, soguma yuzunden 1 bekleniyordu", lines)
+	}
+
+	// Komut bitince yoklama one cekilmeli (normalde 1 saat sonraydi).
+	f.setQuota(false)
+	r.setQuotaOK(true)
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateDone, 15*time.Second)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	joined := strings.Join(notices, "\n")
+	for _, want := range []string{"komut çalıştırılıyor", "Kota komutu bitti", "pay açıldı"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("bildirimlerde %q yok:\n%s", want, joined)
+		}
+	}
+}
+
+// Basarisiz komut kuyrugu bozmamali: is beklemede kalir, bildirim sebebi ve
+// komutun ciktisini soyler, sonraki kota yine (sogumadan sonra) deneyebilir.
+func TestQuotaCommandFailureIsReported(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	h.e.opt.QuotaProbeEvery = time.Hour
+	got := make(chan string, 8)
+	h.e.opt.OnNotice = func(s string) { got <- s }
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.e.SetQuotaCommand("echo vpn yok&& exit 7")
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	id := jobByName(h.e, "a.bin").ID
+	h.waitState(id, StateWaiting, 10*time.Second)
+
+	var failure string
+	deadline := time.After(5 * time.Second)
+	for failure == "" {
+		select {
+		case n := <-got:
+			if strings.Contains(n, "başarısız") {
+				failure = n
+			}
+		case <-deadline:
+			t.Fatal("basarisizlik bildirimi gelmedi")
+		}
+	}
+	if !strings.Contains(failure, "vpn yok") {
+		t.Errorf("bildirimde komut ciktisi yok: %q", failure)
+	}
+	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
+		t.Errorf("basarisiz komut isin durumunu bozdu: %s", got)
+	}
+}
+
 // Bekleme uygulama kapanip acilinca yerinde kalmali: RetryAt diske yaziliyor,
 // suresi gecmisse acilista kuyruga doner.
 func TestQuotaWaitSurvivesRestart(t *testing.T) {

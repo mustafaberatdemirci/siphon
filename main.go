@@ -81,6 +81,7 @@ func runCLI() int {
 		verbose     bool
 		quiet       bool
 		resolveOnly bool
+		onQuota     string
 	)
 	flag.StringVar(&inputPath, "i", "", "URL listesi dosyası (satır başına bir URL, # ile yorum)")
 	flag.StringVar(&outDir, "out", ".", "çıktı kökü")
@@ -88,6 +89,7 @@ func runCLI() int {
 	flag.BoolVar(&verbose, "v", false, "katman detayını da bas")
 	flag.BoolVar(&quiet, "q", false, "sadece hataları bas")
 	flag.BoolVar(&resolveOnly, "resolve-only", false, "çözümlenen URL'leri bas, indirme")
+	flag.StringVar(&onQuota, "on-quota", "", "site kotası dolunca çalıştırılacak komut (ör. VPN değiştiren betik); pay açılınca devam edilir")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "kullanım: siphon [bayraklar] [url ...]\n")
 		fmt.Fprintf(os.Stderr, "          siphon doctor [bayraklar] [site ...]\n\n")
@@ -117,6 +119,7 @@ func runCLI() int {
 		OutDir:      outDir,
 		ConfigPath:  cfgPath,
 		ResolveOnly: resolveOnly,
+		OnQuota:     onQuota,
 	}, log.events())
 	if err != nil {
 		log.errorf("%v", err)

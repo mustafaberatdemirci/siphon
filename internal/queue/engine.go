@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
@@ -43,6 +45,9 @@ type Options struct {
 	// OnChange, bir işin durumu veya ilerlemesi her değiştiğinde çağrılır.
 	// Arka plan goroutine'lerinden gelir; arayüz kendi iş parçacığına taşımalı.
 	OnChange func(Job)
+	// OnNotice, kullanıcıya gösterilmeye değer tek satırlık olaylar: kota
+	// komutu çalıştı/başarısız oldu, pay açıldı. İsteğe bağlı.
+	OnNotice func(string)
 
 	// QuotaProbeEvery, kota bekleyen iş varken sitenin "payım var mı" diye
 	// ne sıklıkla sorulacağı; 0 ise DefaultQuotaProbeEvery.
@@ -60,6 +65,14 @@ const DefaultQuotaProbeEvery = 30 * time.Second
 // maxQuotaProbeEvery, arka arkaya boşa çıkan serbest bırakmalardan sonra
 // yoklamanın seyrelebileceği üst sınır.
 const maxQuotaProbeEvery = 10 * time.Minute
+
+// QuotaCommandCooldown: kota komutu en sık bu aralıkla çalışır. Aynı anda
+// üç iş 509 alınca VPN üç kez değişmesin (MegaBasterd: 120 sn).
+const QuotaCommandCooldown = 2 * time.Minute
+
+// quotaCommandProbeDelay: komut bitince yoklama bu kadar sonra yapılır;
+// VPN tünelinin oturması için kısa bir pay.
+const quotaCommandProbeDelay = 3 * time.Second
 
 // Engine, kuyruğun kendisi.
 type Engine struct {
@@ -97,6 +110,11 @@ type Engine struct {
 	nextProbe   map[string]time.Time     // sıradaki yoklama zamanı
 	probeEvery  map[string]time.Duration // sitenin güncel yoklama aralığı
 	lastRelease map[string]time.Time     // bekleyenlerin en son ne zaman salındığı
+	// Kota komutu (kullanıcının VPN değiştiren betiği gibi):
+	quotaCmd        string
+	quotaCmdRunning bool
+	quotaCmdLast    time.Time
+	runCtx          context.Context // Run'ın bağlamı; komut ve yoklamalar buna bağlı
 
 	wake chan struct{}
 
@@ -462,6 +480,9 @@ func (e *Engine) Jobs() []Job {
 // eder; onlar kuyruk dosyasına "queued" olarak yazılır ve bir sonraki açılışta
 // kendiliğinden devam eder.
 func (e *Engine) Run(ctx context.Context) {
+	e.mu.Lock()
+	e.runCtx = ctx
+	e.mu.Unlock()
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
@@ -600,7 +621,7 @@ func (e *Engine) probe(ctx context.Context, name string, p site.QuotaProber) {
 		e.changed(s)
 	}
 	if len(snaps) > 0 {
-		e.opt.Events.Infof("%s: pay açıldı, %d bekleyen iş kuyruğa döndü", name, len(snaps))
+		e.notice(fmt.Sprintf("%s: pay açıldı, %d bekleyen iş kuyruğa döndü.", name, len(snaps)))
 		e.scheduleSave()
 		e.kick()
 	}
@@ -728,6 +749,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 	delete(e.wipeWant, j.ID)
 	closing := e.closing
 	var extra []Job // aynı sitenin etkilenen diğer işleri
+	quotaHit := false
 	if still {
 		live.Path, live.Filename = j.Path, j.Filename
 		if j.Size > 0 {
@@ -766,6 +788,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 		default:
 			if q, ok := site.QuotaOf(outcome.Err); ok {
 				extra = e.enterQuotaWait(live, q.Wait, outcome.Err.Error())
+				quotaHit = true
 				break
 			}
 			live.State = StateFailed
@@ -799,8 +822,87 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 			e.changed(x)
 		}
 	}
+	if quotaHit {
+		e.maybeRunQuotaCommand()
+	}
 	e.scheduleSave()
 	e.kick()
+}
+
+// ---------- Kota komutu ----------
+
+// SetQuotaCommand, kota dolunca çalıştırılacak komut satırını ayarlar; boş
+// kapatır. Kullanıcının kendi betiği: tipik olarak VPN sunucusunu değiştiren
+// bir komut. Çalıştırma kabukta (Windows: cmd /S /C), çıktısı bildirimde.
+func (e *Engine) SetQuotaCommand(line string) {
+	e.mu.Lock()
+	e.quotaCmd = strings.TrimSpace(line)
+	e.mu.Unlock()
+}
+
+func (e *Engine) QuotaCommand() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.quotaCmd
+}
+
+// maybeRunQuotaCommand, komut tanımlıysa ve soğuma geçtiyse arka planda
+// çalıştırır. Bitince yoklamayı öne çeker: IP değiştiyse 30 sn beklemeden
+// fark edilsin.
+func (e *Engine) maybeRunQuotaCommand() {
+	e.mu.Lock()
+	line := e.quotaCmd
+	ctx := e.runCtx
+	if line == "" || e.quotaCmdRunning || time.Since(e.quotaCmdLast) < QuotaCommandCooldown {
+		e.mu.Unlock()
+		return
+	}
+	e.quotaCmdRunning = true
+	e.quotaCmdLast = time.Now()
+	e.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	e.notice("Kota doldu, komut çalıştırılıyor: " + line)
+	go func() {
+		start := time.Now()
+		out, err := hook.Run(ctx, line, 0)
+		took := time.Since(start).Round(time.Second)
+
+		e.mu.Lock()
+		e.quotaCmdRunning = false
+		if err == nil {
+			for name := range e.probeEvery {
+				e.nextProbe[name] = time.Now().Add(quotaCommandProbeDelay)
+			}
+		}
+		e.mu.Unlock()
+
+		switch {
+		case err != nil && out != "":
+			e.notice(fmt.Sprintf("Kota komutu başarısız (%v): %s", err, firstLineOf(out)))
+		case err != nil:
+			e.notice(fmt.Sprintf("Kota komutu başarısız: %v", err))
+		default:
+			e.notice(fmt.Sprintf("Kota komutu bitti (%s); pay yoklanıyor.", took))
+			e.kick()
+		}
+	}()
+}
+
+func firstLineOf(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+func (e *Engine) notice(msg string) {
+	e.opt.Events.Infof("%s", msg)
+	if e.opt.OnNotice != nil {
+		e.opt.OnNotice(msg)
+	}
 }
 
 // execute, işi Worker'a verir; Item yoksa SourcePage'den yeniden çözer.

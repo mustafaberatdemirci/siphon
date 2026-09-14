@@ -17,11 +17,13 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
@@ -39,7 +41,20 @@ type Options struct {
 	ConfigPath  string
 	ResolveOnly bool
 	MaxInFlight int
+	// OnQuota, sitenin IP başına kotası dolunca çalıştırılacak kabuk komutu
+	// (ör. VPN sunucusunu değiştiren betik). Boşsa kota albümü durdurur.
+	// Doluysa: komut çalışır, site pay verene kadar yoklanır (QuotaProbeEvery
+	// aralıkla, en çok QuotaProbeMax), pay gelince aynı URL yeniden koşulur;
+	// kayıt inenleri atlar. En çok MaxQuotaRounds tur.
+	OnQuota         string
+	QuotaProbeEvery time.Duration // 0 = 30 sn
+	QuotaProbeMax   time.Duration // 0 = 5 dk
 }
+
+// MaxQuotaRounds: kota komutu + yoklama + yeniden koşu döngüsünün URL başına
+// üst sınırı. Sonsuz "VPN değiştir, 5 GiB daha indir" döngüsü olmasın;
+// kullanıcı isterse yeniden çalıştırır.
+const MaxQuotaRounds = 5
 
 // Events, koşu sırasında olan biteni dışarı bildirir.
 // Tüm alanlar nil olabilir; nil olan sessizce atlanır.
@@ -249,8 +264,7 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 			continue
 		}
 		cfg := cfgs[idx]
-
-		res := runOne(ctx, runCtx{
+		rc := runCtx{
 			url:      u,
 			resolver: r,
 			cfg:      cfg,
@@ -259,16 +273,9 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 			opt:      opt,
 			ev:       ev,
 			inFlight: inFlight,
-		})
-
-		sum.Items += res.count
-		sum.Done += res.done
-		sum.Failed += res.failed
-		sum.Skipped += res.skipped
-		sum.Degraded += res.degraded
-		if res.count > 0 {
-			sum.ResolvedAny = true
 		}
+
+		res := runURL(ctx, rc, &sum)
 
 		if res.halted {
 			sum.Halted = true
@@ -292,6 +299,86 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 	return sum, nil
 }
 
+// runURL, bir URL'yi koşar ve toplamları sum'a ekler. OnQuota verildiyse
+// kota döngüsünü de sürer: komut, yoklama, aynı URL yeniden (kayıt inenleri
+// atlar). Son turun sonucu döner.
+func runURL(ctx context.Context, rc runCtx, sum *Summary) oneResult {
+	var res oneResult
+	for round := 0; ; round++ {
+		res = runOne(ctx, rc)
+		sum.Items += res.count
+		sum.Done += res.done
+		sum.Failed += res.failed
+		sum.Skipped += res.skipped
+		sum.Degraded += res.degraded
+		if res.count > 0 {
+			sum.ResolvedAny = true
+		}
+		if !res.quota || rc.opt.OnQuota == "" || round+1 >= MaxQuotaRounds {
+			return res
+		}
+		if !afterQuotaCommand(ctx, rc, round+1) {
+			return res
+		}
+		rc.ev.infof("%s: yeniden deneniyor (%d/%d)", rc.url, round+2, MaxQuotaRounds)
+	}
+}
+
+// afterQuotaCommand, kota komutunu çalıştırır ve site pay verene kadar
+// yoklar. true dönerse yeniden koşmaya değer.
+func afterQuotaCommand(ctx context.Context, rc runCtx, round int) bool {
+	ev, opt := rc.ev, rc.opt
+	ev.infof("kota doldu, komut çalıştırılıyor (%d/%d): %s", round, MaxQuotaRounds, opt.OnQuota)
+	start := time.Now()
+	out, err := hook.Run(ctx, opt.OnQuota, 0)
+	if err != nil {
+		if out != "" {
+			ev.errorf("kota komutu başarısız (%v): %s", err, out)
+		} else {
+			ev.errorf("kota komutu başarısız: %v", err)
+		}
+		return false
+	}
+	ev.infof("kota komutu bitti (%s)", time.Since(start).Round(time.Second))
+
+	prober, ok := rc.resolver.(site.QuotaProber)
+	if !ok {
+		// Site pay sorgusu bilmiyor; komut çalıştı, bir kez daha deneriz.
+		return true
+	}
+	every, max := opt.QuotaProbeEvery, opt.QuotaProbeMax
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	if max <= 0 {
+		max = 5 * time.Minute
+	}
+	deadline := time.Now().Add(max)
+	// İlk yoklama kısa bir gecikmeyle: tünelin oturması için.
+	wait := 3 * time.Second
+	if wait > every {
+		wait = every
+	}
+	for {
+		if err := snet.Sleep(ctx, wait); err != nil {
+			return false
+		}
+		avail, perr := prober.QuotaAvailable(ctx)
+		switch {
+		case perr != nil:
+			ev.debugf("kota yoklaması: %v", perr)
+		case avail:
+			ev.infof("pay açıldı")
+			return true
+		}
+		if time.Now().After(deadline) {
+			ev.errorf("kota %s içinde açılmadı; bırakılıyor", max)
+			return false
+		}
+		wait = every
+	}
+}
+
 type runCtx struct {
 	url      string
 	resolver site.Resolver
@@ -311,6 +398,7 @@ type oneResult struct {
 	degraded   int
 	itemErrs   int
 	halted     bool
+	quota      bool // halted'ın sebebi kota (OnQuota döngüsü için)
 	resolveErr error
 }
 
@@ -326,12 +414,13 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 	g.SetLimit(rc.inFlight)
 
 	var (
-		count   int // Resolve tek goroutine'den çağırıyor; atomic gerekmiyor
-		done    atomic.Int64
-		failed  atomic.Int64
-		already atomic.Int64
-		degrade atomic.Int64 // item indi ama kaydı yazılamadı
-		stopped atomic.Bool
+		count    int // Resolve tek goroutine'den çağırıyor; atomic gerekmiyor
+		done     atomic.Int64
+		failed   atomic.Int64
+		already  atomic.Int64
+		degrade  atomic.Int64 // item indi ama kaydı yazılamadı
+		stopped  atomic.Bool
+		quotaHit atomic.Bool
 	)
 
 	itemErrs, rerr := r.Resolve(ctx, rc.url, func(it site.Item) error {
@@ -363,8 +452,10 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 					// Kota IP başına ve site geneli: kalan yüzlerce item
 					// sırayla aynı 509'u alırdı. Albümü durdur; kullanıcı
 					// süre dolunca ya da IP değiştirince yeniden çalıştırır,
-					// kayıt inenleri atlar.
+					// kayıt inenleri atlar. (-on-quota verildiyse Run
+					// komutu çalıştırıp kendisi yeniden dener.)
 					ev.errorf("DURDURULDU: %v", o.Err)
+					quotaHit.Store(true)
 					stopped.Store(true)
 					return o.Err
 				}
@@ -396,6 +487,7 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 	switch {
 	case stopped.Load():
 		out.halted = true
+		out.quota = quotaHit.Load()
 	case gerr != nil && errors.Is(gerr, context.Canceled):
 		ev.errorf("kesildi: %s", rc.url)
 		out.halted = true
