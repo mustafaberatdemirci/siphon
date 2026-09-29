@@ -1,0 +1,89 @@
+name: Release
+
+# Push a tag such as v1.0.0 and this builds both programs for Windows, Linux
+# and macOS and publishes them as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.goos }})
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+          - os: ubuntu-latest
+            goos: linux
+          - os: macos-latest
+            goos: darwin
+    # The window version needs cgo, so every system builds on its own runner
+    # instead of cross-compiling.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install GUI build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+
+      - name: Build
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          GOOS_NAME: ${{ matrix.goos }}
+        run: |
+          set -euo pipefail
+          ext=""
+          gui_ldflags=""
+          if [ "$GOOS_NAME" = "windows" ]; then
+            ext=".exe"
+            gui_ldflags="-H=windowsgui" # no console window behind the GUI
+          fi
+          name="siphon-${VERSION}-${GOOS_NAME}-$(go env GOARCH)"
+          mkdir -p "dist/$name"
+          # The command line tool is static: no cgo, runs anywhere.
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/$name/siphon${ext}" .
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} ${gui_ldflags}" \
+            -o "dist/$name/siphon-gui${ext}" ./cmd/siphon-gui
+          cp LICENSE README.md "dist/$name/"
+          cd dist
+          if [ "$GOOS_NAME" = "windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: siphon-${{ matrix.goos }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

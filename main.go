@@ -83,6 +83,7 @@ func runCLI() int {
 		quiet       bool
 		resolveOnly bool
 		onQuota     string
+		showVersion bool
 	)
 	flag.StringVar(&inputPath, "i", "", "URL list file (one URL per line, # for comments)")
 	flag.StringVar(&outDir, "out", ".", "output root")
@@ -91,12 +92,17 @@ func runCLI() int {
 	flag.BoolVar(&quiet, "q", false, "only print errors")
 	flag.BoolVar(&resolveOnly, "resolve-only", false, "print the resolved URLs, don't download")
 	flag.StringVar(&onQuota, "on-quota", "", "command to run when a site's quota runs out (e.g. a script that switches VPN); continues when the allowance opens up")
+	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: siphon [flags] [url ...]\n")
 		fmt.Fprintf(os.Stderr, "       siphon doctor [flags] [site ...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if showVersion {
+		fmt.Println("siphon", version)
+		return run.ExitOK
+	}
 
 	log := logger{verbose: verbose, quiet: quiet}
 
