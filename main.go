@@ -11,12 +11,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/doctor"
+	"github.com/mustafaberatdemirci/siphon/internal/external"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
@@ -213,6 +215,9 @@ func runDoctor(args []string) int {
 
 	reports := doctor.Run(ctx, sites)
 	worst := doctor.Format(os.Stdout, reports)
+	if len(want) == 0 {
+		printTools(os.Stdout, cfgs)
+	}
 
 	if rec != nil {
 		for _, f := range rec.Saved() {
@@ -277,4 +282,19 @@ func readURLs(path string, args []string) ([]string, error) {
 		out = append(out, line)
 	}
 	return out, nil
+}
+
+// printTools lists the external tools Siphon hands other sites' pages to
+// (sites.toml's "direct" entry may say where they are).
+func printTools(w io.Writer, cfgs []site.SiteConfig) {
+	var extra map[string]string
+	for _, c := range cfgs {
+		if c.Name == site.DirectName {
+			extra = c.Extra
+		}
+	}
+	fmt.Fprintln(w, "\ntools (for pages of sites Siphon doesn't know)")
+	for _, l := range external.Find(extra).Lines() {
+		fmt.Fprintln(w, l)
+	}
 }

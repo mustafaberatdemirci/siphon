@@ -1055,7 +1055,10 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 			live.State = StateDone
 			live.Done = outcome.Result.Size
 			live.Path = outcome.Result.Path
-			live.Filename = filepath.Base(outcome.Result.Path)
+			// A gallery ends in a folder; the row keeps its own name then.
+			if fi, err := os.Stat(outcome.Result.Path); err == nil && !fi.IsDir() {
+				live.Filename = filepath.Base(outcome.Result.Path)
+			}
 			live.FinishedAt = time.Now()
 			live.Error = ""
 			extra = e.releaseSite(live.Site, started)
@@ -1264,11 +1267,14 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 
 	// The final name is decided BEFORE the download and written to the queue:
 	// that is the guarantee of continuing under the same name when the app is
-	// closed and reopened.
-	if path, err := w.Down.Plan(j.OutDir, it); err == nil {
-		j.Path = path
-		j.Filename = filepath.Base(path)
-		it.Filename = j.Filename
+	// closed and reopened. Not for an external tool (yt-dlp, gallery-dl): it
+	// picks its own file names.
+	if !w.SelfDownloads(it) {
+		if path, err := w.Down.Plan(j.OutDir, it); err == nil {
+			j.Path = path
+			j.Filename = filepath.Base(path)
+			it.Filename = j.Filename
+		}
 	}
 	if it.Size > 0 {
 		j.Size = it.Size

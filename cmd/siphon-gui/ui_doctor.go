@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mustafaberatdemirci/siphon/internal/doctor"
+	"github.com/mustafaberatdemirci/siphon/internal/external"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
@@ -56,6 +57,16 @@ func (d *doctorTab) run() {
 		}
 		reports := doctor.Run(context.Background(), named)
 		worst := doctor.Format(&out, reports)
+		var extra map[string]string
+		for _, c := range cfgs {
+			if c.Name == site.DirectName {
+				extra = c.Extra
+			}
+		}
+		out.WriteString("\ntools (for pages of sites Siphon doesn't know)\n")
+		for _, l := range external.Find(extra).Lines() {
+			out.WriteString(l + "\n")
+		}
 		fmt.Fprintf(&out, "\nResult: %s\n", worst)
 		if worst == site.StatusWarn {
 			out.WriteString("WARN is not a failure: an unknown CDN host\n" +

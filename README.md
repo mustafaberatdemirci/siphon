@@ -6,6 +6,8 @@
 
 **A fast, single-file downloader for mega.nz, pixeldrain, bunkr and direct
 links.** No Java, no Python, nothing to install: download one file and run it.
+With yt-dlp or gallery-dl installed, it also queues video and gallery pages
+from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl).
 
 - **mega over 8 connections**, decrypted on the fly, and when the transfer
   quota runs out it **resumes by itself seconds after you switch VPN
@@ -97,13 +99,39 @@ downloads it like any other file: resumable, over several connections when
 the server supports ranges, and recorded in the ledger. The name comes from
 the server's `Content-Disposition`, otherwise from the URL.
 
-Two kinds of links are refused rather than downloaded:
+Two kinds of links are never saved as a file:
 
-- A link that opens a **web page** (a login or "file not found" page). Saving
-  that page as "the file" would look like a success.
+- A link that opens a **web page**. Saving a login or "file not found" page
+  as "the file" would look like a success. A page may still be a video or a
+  gallery, though: see below.
 - A link on one of the sites above that the site doesn't recognize, such as a
   mega link with a truncated key or a mega storage URL. As a plain file it
   would be a web page or encrypted bytes.
+
+### Thousands more sites through yt-dlp and gallery-dl
+
+If [yt-dlp](https://github.com/yt-dlp/yt-dlp) (video and audio, about 1,800
+sites) or [gallery-dl](https://codeberg.org/mikf/gallery-dl) (images and
+galleries, about 300 sites) is installed, a web page link goes to them:
+yt-dlp first, then gallery-dl.
+
+- A video becomes one job. A playlist or channel becomes one job per video,
+  in a folder named after the playlist. A gallery becomes one job.
+- The tool does the downloading; Siphon runs it in the queue, shows its
+  progress, and records the result in the ledger, so the next run skips it.
+  Pause stops the tool, and resuming continues its partial file.
+- Siphon doesn't bundle or download these tools. Put them next to Siphon or on
+  your PATH, or set their paths in `sites.toml` (see the `direct` entry).
+  `siphon doctor` (or the **Diagnose** tab) lists which ones were found.
+- Install **ffmpeg** too if you download video: many sites send picture and
+  sound separately, and only ffmpeg can merge them. Without it, Siphon asks
+  yt-dlp for the best single file that has both, and says so when there is
+  none.
+- To send a link to one tool on purpose, put its name in front:
+  `yt-dlp:https://…` or `gallery-dl:https://…`.
+
+yt-dlp's own requirements apply: for YouTube, for example, it needs a
+JavaScript runtime (deno) to see every format.
 
 ## Building
 

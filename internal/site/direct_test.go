@@ -3,22 +3,35 @@ package site
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 func newDirectFor(t *testing.T, h http.Handler) (Resolver, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	r := NewDirect(SiteConfig{Name: DirectName, HTTPClient: srv.Client()}.WithDefaults())
+	r := NewDirect(SiteConfig{Name: DirectName, HTTPClient: srv.Client(), Extra: noTools(t)}.WithDefaults())
 	return r, srv
+}
+
+// noTools points the tool paths at files that don't exist: a real yt-dlp
+// on the machine is never asked (a configured path is the only place looked).
+func noTools(t *testing.T) map[string]string {
+	missing := filepath.Join(t.TempDir(), "missing.exe")
+	return map[string]string{"yt_dlp": missing, "gallery_dl": missing, "ffmpeg": missing}
 }
 
 func TestDirectMatchesAnyHTTPLinkAsFallback(t *testing.T) {
@@ -195,5 +208,187 @@ func TestDirectStaysOffRealSitesHosts(t *testing.T) {
 		if got := r.Match(u); got != want {
 			t.Errorf("Match(%q) = %v, want %v", u, got, want)
 		}
+	}
+}
+
+// --- Web pages handed to yt-dlp / gallery-dl ---
+
+// pageServer answers every path with an HTML page (a video or gallery page,
+// as far as a plain client can tell), counting the requests.
+func pageServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<html><body>a page</body></html>")
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// withTools: the direct resolver with the fake yt-dlp and gallery-dl.
+func withTools(t *testing.T, srv *httptest.Server) (Resolver, func() [][]string) {
+	t.Helper()
+	exe := testutil.FakeToolPath(t)
+	log := filepath.Join(t.TempDir(), "calls.log")
+	t.Setenv(testutil.FakeToolLogEnv, log)
+	calls := func() [][]string {
+		b, _ := os.ReadFile(log)
+		var out [][]string
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			var args []string
+			if json.Unmarshal([]byte(line), &args) == nil {
+				out = append(out, args)
+			}
+		}
+		return out
+	}
+	missing := filepath.Join(t.TempDir(), "missing.exe")
+	r := NewDirect(SiteConfig{Name: DirectName, HTTPClient: srv.Client(),
+		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": missing}}.WithDefaults())
+	return r, calls
+}
+
+func resolveAll(t *testing.T, r Resolver, u string) ([]Item, error) {
+	t.Helper()
+	var items []Item
+	_, err := r.Resolve(context.Background(), u, func(it Item) error { items = append(items, it); return nil })
+	return items, err
+}
+
+// A playlist page: one item per video, in a folder named after the playlist,
+// each tagged for yt-dlp so it goes back to yt-dlp after a restart.
+func TestDirectPageGoesToYtDlp(t *testing.T) {
+	srv, _ := pageServer(t)
+	r, _ := withTools(t, srv)
+	items, err := resolveAll(t, r, srv.URL+"/playlist")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("got %+v %v", items, err)
+	}
+	it := items[1]
+	if it.SourcePage != ViaYtDlp+srv.URL+"/watch?v=two" || it.URL != srv.URL+"/watch?v=two" ||
+		it.Dir != "My list" || it.Filename != "Video two [two]" || it.Index != 1 {
+		t.Errorf("item: %+v", it)
+	}
+	if !r.(SelfDownloader).Handles(it) {
+		t.Error("a yt-dlp item isn't downloaded by the tool")
+	}
+}
+
+// A page yt-dlp doesn't know goes to gallery-dl, as one item for the gallery.
+func TestDirectPageGoesToGalleryDL(t *testing.T) {
+	srv, _ := pageServer(t)
+	r, calls := withTools(t, srv)
+	items, err := resolveAll(t, r, srv.URL+"/album")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("got %+v %v", items, err)
+	}
+	if it := items[0]; it.SourcePage != ViaGalleryDL+srv.URL+"/album" || it.Filename != "127.0.0.1 album" || it.Size != -1 {
+		t.Errorf("item: %+v", it)
+	}
+	if n := len(calls()); n != 2 {
+		t.Errorf("%d tool calls, want 2 (yt-dlp said no, gallery-dl said yes)", n)
+	}
+}
+
+// yt-dlp knows the site but can't get the video, and gallery-dl can't take it
+// either: yt-dlp's reason is the answer (more telling than "unsupported").
+func TestDirectKeepsYtDlpReason(t *testing.T) {
+	srv, _ := pageServer(t)
+	r, calls := withTools(t, srv)
+	_, err := resolveAll(t, r, srv.URL+"/private")
+	if err == nil || !strings.Contains(err.Error(), "Private video") {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(calls()); n != 2 {
+		t.Errorf("%d tool calls, want 2 (yt-dlp failed, gallery-dl said no)", n)
+	}
+}
+
+func TestDirectPageNobodyKnows(t *testing.T) {
+	srv, _ := pageServer(t)
+	r, _ := withTools(t, srv)
+	_, err := resolveAll(t, r, srv.URL+"/about")
+	if err == nil || !strings.Contains(err.Error(), "neither Siphon nor yt-dlp nor gallery-dl") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Without the tools, a page is refused with a pointer to them.
+func TestDirectPageWithoutToolsSuggestsThem(t *testing.T) {
+	srv, _ := pageServer(t)
+	r := NewDirect(SiteConfig{Name: DirectName, HTTPClient: srv.Client(), Extra: noTools(t)}.WithDefaults())
+	_, err := resolveAll(t, r, srv.URL+"/watch?v=one")
+	if err == nil || !strings.Contains(err.Error(), "install yt-dlp or gallery-dl") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A tool prefix sends the link straight to that tool: no probe of the page,
+// even on a real site's host (the user's explicit choice).
+func TestDirectToolPrefix(t *testing.T) {
+	srv, hits := pageServer(t)
+	r, _ := withTools(t, srv)
+	r.(HostExcluder).ExcludeHosts([]string{"127.0.0.1"})
+	if r.Match(srv.URL + "/album") {
+		t.Error("an excluded host was matched without a prefix")
+	}
+	if !r.Match(ViaGalleryDL + srv.URL + "/album") {
+		t.Error("an explicit tool prefix wasn't matched")
+	}
+	items, err := resolveAll(t, r, ViaGalleryDL+srv.URL+"/album")
+	if err != nil || len(items) != 1 || items[0].SourcePage != ViaGalleryDL+srv.URL+"/album" {
+		t.Fatalf("got %+v %v", items, err)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("the page was probed %d times; a tool prefix skips that", hits.Load())
+	}
+	// Forced to yt-dlp, an album is not tried with gallery-dl.
+	if _, err := resolveAll(t, r, ViaYtDlp+srv.URL+"/album"); err == nil {
+		t.Error("yt-dlp: prefix fell back to gallery-dl")
+	}
+}
+
+// After a restart a tool job resolves again without any request, and the
+// tool downloads it.
+func TestDirectToolItemDownloads(t *testing.T) {
+	srv, hits := pageServer(t)
+	r, _ := withTools(t, srv)
+	it, err := r.ResolveOne(context.Background(), ViaYtDlp+srv.URL+"/watch?v=one")
+	if err != nil || it.URL != srv.URL+"/watch?v=one" || hits.Load() != 0 {
+		t.Fatalf("ResolveOne: %+v %v (%d requests)", it, err, hits.Load())
+	}
+	dir := t.TempDir()
+	path, size, err := r.(SelfDownloader).DownloadSelf(context.Background(), dir, it, nil)
+	if err != nil || filepath.Dir(path) != dir || size == 0 {
+		t.Fatalf("DownloadSelf: %s %d %v", path, size, err)
+	}
+}
+
+// A plain file link never involves the tools.
+func TestDirectFileSkipsTools(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "x.zip", time.Time{}, bytes.NewReader(make([]byte, 100)))
+	}))
+	t.Cleanup(srv.Close)
+	r, calls := withTools(t, srv)
+	items, err := resolveAll(t, r, srv.URL+"/x.zip")
+	if err != nil || len(items) != 1 || r.(SelfDownloader).Handles(items[0]) {
+		t.Fatalf("got %+v %v", items, err)
+	}
+	if n := len(calls()); n != 0 {
+		t.Errorf("the tools were asked %d times about a plain file", n)
+	}
+}
+
+// MEASURED on imgur: yt-dlp claims an image page and fails ("not a video");
+// gallery-dl must still get the chance to take it.
+func TestDirectImagePageFallsToGalleryDL(t *testing.T) {
+	srv, _ := pageServer(t)
+	r, _ := withTools(t, srv)
+	items, err := resolveAll(t, r, srv.URL+"/image")
+	if err != nil || len(items) != 1 || items[0].SourcePage != ViaGalleryDL+srv.URL+"/image" {
+		t.Fatalf("got %+v %v", items, err)
 	}
 }

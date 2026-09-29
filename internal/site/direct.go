@@ -2,6 +2,8 @@ package site
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -9,10 +11,13 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/mustafaberatdemirci/siphon/internal/external"
 )
 
 // DirectName is the "site" for plain file links: any http(s) URL that no
-// real site recognizes, such as https://example.com/files/setup.zip.
+// real site recognizes, such as https://example.com/files/setup.zip. A link
+// that turns out to be a web page goes to yt-dlp or gallery-dl, if installed.
 const DirectName = "direct"
 
 // Fallback is an optional interface for resolvers that match broadly and
@@ -22,17 +27,66 @@ type Fallback interface {
 	Fallback() bool
 }
 
+// SelfDownloader is an optional interface for resolvers that download some
+// items themselves instead of handing a URL to the downloader: an external
+// tool that does its own extraction, format choice and merging.
+type SelfDownloader interface {
+	// Handles reports whether the item is downloaded by the resolver.
+	Handles(it Item) bool
+	// DownloadSelf downloads it into dir; progress may be nil and total is
+	// -1 when unknown. It returns the file (or, for a gallery, the folder)
+	// and the bytes written.
+	DownloadSelf(ctx context.Context, dir string, it Item, progress func(done, total int64)) (path string, size int64, err error)
+}
+
+// Links handed to an external tool carry the tool's name in front
+// ("yt-dlp:https://…"), in the queue and in the ledger: after a restart the
+// job goes straight back to that tool without probing the page again. A
+// user can type the prefix too, to send a link to a tool on purpose.
+const (
+	ViaYtDlp     = "yt-dlp:"
+	ViaGalleryDL = "gallery-dl:"
+)
+
+// viaTool splits a tool prefix off a link; prefix is "" for a plain link.
+func viaTool(u string) (prefix, link string) {
+	u = strings.TrimSpace(u)
+	for _, p := range []string{ViaYtDlp, ViaGalleryDL} {
+		if strings.HasPrefix(u, p) {
+			return p, strings.TrimSpace(strings.TrimPrefix(u, p))
+		}
+	}
+	return "", u
+}
+
+// errWebPage marks "the link is a web page, not a file".
+var errWebPage = errors.New("the link opens a web page, not a file")
+
+// directExtra are the sites.toml [site.extra] keys direct understands: where
+// the external tools are, when they aren't next to Siphon or on PATH.
+var directExtra = map[string]bool{"yt_dlp": true, "gallery_dl": true, "ffmpeg": true}
+
 // direct resolves a plain file link into a single item. Nothing site
 // specific: one small request (the first byte) tells whether the link is a
 // file at all, its name and its size. From there the ordinary downloader
 // takes over, with resume and several connections when the server allows.
+//
+// A link that turns out to be a web page may still be a video or a gallery
+// a tool knows: it goes to yt-dlp, then gallery-dl, when they are installed.
 type direct struct {
 	cfg SiteConfig
 	// owned: host patterns of the real sites (their domains and CDNs).
 	owned []string
 }
 
-func NewDirect(cfg SiteConfig) Resolver { return &direct{cfg: cfg} }
+func NewDirect(cfg SiteConfig) Resolver {
+	for k := range cfg.Extra {
+		if !directExtra[k] {
+			cfg.Logln("direct: unrecognized extra key %q in config — ignored (possibly a typo)", k)
+		}
+	}
+	return &direct{cfg: cfg}
+}
 
 func (d *direct) Fallback() bool { return true }
 
@@ -42,14 +96,16 @@ func (d *direct) Fallback() bool { return true }
 // as mega's web page, and a mega storage URL as encrypted bytes.
 func (d *direct) ExcludeHosts(patterns []string) { d.owned = patterns }
 
-// Match takes any http(s) URL that isn't a real site's; Pick only asks after
-// every real site said no.
+// Match takes any http(s) URL that isn't a real site's, and any link with a
+// tool prefix; Pick only asks after every real site said no.
 func (d *direct) Match(u string) bool {
-	p, err := url.Parse(strings.TrimSpace(u))
+	prefix, link := viaTool(u)
+	p, err := url.Parse(link)
 	if err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
 		return false
 	}
-	return !MatchHost(p.Hostname(), d.owned)
+	// A tool prefix is the user's explicit choice; it overrides the rule.
+	return prefix != "" || !MatchHost(p.Hostname(), d.owned)
 }
 
 // HostExcluder is an optional interface for fallback resolvers: run.Setup
@@ -59,23 +115,178 @@ type HostExcluder interface {
 }
 
 func (d *direct) Resolve(ctx context.Context, u string, yield func(Item) error) ([]ItemError, error) {
-	it, err := d.ResolveOne(ctx, u)
-	if err != nil {
-		return nil, err
+	var items []Item
+	prefix, link := viaTool(u)
+	if prefix != "" {
+		var err error
+		if items, err = d.viaTools(ctx, link, prefix); err != nil {
+			return nil, err
+		}
+	} else {
+		it, err := d.probeFile(ctx, link)
+		switch {
+		case err == nil:
+			items = []Item{it}
+		case errors.Is(err, errWebPage):
+			// Not a file: maybe a video or gallery page a tool knows.
+			if items, err = d.viaTools(ctx, link, ""); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, err
+		}
 	}
-	return nil, yield(it)
+	for _, it := range items {
+		if err := yield(it); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
 }
 
-// ResolveOne asks for the first byte of the link. A Range request rather
+// viaTools asks the external tools about a web page: yt-dlp first (video
+// and audio: one item per video, a playlist becomes a folder), then
+// gallery-dl (one item for the whole gallery). only limits it to one tool.
+func (d *direct) viaTools(ctx context.Context, link, only string) ([]Item, error) {
+	tools := external.Find(d.cfg.Extra)
+	if tools.YtDlp == "" && tools.GalleryDL == "" || only == ViaYtDlp && tools.YtDlp == "" || only == ViaGalleryDL && tools.GalleryDL == "" {
+		what := "yt-dlp or gallery-dl"
+		switch only {
+		case ViaYtDlp:
+			what = "yt-dlp"
+		case ViaGalleryDL:
+			what = "gallery-dl"
+		}
+		return nil, Errorf(LayerParse, link,
+			"%w, and no supported site recognizes it; for video and gallery sites install %s (next to Siphon or on PATH) and Siphon will use it",
+			errWebPage, what)
+	}
+
+	// yt-dlp's reason when it knew the site but couldn't get the link
+	// (private, removed, or "not a video"): kept for the error if gallery-dl
+	// can't take the link either.
+	var ytErr error
+	if only != ViaGalleryDL && tools.YtDlp != "" {
+		d.cfg.Logln("asking yt-dlp about %s", link)
+		playlist, entries, err := tools.YtDlpProbe(ctx, link)
+		switch {
+		case err == nil:
+			items := make([]Item, 0, len(entries))
+			for i, e := range entries {
+				items = append(items, Item{
+					URL:        e.URL,
+					SourcePage: ViaYtDlp + e.URL,
+					Dir:        playlist,
+					Filename:   videoName(e),
+					Size:       e.Size,
+					Index:      i,
+				})
+			}
+			return items, nil
+		case !errors.Is(err, external.ErrUnsupported):
+			// yt-dlp knows the site but couldn't get the link. MEASURED: an
+			// imgur image page is claimed by yt-dlp's imgur extractor and
+			// fails with "not a video or animated image"; gallery-dl takes
+			// it. So gallery-dl is still asked, and yt-dlp's reason (private,
+			// removed, region locked…) is the answer only if it can't.
+			ytErr = err
+		}
+	}
+
+	if only != ViaYtDlp && tools.GalleryDL != "" {
+		d.cfg.Logln("asking gallery-dl about %s", link)
+		err := tools.GalleryDLProbe(ctx, link)
+		switch {
+		case err == nil:
+			return []Item{{URL: link, SourcePage: ViaGalleryDL + link, Filename: galleryName(link), Size: -1}}, nil
+		case ytErr == nil && !errors.Is(err, external.ErrUnsupported):
+			return nil, Errorf(LayerParse, link, "%w", err)
+		}
+	}
+	if ytErr != nil {
+		return nil, Errorf(LayerParse, link, "%w", ytErr)
+	}
+
+	var tried []string
+	if tools.YtDlp != "" && only != ViaGalleryDL {
+		tried = append(tried, "yt-dlp")
+	}
+	if tools.GalleryDL != "" && only != ViaYtDlp {
+		tried = append(tried, "gallery-dl")
+	}
+	return nil, Errorf(LayerParse, link, "%w, and neither Siphon nor %s recognizes it",
+		errWebPage, strings.Join(tried, " nor "))
+}
+
+// videoName is a queue name for a video before yt-dlp picks the real one
+// ("<title> [<id>]"; the extension depends on the format it chooses).
+func videoName(e external.Entry) string {
+	switch {
+	case e.Title != "" && e.ID != "":
+		return e.Title + " [" + e.ID + "]"
+	case e.Title != "":
+		return e.Title
+	case e.ID != "":
+		return e.ID
+	}
+	return "video"
+}
+
+// galleryName is a queue name for a gallery: the host and the path, e.g.
+// "imgur.com a 1abc".
+func galleryName(link string) string {
+	p, err := url.Parse(link)
+	if err != nil {
+		return "gallery"
+	}
+	parts := []string{strings.TrimPrefix(p.Hostname(), "www.")}
+	for _, s := range strings.Split(p.Path, "/") {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// Handles implements SelfDownloader: links handed to a tool.
+func (d *direct) Handles(it Item) bool {
+	prefix, _ := viaTool(it.SourcePage)
+	return prefix != ""
+}
+
+// DownloadSelf implements SelfDownloader: the tool downloads the link itself.
+func (d *direct) DownloadSelf(ctx context.Context, dir string, it Item, progress func(done, total int64)) (string, int64, error) {
+	tools := external.Find(d.cfg.Extra)
+	prefix, link := viaTool(it.SourcePage)
+	switch {
+	case prefix == ViaYtDlp && tools.YtDlp != "":
+		return tools.YtDlpDownload(ctx, link, dir, progress)
+	case prefix == ViaGalleryDL && tools.GalleryDL != "":
+		return tools.GalleryDLDownload(ctx, link, dir, progress)
+	case prefix != "":
+		return "", 0, fmt.Errorf("%s isn't installed any more (next to Siphon or on PATH)", strings.TrimSuffix(prefix, ":"))
+	}
+	return "", 0, fmt.Errorf("not a tool link: %s", it.SourcePage)
+}
+
+// ResolveOne resolves a single link again (after a restart). A tool link
+// needs nothing: the tool does its own extraction when it downloads.
+func (d *direct) ResolveOne(ctx context.Context, u string) (Item, error) {
+	if prefix, link := viaTool(u); prefix != "" {
+		return Item{URL: link, SourcePage: prefix + link, Filename: galleryName(link), Size: -1}, nil
+	}
+	return d.probeFile(ctx, strings.TrimSpace(u))
+}
+
+// probeFile asks for the first byte of the link. A Range request rather
 // than HEAD: plenty of servers answer HEAD differently from GET (or not at
 // all), and the answer also shows whether ranges work.
 //
-// A link that answers with a web page is refused: downloading a login or
-// "file not found" page and calling it a success would be exactly the silent
-// failure this tool is built to avoid. A page sent as an attachment is a
-// file, though.
-func (d *direct) ResolveOne(ctx context.Context, u string) (Item, error) {
-	u = strings.TrimSpace(u)
+// A link that answers with a web page is not a file (errWebPage): saving a
+// login or "file not found" page and calling it a success would be exactly
+// the silent failure this tool is built to avoid. A page sent as an
+// attachment is a file, though.
+func (d *direct) probeFile(ctx context.Context, u string) (Item, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return Item{}, Errorf(LayerFetch, u, "invalid link: %w", err)
@@ -93,19 +304,18 @@ func (d *direct) ResolveOne(ctx context.Context, u string) (Item, error) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusPartialContent:
-	case http.StatusNotFound, http.StatusGone:
+	attachment, cdName := disposition(resp.Header.Get("Content-Disposition"))
+	ctype := resp.Header.Get("Content-Type")
+	switch {
+	case isPageType(ctype) && !attachment && resp.StatusCode < 500:
+		// A page, whatever its status: a video site answering 404 or 403 to
+		// a plain client still leaves the decision to the tools.
+		return Item{}, Errorf(LayerParse, u, "%w (%s)", errWebPage, mediaType(ctype))
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent:
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
 		return Item{}, Errorf(LayerFetch, u, "the file doesn't exist (HTTP %d)", resp.StatusCode)
 	default:
 		return Item{}, Errorf(LayerFetch, u, "the server refused the link: HTTP %s", resp.Status)
-	}
-
-	attachment, cdName := disposition(resp.Header.Get("Content-Disposition"))
-	ctype := resp.Header.Get("Content-Type")
-	if isPageType(ctype) && !attachment {
-		return Item{}, Errorf(LayerParse, u,
-			"the link opens a web page (%s), not a file, and no supported site recognizes it", mediaType(ctype))
 	}
 
 	final := u

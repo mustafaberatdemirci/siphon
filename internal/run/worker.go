@@ -3,9 +3,11 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
@@ -140,7 +142,7 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 	// at the ledger and skipping would be a silent failure.
 	if ledger != nil {
 		if e, ok := ledger.Lookup(it.Dir, it.SourcePage, it.Filename); ok {
-			if fi, serr := os.Stat(filepath.Join(outDir, e.Path)); serr == nil && !fi.IsDir() {
+			if fi, serr := os.Stat(filepath.Join(outDir, e.Path)); serr == nil && (!fi.IsDir() || w.SelfDownloads(it)) {
 				if ev.ItemSkipped != nil {
 					ev.ItemSkipped(it, e)
 				}
@@ -164,7 +166,11 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 	var res dl.Result
 	derr := w.Policy.Do(ctx, func(int) error {
 		var e error
-		res, e = w.Down.Download(ctx, outDir, it)
+		if w.SelfDownloads(it) {
+			res, e = w.downloadSelf(ctx, outDir, it)
+		} else {
+			res, e = w.Down.Download(ctx, outDir, it)
+		}
 		return e
 	})
 
@@ -213,4 +219,38 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 		}
 		return Outcome{Kind: OutcomeFailed, Err: derr}
 	}
+}
+
+// SelfDownloads reports whether the item is downloaded by the resolver
+// itself (an external tool) rather than by the downloader. The queue then
+// doesn't plan a file name for it: the tool picks its own.
+func (w *Worker) SelfDownloads(it site.Item) bool {
+	sd, ok := w.Resolver.(site.SelfDownloader)
+	return ok && sd.Handles(it)
+}
+
+// downloadSelf lets the resolver's tool download the item into its folder,
+// with progress going the same way as the downloader's (at most every
+// 250 ms: yt-dlp reports far more often).
+func (w *Worker) downloadSelf(ctx context.Context, outDir string, it site.Item) (dl.Result, error) {
+	dir := filepath.Join(outDir, dl.Component(it.Dir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return dl.Result{}, fmt.Errorf("could not create folder: %w", err)
+	}
+	var last time.Time
+	progress := func(done, total int64) {
+		if w.Down.Progress == nil || time.Since(last) < 250*time.Millisecond {
+			return
+		}
+		last = time.Now()
+		w.Down.Progress(it, done, total)
+	}
+	path, size, err := w.Resolver.(site.SelfDownloader).DownloadSelf(ctx, dir, it, progress)
+	if err != nil {
+		return dl.Result{}, err
+	}
+	if w.Down.Progress != nil {
+		w.Down.Progress(it, size, size)
+	}
+	return dl.Result{Path: path, Size: size}, nil
 }

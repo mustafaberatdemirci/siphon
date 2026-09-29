@@ -17,6 +17,7 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/megacrypto"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // Real sites are asked before the plain-link fallback, whatever the order
@@ -159,6 +160,7 @@ func TestDirectLinkEndToEnd(t *testing.T) {
 // A link to a web page is refused at resolution: nothing is written, and
 // the run reports why.
 func TestDirectLinkToWebPageSavesNothing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no real yt-dlp or gallery-dl may be asked
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, "<html>Sign in to download</html>")
@@ -174,5 +176,75 @@ func TestDirectLinkToWebPageSavesNothing(t *testing.T) {
 		if e.Name() != store.FileName {
 			t.Errorf("%s was written for a web page link", e.Name())
 		}
+	}
+}
+
+// toolRunCtx: a run for a link that goes to the (fake) yt-dlp / gallery-dl.
+func toolRunCtx(t *testing.T, outDir, link string, srv *httptest.Server) runCtx {
+	t.Helper()
+	exe := testutil.FakeToolPath(t)
+	cfg := site.SiteConfig{
+		Name: site.DirectName, MaxConcurrent: 4, MaxRetries: 1, HTTPClient: srv.Client(),
+		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": filepath.Join(t.TempDir(), "none")},
+	}.WithDefaults()
+	ledger, err := store.Open(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	return runCtx{
+		url: link, resolver: site.NewDirect(cfg), cfg: cfg, client: srv.Client(),
+		ledger: ledger, opt: Options{OutDir: outDir}, inFlight: 4,
+	}
+}
+
+func htmlServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html>a video page</html>")
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A playlist page: yt-dlp lists it, each video is a job downloaded by
+// yt-dlp into the playlist's folder, the ledger records them and the next
+// run skips them.
+func TestPlaylistPageThroughYtDlp(t *testing.T) {
+	srv := htmlServer(t)
+	out := tempDir(t)
+	res := runOne(context.Background(), toolRunCtx(t, out, srv.URL+"/playlist", srv))
+	if res.resolveErr != nil || res.done != 2 || res.failed != 0 {
+		t.Fatalf("run: %+v", res)
+	}
+	for _, id := range []string{"one", "two"} {
+		if _, err := os.Stat(filepath.Join(out, "My list", "Video "+id+" ["+id+"].mp4")); err != nil {
+			t.Errorf("video %s: %v", id, err)
+		}
+	}
+	again := runOne(context.Background(), toolRunCtx(t, out, srv.URL+"/playlist", srv))
+	if again.skipped != 2 || again.done != 0 {
+		t.Errorf("the second run didn't skip: %+v", again)
+	}
+}
+
+// A gallery page goes to gallery-dl as one job; the ledger records its
+// folder, and the next run skips it (a folder counts as present).
+func TestGalleryPageThroughGalleryDL(t *testing.T) {
+	srv := htmlServer(t)
+	out := tempDir(t)
+	res := runOne(context.Background(), toolRunCtx(t, out, srv.URL+"/album", srv))
+	if res.resolveErr != nil || res.done != 1 {
+		t.Fatalf("run: %+v", res)
+	}
+	for _, name := range []string{"a.jpg", "b.jpg"} {
+		if _, err := os.Stat(filepath.Join(out, "pics", "album", name)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	again := runOne(context.Background(), toolRunCtx(t, out, srv.URL+"/album", srv))
+	if again.skipped != 1 {
+		t.Errorf("the second run didn't skip the gallery: %+v", again)
 	}
 }

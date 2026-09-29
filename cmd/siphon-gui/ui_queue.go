@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -64,7 +65,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.links = widget.NewMultiLineEntry()
 	q.links.SetPlaceHolder("Paste links — one per line.\n" +
 		"pixeldrain.com/l/…   bunkr.ws/a/…   mega.nz/folder/…#…\n" +
-		"or any direct file link: https://…/file.zip")
+		"or any direct file link — and video or gallery pages if yt-dlp / gallery-dl is installed")
 	q.links.Wrapping = fyne.TextWrapOff
 	q.addBtn = widget.NewButton("Add", q.add)
 	q.addBtn.Importance = widget.HighImportance
@@ -432,7 +433,11 @@ func (q *queueTab) openFolder() {
 		switch j.State {
 		case queue.StateDone, queue.StateSkipped:
 			if j.Path != "" {
-				lastPath = j.Path
+				if fi, err := os.Stat(j.Path); err == nil && fi.IsDir() {
+					lastPath, lastDir = "", j.Path // a gallery: its folder
+				} else {
+					lastPath = j.Path
+				}
 			}
 		case queue.StateRunning, queue.StatePaused:
 			if j.Path != "" {

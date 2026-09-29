@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1800,5 +1801,59 @@ func TestSiteShareIsCappedByMaxConcurrent(t *testing.T) {
 	}
 	if max := h.maxRunning(15*time.Second, nil); max != 2 {
 		t.Errorf("%d of the site's jobs ran at once; max_concurrent is 2", max)
+	}
+}
+
+// --- Links handed to yt-dlp / gallery-dl ---
+
+// A playlist page added to the queue becomes one job per video. After a
+// restart the jobs go straight back to yt-dlp: the page isn't fetched again,
+// and each row ends up named after the file yt-dlp wrote.
+func TestToolJobsSurviveRestart(t *testing.T) {
+	var pageHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pageHits.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html>a playlist page</html>")
+	}))
+	t.Cleanup(srv.Close)
+	exe := testutil.FakeToolPath(t)
+	cfg := site.SiteConfig{
+		Name: site.DirectName, MaxConcurrent: 4, MaxRetries: 1, HTTPClient: srv.Client(),
+		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": filepath.Join(t.TempDir(), "none")},
+	}.WithDefaults()
+	state := filepath.Join(testutil.TempDir(t), "queue.json")
+	out := testutil.TempDir(t)
+	newEngine := func() *Engine {
+		e, err := New(Options{StatePath: state, Client: srv.Client(),
+			Resolvers: []site.Resolver{site.NewDirect(cfg)}, Configs: []site.SiteConfig{cfg}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+
+	first := newEngine()
+	if n, err := first.Add(context.Background(), srv.URL+"/playlist", out); err != nil || n != 2 {
+		t.Fatalf("Add: %d %v", n, err)
+	}
+	first.flush()
+	hitsAfterAdd := pageHits.Load()
+
+	e := newEngine() // "restarted": nothing resolved in memory
+	h := &harness{t: t, e: e, out: out}
+	h.start()
+	defer h.stop()
+	h.waitAll(StateDone, 20*time.Second)
+	for _, j := range e.Jobs() {
+		if !strings.HasSuffix(j.Filename, ".mp4") || j.Dir != "My list" {
+			t.Errorf("job %+v", j)
+		}
+		if _, err := os.Stat(j.Path); err != nil {
+			t.Errorf("%s: %v", j.Filename, err)
+		}
+	}
+	if pageHits.Load() != hitsAfterAdd {
+		t.Errorf("the page was fetched again after the restart (%d requests)", pageHits.Load()-hitsAfterAdd)
 	}
 }
