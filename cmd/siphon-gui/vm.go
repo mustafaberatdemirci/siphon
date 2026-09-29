@@ -297,13 +297,13 @@ func stateLabel(s queue.State) string {
 // 20:31"): the list is only drawn on changes, so a countdown would stay frozen.
 func waitingMeta(j queue.Job, now time.Time) string {
 	if j.RetryAt.IsZero() {
-		return "quota exceeded  ·  ▶ to try now"
+		return "quota exceeded  ·  resume to try now"
 	}
 	left := j.RetryAt.Sub(now)
 	if left < time.Minute {
 		return "quota exceeded  ·  retrying shortly"
 	}
-	return fmt.Sprintf("quota exceeded  ·  resumes when the VPN changes or at %s (%s)  ·  ▶ try now",
+	return fmt.Sprintf("quota exceeded  ·  resumes when the VPN changes or at %s (%s)  ·  resume to try now",
 		j.RetryAt.Local().Format("15:04"), site.FormatWait(left))
 }
 
@@ -314,58 +314,6 @@ func quotaHoldMessage(retryAt, now time.Time) string {
 	}
 	return fmt.Sprintf("If you switch VPN server, downloads resume by themselves; otherwise they'll be retried at %s (in %s).",
 		retryAt.Local().Format("15:04"), site.FormatWait(retryAt.Sub(now)))
-}
-
-// rowMeta is the info at the top right of a row: size/speed/time left or
-// the error, depending on the state.
-func rowMeta(r row) string {
-	j := r.Job
-	switch j.State {
-	case queue.StateRunning:
-		var b strings.Builder
-		if j.Size > 0 {
-			fmt.Fprintf(&b, "%s / %s", humanBytes(j.Done), humanBytes(j.Size))
-		} else {
-			b.WriteString(humanBytes(j.Done))
-		}
-		if s := humanRate(r.Rate); s != "" {
-			b.WriteString("  ·  " + s)
-		}
-		// What the download really got, not what was asked for: the site
-		// ceiling, the host slots and the server all have a say.
-		if s := connsLabel(j.Conns); s != "" {
-			b.WriteString("  ·  " + s)
-		}
-		if j.Size > 0 {
-			if eta := humanETA(j.Size-j.Done, r.Rate); eta != "" {
-				b.WriteString("  ·  " + eta + " left")
-			}
-		}
-		return b.String()
-	case queue.StatePaused:
-		if j.Size > 0 {
-			return fmt.Sprintf("%s / %s  ·  paused", humanBytes(j.Done), humanBytes(j.Size))
-		}
-		return "paused"
-	case queue.StateWaiting:
-		return waitingMeta(j, time.Now())
-	case queue.StateFailed, queue.StateStopped:
-		msg := firstLine(j.Error)
-		if len([]rune(msg)) > 70 {
-			msg = string([]rune(msg)[:67]) + "..."
-		}
-		if msg == "" {
-			return stateLabel(j.State)
-		}
-		return stateLabel(j.State) + ": " + msg
-	case queue.StateDone, queue.StateSkipped:
-		return humanBytes(j.Size) + "  ·  " + stateLabel(j.State)
-	default:
-		if j.Size > 0 {
-			return humanBytes(j.Size) + "  ·  " + stateLabel(j.State)
-		}
-		return stateLabel(j.State)
-	}
 }
 
 // connsLabel is "1 connection" / "8 connections"; empty while unknown.
@@ -431,7 +379,8 @@ func rowProgress(j queue.Job) float64 {
 	return p
 }
 
-// actionFor is the label of the row's main button and what it does.
+// rowAction is what can be done to a job: the toolbar's and the row menu's
+// Resume and Pause act on the jobs whose action matches.
 type rowAction int
 
 const (
@@ -440,13 +389,12 @@ const (
 	actionResume
 )
 
-func actionFor(s queue.State) (label string, act rowAction) {
+func actionFor(s queue.State) rowAction {
 	switch s {
 	case queue.StateRunning, queue.StateQueued:
-		return "⏸", actionPause
+		return actionPause
 	case queue.StatePaused, queue.StateFailed, queue.StateStopped, queue.StateWaiting:
-		return "▶", actionResume
-	default:
-		return "✓", actionNone
+		return actionResume
 	}
+	return actionNone
 }

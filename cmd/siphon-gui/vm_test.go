@@ -137,7 +137,7 @@ func TestWaitingMetaShowsRetryClock(t *testing.T) {
 	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
 	j := queue.Job{State: queue.StateWaiting, RetryAt: now.Add(5*time.Hour + 6*time.Minute)}
 	got := waitingMeta(j, now)
-	for _, want := range []string{"20:31", "5h 6m", "▶"} {
+	for _, want := range []string{"20:31", "5h 6m", "resume to try now"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q missing from %q", want, got)
 		}
@@ -148,8 +148,8 @@ func TestWaitingMetaShowsRetryClock(t *testing.T) {
 	if got := waitingMeta(queue.Job{State: queue.StateWaiting}, now); !strings.Contains(got, "try now") {
 		t.Errorf("without RetryAt: %q", got)
 	}
-	if label, act := actionFor(queue.StateWaiting); label != "▶" || act != actionResume {
-		t.Errorf("the waiting row's button is %q/%v", label, act)
+	if act := actionFor(queue.StateWaiting); act != actionResume {
+		t.Errorf("a waiting job can't be resumed: %v", act)
 	}
 }
 
@@ -201,29 +201,41 @@ func TestQuotaBanner(t *testing.T) {
 
 // --- Row formatting ---
 
-func TestRowMetaByState(t *testing.T) {
+func TestCellTextsByState(t *testing.T) {
+	now := time.Now()
 	run := row{Job: job("a", queue.StateRunning, 20<<20, 100<<20), Rate: 10 << 20}
-	if got := rowMeta(run); !strings.Contains(got, "MB/s") || !strings.Contains(got, "left") {
-		t.Errorf("running row: %q", got)
+	if speedText(run) == "" || etaText(run) == "" || sizeText(run.Job) != "100.0 MB" {
+		t.Errorf("running row: size %q, speed %q, eta %q", sizeText(run.Job), speedText(run), etaText(run))
 	}
-	// With an unknown size the time left must NOT BE MADE UP.
+	// With an unknown size the time left must NOT BE MADE UP; the size
+	// column shows what has come so far.
 	unk := row{Job: job("u", queue.StateRunning, 5<<20, -1), Rate: 1 << 20}
-	if got := rowMeta(unk); strings.Contains(got, "left") {
+	if got := etaText(unk); got != "" {
 		t.Errorf("time left on a row without a size: %q", got)
+	}
+	if got := sizeText(unk.Job); got != "5.0 MB" {
+		t.Errorf("size of a row without a size: %q", got)
 	}
 	// With an unknown speed "0 B/s" must not be written.
 	slow := row{Job: job("s", queue.StateRunning, 1, 100), Rate: 0}
-	if got := rowMeta(slow); strings.Contains(got, "/s") {
+	if got := speedText(slow); strings.Contains(got, "/s") {
 		t.Errorf("speed on a row without a speed: %q", got)
+	}
+	// Only a running job has a speed and a time left.
+	paused := row{Job: job("p", queue.StatePaused, 20, 100), Rate: 5 << 20}
+	if speedText(paused) != "" || etaText(paused) != "" {
+		t.Errorf("paused row: speed %q, eta %q", speedText(paused), etaText(paused))
 	}
 	failed := job("f", queue.StateFailed, 0, 10)
 	failed.Error = "mega transfer quota exceeded (HTTP 509): per-IP limit\nsecond line"
-	if got := rowMeta(row{Job: failed}); !strings.Contains(got, "quota") || strings.Contains(got, "second") {
+	if got := statusText(row{Job: failed}, now); !strings.HasPrefix(got, "Failed: ") || !strings.Contains(got, "quota") || strings.Contains(got, "second") {
 		t.Errorf("a failed row must show the first line: %q", got)
 	}
-	done := job("d", queue.StateDone, 10, 10)
-	if got := rowMeta(row{Job: done}); !strings.Contains(got, "done") {
+	if got := statusText(row{Job: job("d", queue.StateDone, 10, 10)}, now); got != "Done" {
 		t.Errorf("finished row: %q", got)
+	}
+	if got := statusText(row{Job: job("k", queue.StateSkipped, 10, 10)}, now); got != "Already downloaded" {
+		t.Errorf("skipped row: %q", got)
 	}
 }
 
@@ -249,7 +261,7 @@ func TestActionForState(t *testing.T) {
 		queue.StateDone: actionNone, queue.StateSkipped: actionNone,
 	}
 	for st, want := range cases {
-		if _, got := actionFor(st); got != want {
+		if got := actionFor(st); got != want {
 			t.Errorf("%s -> %v, want %v", st, got, want)
 		}
 	}
@@ -278,18 +290,19 @@ func TestParseSpeedLimit(t *testing.T) {
 // --- Connections ---
 
 // A running row shows the connections its download really got; nothing while unknown.
-func TestRowMetaShowsConnections(t *testing.T) {
+func TestStatusShowsConnections(t *testing.T) {
+	now := time.Now()
 	j := job("a", queue.StateRunning, 20<<20, 100<<20)
 	j.Conns = 8
-	if got := rowMeta(row{Job: j, Rate: 10 << 20}); !strings.Contains(got, "8 connections") {
+	if got := statusText(row{Job: j, Rate: 10 << 20}, now); got != "Downloading  ·  8 connections" {
 		t.Errorf("running row with 8 connections: %q", got)
 	}
 	j.Conns = 1
-	if got := rowMeta(row{Job: j}); !strings.Contains(got, "1 connection") || strings.Contains(got, "connections") {
+	if got := statusText(row{Job: j}, now); !strings.Contains(got, "1 connection") || strings.Contains(got, "connections") {
 		t.Errorf("running row with 1 connection: %q", got)
 	}
 	j.Conns = 0
-	if got := rowMeta(row{Job: j}); strings.Contains(got, "connection") {
+	if got := statusText(row{Job: j}, now); got != "Downloading" {
 		t.Errorf("a connection count was made up: %q", got)
 	}
 }

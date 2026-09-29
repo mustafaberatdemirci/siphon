@@ -131,12 +131,13 @@ func main() {
 	// Closing the window hides it in the notification area; downloads go on.
 	tr := setupTray(a, w, a.Preferences(), quit)
 
-	_, queueView := newQueueTab(w, a.Preferences(), eng, vm, tr.setQuota)
+	q, queueView := newQueueTab(w, a.Preferences(), eng, vm, tr.setQuota)
 	_, doctorView := newDoctorTab(w)
-	w.SetContent(container.NewAppTabs(
-		container.NewTabItem("Download", queueView),
-		container.NewTabItem("Diagnose", doctorView),
-	))
+	downloadTab := container.NewTabItem("Download", queueView)
+	tabs := container.NewAppTabs(downloadTab, container.NewTabItem("Diagnose", doctorView))
+	// Delete and Ctrl+A act on the table only while it is on screen.
+	q.shown = func() bool { return tabs.Selected() == downloadTab }
+	w.SetContent(tabs)
 
 	if statePath == "" {
 		dialog.ShowInformation("Persistence off",

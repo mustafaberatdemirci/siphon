@@ -20,7 +20,7 @@ from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl)
   CDN) and names the layer that broke, instead of "0 files downloaded".
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Siphon's download queue: four files downloading over 8, 8, 3 and 4 connections with speed and time left, two queued, one paused" width="820" />
+  <img src="docs/screenshot.png" alt="Siphon's download queue as a table with status filters on the left: four files downloading over 8, 8, 3 and 4 connections with speed and time left, two queued, one paused, two done and one failed" width="880" />
 </p>
 
 It comes as two programs that share one download pipeline:
@@ -191,15 +191,30 @@ tests Linux and macOS too.
    closing and reopening the app keeps the list, and unfinished downloads
    continue where they stopped.
 
-Per row you can pause/resume (⏸ / ▶) and remove (✕). The toolbar has:
+The queue is a table: name, size, progress, speed, time left and status,
+with the connections each download really has. Click a column title to sort
+by it (again to reverse, a third time for queue order; names sort the way
+people number them, `Day 2` before `Day 10`). The list on the left filters
+it: all, unfinished, downloading, queued, paused, finished, failed.
+
+- **Select** rows with a click, several with Ctrl-click, a range with
+  Shift-click, all shown with Ctrl+A.
+- **Right-click** for resume, pause, show in folder, show error, copy link
+  and remove, acting on every selected row. **Delete** removes them too; if
+  any has a partial file, Siphon asks first and offers to delete it.
+- **Double-click** a finished row to show the file in its folder, a failed
+  one to read the whole error.
+
+The toolbar has:
 
 | Control | What it does |
 | --- | --- |
+| Resume / Pause / Remove | Act on the selected rows. |
 | Pause all / Resume all | Stops starting new downloads and pauses running ones; press again to resume. |
 | Cancel all | Stops and removes every unfinished download. It asks first and offers to delete the partial files. Finished files are never touched. |
 | Retry failed | Puts every failed job back in the queue. |
 | Clear finished | Removes finished rows from the list (the files stay). |
-| Open folder | Opens the folder of the last finished file, with the file selected. |
+| Open folder | Opens the selected download's folder, or else the folder of the last finished file, with the file selected. |
 | Speed limit | Total limit in MB/s across all downloads (empty or 0 = unlimited). |
 | Downloads at once | How many files download at the same time (default 4). Takes effect right away. |
 | Connections/file | How many connections a single file may use; also applies to downloads already running. See below. |

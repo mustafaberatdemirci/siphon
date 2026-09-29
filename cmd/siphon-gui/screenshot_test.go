@@ -55,10 +55,14 @@ func TestREADMEScreenshot(t *testing.T) {
 		{"lecture-notes.pdf", queue.StatePaused, 3 * mb, 11 * mb, 0, 0},
 		{"soundtrack.flac", queue.StateDone, 412 * mb, 412 * mb, 0, 0},
 		{"photos-album.tar", queue.StateDone, 1204 * mb, 1204 * mb, 0, 0},
+		{"old-mirror.zip", queue.StateFailed, 0, 0, 0, 0},
 	}
 	vm.mu.Lock()
 	for i, j := range jobs {
 		job := queue.Job{ID: string(rune('a' + i)), Filename: j.name, State: j.st, Done: j.done, Size: j.size, Conns: j.conns}
+		if j.st == queue.StateFailed {
+			job.Error = "HTTP 404: the file was removed from the server"
+		}
 		vm.apply(job, now)
 		if j.rate > 0 {
 			vm.rate[job.ID] = j.rate
@@ -69,14 +73,12 @@ func TestREADMEScreenshot(t *testing.T) {
 	w := test.NewTempWindow(t, container.NewStack())
 	q, view := newQueueTab(w, a.Preferences(), eng, vm, nil)
 	q.outDir.SetText(`D:\Downloads\Siphon`)
-	q.status.SetText(vm.StatusLine())
-	q.cancelAll.Enable()
 	w.SetContent(container.NewAppTabs(
 		container.NewTabItem("Download", view),
 		container.NewTabItem("Diagnose", container.NewStack()),
 	))
-	w.Resize(fyne.NewSize(1040, 900))
-	q.list.Refresh()
+	w.Resize(fyne.NewSize(1100, 760))
+	q.render()
 
 	out := filepath.Join("..", "..", "docs", "screenshot.png")
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
