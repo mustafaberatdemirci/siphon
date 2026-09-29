@@ -34,7 +34,7 @@ func main() {
 	a := app.NewWithID(appID)
 	registerToastIdentity(appID)
 	a.SetIcon(appIcon())
-	w := a.NewWindow("Siphon " + version + " — pixeldrain, bunkr, mega & direct links")
+	w := a.NewWindow("Siphon " + version)
 	w.Resize(fyne.NewSize(980, 720))
 
 	statePath, err := queue.DefaultStatePath()

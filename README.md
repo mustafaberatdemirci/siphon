@@ -4,8 +4,9 @@
 [![Release](https://img.shields.io/github/v/release/mustafaberatdemirci/siphon)](https://github.com/mustafaberatdemirci/siphon/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**A fast, single-file downloader for mega.nz, pixeldrain, bunkr and direct
-links.** No Java, no Python, nothing to install: download one file and run it.
+**A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain,
+bunkr, cyberdrop and direct links.** No Java, no Python, nothing to install:
+download one file and run it.
 With yt-dlp or gallery-dl installed, it also queues video and gallery pages
 from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl).
 
@@ -50,7 +51,9 @@ To build it yourself instead, see [Building](#building).
 - **Resumable downloads.** Progress lives in a `.part` file and a
   `.part.state` sidecar. Interrupted downloads continue where they stopped,
   even after a crash. `If-Range` is used so that pieces of two different
-  versions of a file are never glued together.
+  versions of a file are never glued together. Where the server names no
+  version but the site gives the file's SHA-256 (mediafire), the hash plays
+  that role: it is checked over the finished file.
 - **Several downloads, several connections each.** Several files download at
   once (4 by default), and a large file is split into chunks fetched over
   several connections. A connection that finishes its chunk takes the next
@@ -88,10 +91,26 @@ To build it yourself instead, see [Building](#building).
 
 | Site | Links |
 | --- | --- |
+| mega | `mega.nz/file/<id>#<key>`, `mega.nz/folder/<id>#<key>` (with subfolders), and the legacy `#!` / `#F!` forms |
+| gofile | `gofile.io/d/<id>` (with subfolders; `?password=…` for a protected folder), and download server links |
+| mediafire | `mediafire.com/file/<key>`, `mediafire.com/?<key>`, `mediafire.com/folder/<key>` (with subfolders), and download server links |
 | pixeldrain | `pixeldrain.com/u/<id>` (file), `pixeldrain.com/l/<id>` (list), and the mirror domains |
 | bunkr | `bunkr.*/a/<id>` (album), `bunkr.*/f/<id>`, `/v/`, `/i/` (single file), across the known bunkr domains |
-| mega | `mega.nz/file/<id>#<key>`, `mega.nz/folder/<id>#<key>` (with subfolders), and the legacy `#!` / `#F!` forms |
+| cyberdrop | `cyberdrop.cr/a/<id>` (album), `cyberdrop.cr/f/<id>` (file), the old `.me` / `.to` domains, and download server links |
 | Any direct file link | `https://example.com/files/setup.zip`, or a link that redirects to a file |
+
+Subfolders become folders on disk, under a folder named after the album or
+the top folder.
+
+A few site notes:
+
+- **gofile** only lists files to an account. Siphon makes a guest account
+  once per session (gofile limits how often those can be made); to use your
+  own account, put its token in `sites.toml` (see
+  [Configuration](#configuration)).
+- **cyberdrop** files download over one connection and start over if
+  interrupted: its servers name no file version and it gives no hash, so
+  pieces fetched at different times couldn't be proven to match.
 
 A direct file link is anything the sites above don't recognize. Siphon asks
 the server for the file's first byte to learn its name and size, then
@@ -267,6 +286,9 @@ The **Connections/file** setting is a *request*. Each site has a *ceiling*
 | pixeldrain | 1 | The free tier limits concurrent connections per IP. With a paid account and an API key you can raise it in your own `sites.toml`. |
 | bunkr | 3 | Measured: the CDN answers a fourth connection to the same file with `503`, and more connections did not make downloads faster. |
 | mega | 8 | Every byte range is decrypted independently. The meta-MAC is checked once over the finished file. |
+| gofile | 4 | Measured: 10.4 MB/s over one connection, 12.9 MB/s over four. |
+| mediafire | 4 | Its servers send no version header, but the SHA-256 from mediafire's API is checked over the finished file. |
+| cyberdrop | 1 | No version header and no hash: pieces fetched at different times couldn't be proven to belong to the same file. |
 | Direct file links | 4 | A common download-manager default for servers Siphon knows nothing about. |
 
 A file is split into chunks (4–32 MiB, depending on its size) kept in a
@@ -343,6 +365,19 @@ api_key = "your-key-here"
 
 The API key is sent with HTTP Basic auth and is never logged or recorded.
 
+A gofile account token works the same way (gofile.io → *My profile*); without
+one, Siphon uses a guest account:
+
+```toml
+schema_version = 1
+
+[[site]]
+name = "gofile"
+
+[site.extra]
+account_token = "your-token-here"
+```
+
 The per-site connection settings:
 
 | Key | Meaning |
@@ -383,6 +418,14 @@ The tests run offline against local `httptest` servers. They cover the
 resolvers, resume and segmented downloads, the mega crypto, the queue engine
 and the GUI's view model. `-race` needs cgo, which means a C compiler. CI runs
 them on Windows, Linux and macOS for every push and pull request.
+
+A few tests check the real sites (mediafire, gofile, cyberdrop) with public,
+neutral links and download next to nothing. They are skipped unless asked
+for:
+
+```sh
+SIPHON_LIVE=1 go test ./internal/site -run Live -v
+```
 
 The screenshot above is drawn by a test, off screen, with sample jobs; after
 changing the window, regenerate it with

@@ -63,9 +63,8 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 
 	// --- Link input ---
 	q.links = widget.NewMultiLineEntry()
-	q.links.SetPlaceHolder("Paste links — one per line.\n" +
-		"pixeldrain.com/l/…   bunkr.ws/a/…   mega.nz/folder/…#…\n" +
-		"or any direct file link — and video or gallery pages if yt-dlp / gallery-dl is installed")
+	q.links.SetPlaceHolder("Paste links — one per line: mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop,\n" +
+		"any direct file link, and video or gallery pages if yt-dlp / gallery-dl is installed")
 	q.links.Wrapping = fyne.TextWrapOff
 	q.addBtn = widget.NewButton("Add", q.add)
 	q.addBtn.Importance = widget.HighImportance

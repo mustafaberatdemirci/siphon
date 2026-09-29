@@ -197,6 +197,9 @@ func Setup(
 		site.PixeldrainName: site.NewPixeldrain,
 		site.BunkrName:      site.NewBunkr,
 		site.MegaName:       site.NewMega,
+		site.MediafireName:  site.NewMediafire,
+		site.GofileName:     site.NewGofile,
+		site.CyberdropName:  site.NewCyberdrop,
 		site.DirectName:     site.NewDirect,
 	} {
 		if rerr := reg.Register(name, factory); rerr != nil {

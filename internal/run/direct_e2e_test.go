@@ -36,12 +36,16 @@ func TestPickAsksRealSitesBeforeTheFallback(t *testing.T) {
 	}
 	fileKey := megacrypto.B64Encode(bytes.Repeat([]byte{7}, 32))
 	for u, want := range map[string]string{
-		"https://pixeldrain.com/u/abc123":        site.PixeldrainName,
-		"https://bunkr.ws/a/xyz":                 site.BunkrName,
-		"https://mega.nz/file/AbCd#" + fileKey:   site.MegaName,
-		"https://example.com/files/setup.zip":    site.DirectName,
-		"https://downloads.example.org/iso/x.7z": site.DirectName,
-		"ftp://example.com/x":                    "",
+		"https://pixeldrain.com/u/abc123":                                                  site.PixeldrainName,
+		"https://bunkr.ws/a/xyz":                                                           site.BunkrName,
+		"https://mega.nz/file/AbCd#" + fileKey:                                             site.MegaName,
+		"https://www.mediafire.com/file/abcde12345/x.zip/file":                             site.MediafireName,
+		"https://download1638.mediafire.com/k/abcde12345/x.zip":                            site.MediafireName,
+		"https://gofile.io/d/AbCd12":                                                       site.GofileName,
+		"https://store5.gofile.io/download/web/5c3ebe49-13ef-4fc6-b773-bcdeab283598/x.zip": site.GofileName,
+		"https://example.com/files/setup.zip":                                              site.DirectName,
+		"https://downloads.example.org/iso/x.7z":                                           site.DirectName,
+		"ftp://example.com/x":                                                              "",
 		// A real site's host, in a form it doesn't support: NOT a plain
 		// file. Downloading these would save a web page or ciphertext.
 		"https://mega.nz/file/AbCd#truncatedkey":           "",
@@ -49,6 +53,8 @@ func TestPickAsksRealSitesBeforeTheFallback(t *testing.T) {
 		"https://c3bc-b.cdn.cr/video.mp4":                  "",
 		"https://www.pixeldrain.com/":                      "",
 		"https://bunkr.si/":                                "",
+		"https://www.mediafire.com/":                       "",
+		"https://gofile.io/myProfile":                      "",
 	} {
 		_, idx := Pick(resolvers, u)
 		got := ""

@@ -288,6 +288,153 @@ max_elapsed = "10m"
 api_endpoint = "https://g.api.mega.co.nz/cs"
 
 [[site]]
+name = "mediafire"
+
+# Measured 2026-09-29: files and folders (subfolders too) resolve through
+# mediafire's public API without an account, with each file's name, size
+# and SHA-256. The download link is not in the API: it is the Download
+# button of the file's page, read again before every attempt because it
+# carries a key.
+domains = ["www.mediafire.com", "mediafire.com"]
+legacy_domains = []
+match_patterns = []
+
+# The download servers (download1638.mediafire.com and so on). A link to one
+# is recognized too and taken as its file: its key may have expired, the
+# file's page gives a fresh one.
+cdn_patterns = ["download*.mediafire.com"]
+
+referer_policy = "none"
+
+# A browser's User-Agent: the file page is a web page meant for browsers.
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+max_concurrent = 4
+
+# The download servers take Range requests but send neither ETag nor
+# Last-Modified; several connections and resuming are safe because the
+# SHA-256 from the API is checked over the finished file.
+max_segments = 4
+max_connections = 8
+
+# Small public files (sample output of an open-source e-book tool, and a
+# file from cyberdrop-dl's own tests).
+canary_urls = [
+  "https://www.mediafire.com/file/5iv342h2u39e0t6/kobo_clara.kepub.epub/file",
+  "https://www.mediafire.com/file/ctppmpm7giofsgv/ADOFAI.vpk/file",
+]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+[site.extra]
+api_endpoint = "https://www.mediafire.com/api/1.4"
+
+[[site]]
+name = "gofile"
+
+# Measured 2026-09-29. A gofile.io/d/<code> link is a folder (a single
+# upload is a folder with one file); subfolders are followed. The API only
+# lists with an account token: without your own (account_token below) a
+# guest account is made once per session, because gofile limits how often
+# those can be made. The download servers want the same token as a cookie
+# and redirect to gofile's page without it; Siphon then resolves the file
+# again with a fresh token.
+domains = ["gofile.io"]
+legacy_domains = []
+match_patterns = []
+
+# The download servers (store5.gofile.io, cold8.gofile.io, ...). A link to
+# one is recognized too and taken as its file.
+cdn_patterns = ["*.gofile.io"]
+
+referer_policy = "none"
+
+# A browser's User-Agent. It is also part of the X-Website-Token gofile's
+# own page computes, so the one sent and the one hashed are the same.
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+max_concurrent = 4
+
+# The download servers take Range requests and send Last-Modified.
+# MEASUREMENT 2026-09-29, 32 MB of the canary file, same minute:
+#   1 connection  -> 10.4 MB/s
+#   4 connections -> 12.9 MB/s
+max_segments = 4
+max_connections = 8
+
+# gofile removes files nobody downloads for a while, so this canary (a
+# public Windows image for the Steam Deck, 31.7 GB; doctor only lists it)
+# may need replacing. doctor downloads nothing.
+canary_urls = ["https://gofile.io/d/PSHbQR"]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+# api_endpoint: the API base.
+# website_token_salt: part of the X-Website-Token gofile's page script
+#   computes. If every gofile link fails with error-notPremium, gofile
+#   changed it; the new value is in the script (gofile.io/dist/js/wt.obf.js).
+# account_token: your own gofile account's API token (gofile.io > My
+#   profile), optional. It is NOT written into this file (it is embedded in
+#   the binary and in the repo): put it in your own sites.toml next to the
+#   exe:
+#
+#     schema_version = 1
+#     [[site]]
+#     name = "gofile"
+#     [site.extra]
+#     account_token = "your-token-here"
+[site.extra]
+api_endpoint = "https://api.gofile.io"
+website_token_salt = "12af056dacea0b"
+
+[[site]]
+name = "cyberdrop"
+
+# Measured 2026-09-29. An album's no-JavaScript page lists every file with
+# its name and exact size, so an album costs one request. A file's download
+# link comes from the API just before each attempt: it carries a token that
+# lasts 24 hours.
+domains = ["cyberdrop.cr"]
+
+# Old domains: recognized in links, never requested.
+legacy_domains = ["cyberdrop.me", "cyberdrop.to"]
+match_patterns = []
+
+# The download servers (k1-cd.cdn.gigachad-cdn.ru). A link to one is
+# recognized too and taken as its file.
+cdn_patterns = ["*.cdn.gigachad-cdn.ru"]
+
+referer_policy = "none"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+# cyberdrop-dl keeps to 5 requests a second; files at once stay modest.
+max_concurrent = 4
+
+# ONE connection per file: the download servers take Range requests but
+# send neither ETag nor Last-Modified, and the API gives no hash, so parts
+# fetched at different times couldn't be proven to belong to the same file.
+# For the same reason an interrupted file starts over.
+max_segments = 1
+
+# gallery-dl's own test album. It is empty now; doctor then checks that the
+# file API still answers instead of asking for a download link.
+canary_urls = ["https://cyberdrop.cr/a/8uE0wQiK"]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+[site.extra]
+api_endpoint = "https://api.cyberdrop.cr/api"
+
+[[site]]
 name = "direct"
 
 # PLAIN FILE LINKS: any http(s) link that none of the sites above recognizes,
