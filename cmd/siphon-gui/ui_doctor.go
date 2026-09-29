@@ -10,18 +10,19 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mustafaberatdemirci/siphon/internal/doctor"
-	"github.com/mustafaberatdemirci/siphon/internal/external"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// doctorTab is the "Diagnose" tab: a seven-layer report for each site.
+// doctorTab is the "Diagnose" tab: a seven-layer report for each site, and
+// the external tools (found or not, and a way to install them).
 type doctorTab struct {
-	out *widget.Entry
-	btn *widget.Button
+	out   *widget.Entry
+	btn   *widget.Button
+	tools *widget.Label
 }
 
-func newDoctorTab() (*doctorTab, fyne.CanvasObject) {
+func newDoctorTab(win fyne.Window) (*doctorTab, fyne.CanvasObject) {
 	d := &doctorTab{}
 	d.out = widget.NewMultiLineEntry()
 	d.out.Wrapping = fyne.TextWrapOff
@@ -31,7 +32,14 @@ func newDoctorTab() (*doctorTab, fyne.CanvasObject) {
 	d.btn = widget.NewButton("Diagnose", d.run)
 	d.btn.Importance = widget.HighImportance
 
-	return d, container.NewBorder(container.NewHBox(d.btn), nil, nil, nil, d.out)
+	d.tools = widget.NewLabel(toolsStatus())
+	d.tools.TextStyle = fyne.TextStyle{Monospace: true}
+	install := widget.NewButton("Install tools…", func() {
+		showInstallTools(win, func() { d.tools.SetText(toolsStatus()) })
+	})
+
+	top := container.NewVBox(container.NewHBox(d.btn, install), d.tools)
+	return d, container.NewBorder(top, nil, nil, nil, d.out)
 }
 
 func (d *doctorTab) run() {
@@ -57,16 +65,6 @@ func (d *doctorTab) run() {
 		}
 		reports := doctor.Run(context.Background(), named)
 		worst := doctor.Format(&out, reports)
-		var extra map[string]string
-		for _, c := range cfgs {
-			if c.Name == site.DirectName {
-				extra = c.Extra
-			}
-		}
-		out.WriteString("\ntools (for pages of sites Siphon doesn't know)\n")
-		for _, l := range external.Find(extra).Lines() {
-			out.WriteString(l + "\n")
-		}
 		fmt.Fprintf(&out, "\nResult: %s\n", worst)
 		if worst == site.StatusWarn {
 			out.WriteString("WARN is not a failure: an unknown CDN host\n" +

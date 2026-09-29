@@ -120,18 +120,28 @@ yt-dlp first, then gallery-dl.
 - The tool does the downloading; Siphon runs it in the queue, shows its
   progress, and records the result in the ledger, so the next run skips it.
   Pause stops the tool, and resuming continues its partial file.
-- Siphon doesn't bundle or download these tools. Put them next to Siphon or on
-  your PATH, or set their paths in `sites.toml` (see the `direct` entry).
-  `siphon doctor` (or the **Diagnose** tab) lists which ones were found.
-- Install **ffmpeg** too if you download video: many sites send picture and
-  sound separately, and only ffmpeg can merge them. Without it, Siphon asks
-  yt-dlp for the best single file that has both, and says so when there is
-  none.
+- **Installing them is one click:** **Diagnose → Install tools…** (or
+  `siphon tools install`). Siphon lists what it can install with the sizes,
+  and only after you confirm downloads each tool from its own official
+  release, checks it against the SHA-256 published with that release, and
+  puts it in `%AppData%\Siphon\tools`. Nothing is installed if a check fails;
+  to update a tool, install it again. On Windows that covers yt-dlp, ffmpeg,
+  gallery-dl and deno; on Linux and macOS, use your package manager for the
+  ones Siphon doesn't offer (ffmpeg, and gallery-dl on macOS).
+- Siphon doesn't bundle them. Tools you install yourself work too: next to
+  Siphon, on your PATH, or at paths set in `sites.toml` (the `direct` entry).
+  `siphon tools` (or the **Diagnose** tab) lists which ones were found.
+- Install **ffmpeg** too if you download video: many sites (YouTube among
+  them) send picture and sound separately, and only ffmpeg can merge them.
+  Without it, Siphon asks yt-dlp for the best single file that has both, and
+  when there is none says so and points to Install tools; it never hands over
+  the sound alone.
 - To send a link to one tool on purpose, put its name in front:
   `yt-dlp:https://…` or `gallery-dl:https://…`.
 
-yt-dlp's own requirements apply: for YouTube, for example, it needs a
-JavaScript runtime (deno) to see every format.
+yt-dlp's own requirements apply: for YouTube, for example, it wants a
+JavaScript runtime (deno, one of the tools Siphon can install) to see every
+format.
 
 ## Building
 
@@ -215,6 +225,14 @@ Exit codes:
 
 Press Ctrl+C to stop. Partial files are left consistent and continue on the
 next run.
+
+### External tools: `siphon tools`
+
+```sh
+siphon tools                    # which of yt-dlp, gallery-dl, ffmpeg, deno were found
+siphon tools install            # install the missing ones (official releases, SHA-256 checked)
+siphon tools install yt-dlp     # install or update one
+```
 
 ### Diagnosing a site: `siphon doctor`
 
@@ -343,6 +361,7 @@ embedded copy.
 | `done.jsonl` | Output root | Ledger of finished downloads (used to skip them next time). |
 | `queue.json` | `%AppData%\Siphon\` (the user config folder) | The GUI's queue. It holds the source links, and a mega link includes its key. |
 | `instance.port` | `%AppData%\Siphon\` | While the window version runs: how a second launch finds it. Removed on exit. |
+| `tools\` | `%AppData%\Siphon\` | The tools installed with **Install tools** (yt-dlp, ffmpeg, gallery-dl, deno). Delete the folder to remove them. |
 
 ## What Siphon does not do
 

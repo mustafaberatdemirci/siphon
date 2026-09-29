@@ -544,3 +544,19 @@ func isFallback(r site.Resolver) bool {
 	f, ok := r.(site.Fallback)
 	return ok && f.Fallback()
 }
+
+// ToolPaths returns the tool paths set in the "direct" entry of sites.toml
+// (yt_dlp, gallery_dl, ffmpeg, deno) for external.Find; nil if none are set
+// or the config can't be read.
+func ToolPaths(cfgPath string) map[string]string {
+	cfgs, _, err := config.Load(config.Embedded, cfgPath)
+	if err != nil {
+		return nil
+	}
+	for _, c := range cfgs {
+		if c.Name == site.DirectName {
+			return c.Extra
+		}
+	}
+	return nil
+}

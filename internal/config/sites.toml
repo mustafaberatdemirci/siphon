@@ -321,11 +321,13 @@ max_delay = "60s"
 max_elapsed = "10m"
 
 # WEB PAGES of sites Siphon doesn't know (a video, a playlist, a gallery) go
-# to yt-dlp, then gallery-dl, if they are installed: next to Siphon or on
-# PATH. They do the downloading; Siphon shows the progress and keeps them in
-# the queue. With ffmpeg, yt-dlp can also merge picture and sound that a
-# site sends separately. If a tool lives somewhere else, say where in your
-# own sites.toml:
+# to yt-dlp, then gallery-dl, if they are installed: next to Siphon, in
+# Siphon's tools folder (where Diagnose > Install tools and "siphon tools
+# install" put them) or on PATH. They do the downloading; Siphon shows the
+# progress and keeps them in the queue. With ffmpeg, yt-dlp can also merge
+# picture and sound that a site sends separately; deno is the JavaScript
+# runtime yt-dlp wants for YouTube. If a tool lives somewhere else, say where
+# in your own sites.toml:
 #
 #   [[site]]
 #   name = "direct"
@@ -333,5 +335,6 @@ max_elapsed = "10m"
 #   yt_dlp = 'C:\Tools\yt-dlp.exe'
 #   gallery_dl = 'C:\Tools\gallery-dl.exe'
 #   ffmpeg = 'C:\Tools\ffmpeg.exe'
+#   deno = 'C:\Tools\deno.exe'
 #
 # "siphon doctor" (or the Diagnose tab) shows which ones were found.

@@ -132,7 +132,7 @@ func main() {
 	tr := setupTray(a, w, a.Preferences(), quit)
 
 	_, queueView := newQueueTab(w, a.Preferences(), eng, vm, tr.setQuota)
-	_, doctorView := newDoctorTab()
+	_, doctorView := newDoctorTab(w)
 	w.SetContent(container.NewAppTabs(
 		container.NewTabItem("Download", queueView),
 		container.NewTabItem("Diagnose", doctorView),

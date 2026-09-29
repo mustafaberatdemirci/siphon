@@ -73,6 +73,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		os.Exit(runDoctor(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "tools" {
+		os.Exit(runTools(os.Args[2:]))
+	}
 	os.Exit(runCLI())
 }
 
@@ -97,7 +100,8 @@ func runCLI() int {
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: siphon [flags] [url ...]\n")
-		fmt.Fprintf(os.Stderr, "       siphon doctor [flags] [site ...]\n\n")
+		fmt.Fprintf(os.Stderr, "       siphon doctor [flags] [site ...]\n")
+		fmt.Fprintf(os.Stderr, "       siphon tools [install [tool ...]]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()

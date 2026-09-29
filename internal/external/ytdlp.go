@@ -52,8 +52,8 @@ func (t Tools) YtDlpProbe(ctx context.Context, link string) (playlist string, en
 	if t.YtDlp == "" {
 		return "", nil, ErrUnsupported
 	}
-	out, stderr, err := output(command(ctx, t.YtDlp,
-		"--flat-playlist", "-J", "--no-warnings", "--encoding", "utf-8", "--", link))
+	args := append(t.jsRuntime(), "--flat-playlist", "-J", "--no-warnings", "--encoding", "utf-8", "--", link)
+	out, stderr, err := output(command(ctx, t.YtDlp, args...))
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", nil, ctx.Err()
@@ -129,6 +129,7 @@ func (t Tools) YtDlpDownload(ctx context.Context, link, dir string, progress fun
 	} else {
 		args = append(args, "-f", "b")
 	}
+	args = append(args, t.jsRuntime()...)
 	args = append(args, "--", link)
 
 	var files []string
@@ -150,7 +151,7 @@ func (t Tools) YtDlpDownload(ctx context.Context, link, dir string, progress fun
 			return "", 0, ctx.Err()
 		}
 		if t.FFmpeg == "" && strings.Contains(stderr, "Requested format is not available") {
-			return "", 0, fmt.Errorf("the site sends picture and sound separately, and merging them needs ffmpeg: install ffmpeg (yt-dlp finds it on PATH or next to Siphon)")
+			return "", 0, fmt.Errorf("the site sends picture and sound separately, and merging them needs ffmpeg: install it with Diagnose > Install tools, or 'siphon tools install ffmpeg'")
 		}
 		return "", 0, fmt.Errorf("yt-dlp: %s", lastLineWith(stderr, "ERROR"))
 	}
@@ -160,7 +161,7 @@ func (t Tools) YtDlpDownload(ctx context.Context, link, dir string, progress fun
 	for _, f := range files {
 		fi, serr := os.Stat(f)
 		if serr != nil || fi.IsDir() {
-			return "", 0, fmt.Errorf("yt-dlp reported %s, but it isn't on disk (were picture and sound left unmerged? installing ffmpeg fixes that)", f)
+			return "", 0, fmt.Errorf("yt-dlp reported %s, but it isn't on disk (were picture and sound left unmerged? installing ffmpeg fixes that: Diagnose > Install tools)", f)
 		}
 		size += fi.Size()
 	}
@@ -186,4 +187,13 @@ func parseProgress(s string) (done, total int64) {
 		total = num(2)
 	}
 	return done, total
+}
+
+// jsRuntime tells yt-dlp where deno is when Siphon found it: yt-dlp only
+// looks on PATH by itself, and "Install tools" puts deno in Siphon's folder.
+func (t Tools) jsRuntime() []string {
+	if t.Deno == "" {
+		return nil
+	}
+	return []string{"--js-runtimes", "deno:" + t.Deno}
 }

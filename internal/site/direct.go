@@ -64,7 +64,7 @@ var errWebPage = errors.New("the link opens a web page, not a file")
 
 // directExtra are the sites.toml [site.extra] keys direct understands: where
 // the external tools are, when they aren't next to Siphon or on PATH.
-var directExtra = map[string]bool{"yt_dlp": true, "gallery_dl": true, "ffmpeg": true}
+var directExtra = map[string]bool{"yt_dlp": true, "gallery_dl": true, "ffmpeg": true, "deno": true}
 
 // direct resolves a plain file link into a single item. Nothing site
 // specific: one small request (the first byte) tells whether the link is a
@@ -158,7 +158,7 @@ func (d *direct) viaTools(ctx context.Context, link, only string) ([]Item, error
 			what = "gallery-dl"
 		}
 		return nil, Errorf(LayerParse, link,
-			"%w, and no supported site recognizes it; for video and gallery sites install %s (next to Siphon or on PATH) and Siphon will use it",
+			"%w, and no supported site recognizes it; for video and gallery sites install %s (Diagnose > Install tools, or 'siphon tools install') and Siphon will use it",
 			errWebPage, what)
 	}
 
@@ -264,7 +264,7 @@ func (d *direct) DownloadSelf(ctx context.Context, dir string, it Item, progress
 	case prefix == ViaGalleryDL && tools.GalleryDL != "":
 		return tools.GalleryDLDownload(ctx, link, dir, progress)
 	case prefix != "":
-		return "", 0, fmt.Errorf("%s isn't installed any more (next to Siphon or on PATH)", strings.TrimSuffix(prefix, ":"))
+		return "", 0, fmt.Errorf("%s isn't installed any more (Diagnose > Install tools, or 'siphon tools install')", strings.TrimSuffix(prefix, ":"))
 	}
 	return "", 0, fmt.Errorf("not a tool link: %s", it.SourcePage)
 }

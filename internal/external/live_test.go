@@ -2,8 +2,10 @@ package external
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -99,4 +101,51 @@ func TestLiveGalleryDL(t *testing.T) {
 		t.Errorf("second run: %q %d %v", dir2, size2, err)
 	}
 	t.Logf("%s, %d bytes", dir, size)
+}
+
+// Installs the real packages for this system from their official releases
+// into SIPHON_INSTALL_DIR, then checks that yt-dlp with ffmpeg merges a
+// YouTube video into one file. Downloads ~280 MB on Windows; opt-in:
+//
+//	SIPHON_INSTALL_DIR=/tmp/tools go test ./internal/external -run LiveInstall -v -timeout 30m
+func TestLiveInstall(t *testing.T) {
+	dir := os.Getenv("SIPHON_INSTALL_DIR")
+	if dir == "" {
+		t.Skip("set SIPHON_INSTALL_DIR to install the real tools there")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+	client := &http.Client{}
+	for _, p := range Packages(runtime.GOOS, runtime.GOARCH) {
+		if err := p.Resolve(ctx, client); err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		start := time.Now()
+		if err := Install(ctx, client, dir, p, nil); err != nil {
+			t.Fatalf("install: %v", err)
+		}
+		t.Logf("%-10s %6.1f MB  sha256 %s…  %s", p.Tool, float64(p.Size)/(1<<20), p.SHA256[:12], time.Since(start).Round(time.Second))
+	}
+	find := func(name string) string {
+		for _, n := range []string{name + ".exe", name} {
+			if p := filepath.Join(dir, n); isFile(p) {
+				return p
+			}
+		}
+		return ""
+	}
+	tools := Tools{YtDlp: find("yt-dlp"), GalleryDL: find("gallery-dl"), FFmpeg: find("ffmpeg"), Deno: find("deno")}
+	if tools.FFmpeg == "" {
+		t.Skip("no ffmpeg package on this system; the merge check needs it")
+	}
+	out := t.TempDir()
+	path, size, err := tools.YtDlpDownload(ctx, "https://www.youtube.com/watch?v=jNQXAC9IVRw", out, nil)
+	if err != nil {
+		t.Fatalf("download with ffmpeg: %v", err)
+	}
+	entries, _ := os.ReadDir(out)
+	if len(entries) != 1 {
+		t.Errorf("%d files in the folder, want the single merged one", len(entries))
+	}
+	t.Logf("merged: %s (%d bytes)", filepath.Base(path), size)
 }

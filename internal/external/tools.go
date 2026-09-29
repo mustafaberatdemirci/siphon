@@ -2,8 +2,10 @@
 // of its own sites recognizes it: yt-dlp (video and audio from about 1,800
 // sites) and gallery-dl (images and galleries from about 300 sites).
 //
-// They are used only if installed. Siphon doesn't bundle or download them:
-// it stays a single file, and the user decides what runs on their machine.
+// They are used only if installed. Siphon doesn't bundle them: it stays a
+// single file, and the user decides what runs on their machine. On request
+// ("Install tools", "siphon tools install") it downloads them from their
+// official releases, checked against the published SHA-256 (install.go).
 // Everything the tools do is theirs (extraction, format choice, merging with
 // ffmpeg); Siphon starts them, reads their progress and reports the result.
 package external
@@ -28,6 +30,8 @@ type Tools struct {
 	YtDlp     string
 	GalleryDL string
 	FFmpeg    string
+	// Deno is the JavaScript runtime yt-dlp wants for YouTube.
+	Deno string
 }
 
 // ErrUnsupported says the tool doesn't recognize the link.
@@ -35,14 +39,17 @@ var ErrUnsupported = errors.New("the tool doesn't support this link")
 
 // Find locates the tools. For each: the path configured in sites.toml (if
 // given it is the only place looked at: a wrong setting should show, not be
-// papered over), then next to Siphon's own executable, then PATH. Cheap
-// enough to call for every link, so a tool installed while Siphon runs is
-// picked up.
+// papered over), then next to Siphon's own executable, then Siphon's tools
+// folder (where "Install tools" puts them), then PATH. Siphon's own copies
+// come before PATH so that an update installed from Siphon isn't shadowed by
+// an older copy elsewhere. Cheap enough to call for every link, so a tool
+// installed while Siphon runs is picked up.
 func Find(configured map[string]string) Tools {
 	return Tools{
 		YtDlp:     lookup(configured["yt_dlp"], "yt-dlp"),
 		GalleryDL: lookup(configured["gallery_dl"], "gallery-dl"),
 		FFmpeg:    lookup(configured["ffmpeg"], "ffmpeg"),
+		Deno:      lookup(configured["deno"], "deno"),
 	}
 }
 
@@ -53,9 +60,16 @@ func lookup(configured, name string) string {
 		}
 		return ""
 	}
+	var dirs []string
 	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Dir(exe))
+	}
+	if d, err := ToolsDir(); err == nil {
+		dirs = append(dirs, d)
+	}
+	for _, dir := range dirs {
 		for _, cand := range []string{name + ".exe", name} {
-			if p := filepath.Join(filepath.Dir(exe), cand); isFile(p) {
+			if p := filepath.Join(dir, cand); isFile(p) {
 				return p
 			}
 		}
@@ -64,6 +78,20 @@ func lookup(configured, name string) string {
 		return p
 	}
 	return ""
+}
+
+// userConfigDir is os.UserConfigDir; tests point it elsewhere.
+var userConfigDir = os.UserConfigDir
+
+// ToolsDir is the folder "Install tools" puts the tools in:
+// <user config>/Siphon/tools (%AppData%\Siphon\tools on Windows), next to the
+// queue file. Always writable, unlike a Siphon kept in Program Files.
+func ToolsDir() (string, error) {
+	base, err := userConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "Siphon", "tools"), nil
 }
 
 func isFile(p string) bool {
@@ -174,5 +202,22 @@ func (t Tools) Lines() []string {
 		row("yt-dlp", t.YtDlp, "video and audio pages of other sites can't be downloaded"),
 		row("gallery-dl", t.GalleryDL, "image and gallery pages of other sites can't be downloaded"),
 		row("ffmpeg", t.FFmpeg, "videos whose picture and sound come separately can't be merged"),
+		row("deno", t.Deno, "yt-dlp may miss some YouTube formats"),
 	}
+}
+
+// Path returns where a tool was found ("" when it wasn't); tool is a
+// Package.Tool name.
+func (t Tools) Path(tool string) string {
+	switch tool {
+	case "yt-dlp":
+		return t.YtDlp
+	case "gallery-dl":
+		return t.GalleryDL
+	case "ffmpeg":
+		return t.FFmpeg
+	case "deno":
+		return t.Deno
+	}
+	return ""
 }
