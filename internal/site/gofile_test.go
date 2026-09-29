@@ -405,3 +405,42 @@ func TestGofileWebPageMeansTheSessionExpired(t *testing.T) {
 		t.Errorf("an uploaded .html was refused: %v", err)
 	}
 }
+
+// The guest account outlives the run: the next run (a new resolver with the
+// same state folder) uses it instead of making another, until it is a day
+// old or the API stops taking it.
+func TestGofileGuestAccountIsKeptForADay(t *testing.T) {
+	f := newFakeGofile()
+	f.addFolder("root-uuid", "AbCd12", "AbCd12", gfFile("file-uuid-1", "setup.zip", 1, 1))
+	state := t.TempDir()
+	run := func() string {
+		t.Helper()
+		g := newGofileWith(t, f, nil)
+		g.cfg.StateDir = state
+		items, _, err := collect(t, g, "https://gofile.io/d/AbCd12")
+		if err != nil || len(items) != 1 {
+			t.Fatalf("%d items, %v", len(items), err)
+		}
+		return items[0].Headers["Cookie"]
+	}
+
+	if got := run(); got != "accountToken=guest1" {
+		t.Fatalf("first run: %q", got)
+	}
+	if got := run(); got != "accountToken=guest1" || f.accounts != 1 {
+		t.Errorf("second run: %q with %d accounts made, want the saved one", got, f.accounts)
+	}
+
+	f.now = f.now.Add(25 * time.Hour)
+	if got := run(); got != "accountToken=guest2" {
+		t.Errorf("a day later: %q, want a new account", got)
+	}
+
+	f.valid = map[string]bool{} // gofile dropped the account early
+	if got := run(); got != "accountToken=guest3" {
+		t.Errorf("after the account was rejected: %q", got)
+	}
+	if got := run(); got != "accountToken=guest3" || f.accounts != 3 {
+		t.Errorf("the replacement wasn't saved: %q with %d accounts made", got, f.accounts)
+	}
+}

@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -207,10 +209,14 @@ func Setup(
 		}
 	}
 
+	state := stateDir()
 	for i := range cfgs {
 		cfgs[i].Logf = ev.Debugf
 		if cfgs[i].HTTPClient == nil {
 			cfgs[i].HTTPClient = client
+		}
+		if cfgs[i].StateDir == "" {
+			cfgs[i].StateDir = state
 		}
 		if record != nil {
 			cfgs[i].Record = record(cfgs[i].Name)
@@ -546,6 +552,17 @@ func Pick(rs []site.Resolver, u string) (site.Resolver, int) {
 func isFallback(r site.Resolver) bool {
 	f, ok := r.(site.Fallback)
 	return ok && f.Fallback()
+}
+
+// stateDir is <user config>/Siphon (%AppData%\Siphon on Windows), the
+// folder of the GUI's queue file; resolvers keep their small state there
+// (gofile's guest account). "" when there is no such folder.
+func stateDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "Siphon")
 }
 
 // ToolPaths returns the tool paths set in the "direct" entry of sites.toml

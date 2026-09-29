@@ -75,6 +75,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -83,7 +88,18 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
 
+      # The release text is this version's section of CHANGELOG.md (from its
+      # "## <version>" heading to the next one); GitHub's list of changes is
+      # added below it. Without a section, only that list.
+      - name: Release notes
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          awk -v v="${VERSION#v}" '/^## /{on = ($2 == v); next} on' CHANGELOG.md > notes.md
+          echo "release notes from CHANGELOG.md: $(grep -c . notes.md || true) lines"
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: notes.md
           generate_release_notes: true

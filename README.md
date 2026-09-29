@@ -105,8 +105,8 @@ the top folder.
 A few site notes:
 
 - **gofile** only lists files to an account. Siphon makes a guest account
-  once per session (gofile limits how often those can be made); to use your
-  own account, put its token in `sites.toml` (see
+  and reuses it for a day (gofile limits how often those can be made); to
+  use your own account, put its token in `sites.toml` (see
   [Configuration](#configuration)).
 - **cyberdrop** files download over one connection and start over if
   interrupted: its servers name no file version and it gives no hash, so
@@ -397,6 +397,7 @@ embedded copy.
 | `queue.json` | `%AppData%\Siphon\` (the user config folder) | The GUI's queue. It holds the source links, and a mega link includes its key. |
 | `instance.port` | `%AppData%\Siphon\` | While the window version runs: how a second launch finds it. Removed on exit. |
 | `tools\` | `%AppData%\Siphon\` | The tools installed with **Install tools** (yt-dlp, ffmpeg, gallery-dl, deno). Delete the folder to remove them. |
+| `gofile-guest.json` | `%AppData%\Siphon\` | The gofile guest account in use, reused for a day. Safe to delete. |
 
 ## What Siphon does not do
 
@@ -431,9 +432,11 @@ The screenshot above is drawn by a test, off screen, with sample jobs; after
 changing the window, regenerate it with
 `SIPHON_SCREENSHOT=1 go test ./cmd/siphon-gui -run READMEScreenshot`.
 
-**Releasing:** push a tag such as `v1.0.0`. The release workflow builds both
-programs for Windows, Linux and macOS, stamps the version into them
-(`siphon -version`) and publishes the archives with their checksums.
+**Releasing:** add a `## 1.0.0` section to [CHANGELOG.md](CHANGELOG.md),
+then push a tag such as `v1.0.0`. The release workflow builds both programs
+for Windows, Linux and macOS, stamps the version into them
+(`siphon -version`) and publishes the archives with their checksums, with
+that section as the release notes.
 
 ## Responsible use
 

@@ -275,6 +275,10 @@ type SiteConfig struct {
 	// goes through here too: requests are redirected to an httptest.Server by
 	// a rewriting RoundTripper attached to this client.
 	HTTPClient *http.Client
+
+	// StateDir is where a resolver may keep small state from one run to the
+	// next (gofile's guest account). Empty means nothing is kept.
+	StateDir string
 }
 
 // Logln writes through cfg.Logf if set.

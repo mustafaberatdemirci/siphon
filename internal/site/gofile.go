@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +50,7 @@ var gofileExtra = map[string]bool{ExtraGofileAPI: true, ExtraGofileAccountToken:
 // folder (a single upload is a folder with one file). The API
 // (api.gofile.io/contents/<code or id>) lists it only with an account
 // token: a guest account costs one POST to /accounts, and gofile limits how
-// often those can be made, so one is made per session and kept. Every API
+// often those can be made, so one is kept for a day in StateDir. Every API
 // call also needs X-Website-Token, a SHA-256 over the User-Agent, the
 // language, the token, the current 4-hour window and a salt from gofile's
 // page script; without it the API answers error-notPremium. The download
@@ -182,8 +184,9 @@ func (g *gofile) pageHost() string {
 	return "gofile.io"
 }
 
-// token returns the account token: the user's own, or the session's guest
-// account, made on first use.
+// token returns the account token: the user's own, or a guest account,
+// kept for a day in the state folder so that neither a later run nor a
+// second copy of Siphon has to make another (gofile rate-limits that).
 func (g *gofile) token(ctx context.Context) (string, error) {
 	if g.ownKey != "" {
 		return g.ownKey, nil
@@ -191,6 +194,10 @@ func (g *gofile) token(ctx context.Context) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.guest != "" {
+		return g.guest, nil
+	}
+	if tok := g.loadGuest(); tok != "" {
+		g.guest = tok
 		return g.guest, nil
 	}
 	rawURL := g.api + "/accounts"
@@ -220,17 +227,78 @@ func (g *gofile) token(ctx context.Context) (string, error) {
 		return "", &LayerError{Layer: LayerFetch, Err: &GofileError{Status: env.Status}, Evidence: rawURL}
 	}
 	g.guest = env.Data.Token
-	g.cfg.Logln("gofile: made a guest account for this session")
+	g.saveGuest(g.guest)
+	g.cfg.Logln("gofile: made a guest account")
 	return g.guest, nil
 }
 
-// dropGuest forgets a guest token the API no longer accepts.
+// dropGuest forgets a guest token the API no longer accepts, on disk too.
 func (g *gofile) dropGuest(tok string) {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.guest == tok {
 		g.guest = ""
 	}
-	g.mu.Unlock()
+	if g.loadGuest() == tok {
+		_ = os.Remove(g.guestPath())
+	}
+}
+
+// gofileGuestTTL is how long a saved guest account is used. The API
+// rejecting it earlier makes a new one anyway; cyberdrop-dl keeps its guest
+// account for the same day.
+const gofileGuestTTL = 24 * time.Hour
+
+type gofileGuestFile struct {
+	Token string    `json:"token"`
+	Made  time.Time `json:"made"`
+}
+
+func (g *gofile) guestPath() string {
+	if g.cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(g.cfg.StateDir, "gofile-guest.json")
+}
+
+// loadGuest returns the saved guest token while it is fresh, "" otherwise.
+func (g *gofile) loadGuest() string {
+	p := g.guestPath()
+	if p == "" {
+		return ""
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	var f gofileGuestFile
+	if json.Unmarshal(data, &f) != nil || f.Token == "" {
+		return ""
+	}
+	if age := g.now().Sub(f.Made); age < 0 || age > gofileGuestTTL {
+		return ""
+	}
+	return f.Token
+}
+
+// saveGuest writes the guest token for the next run. Failing to is not an
+// error: the next run makes another account.
+func (g *gofile) saveGuest(tok string) {
+	p := g.guestPath()
+	if p == "" {
+		return
+	}
+	data, err := json.Marshal(gofileGuestFile{Token: tok, Made: g.now()})
+	if err != nil || os.MkdirAll(filepath.Dir(p), 0o755) != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) != nil {
+		return
+	}
+	if os.Rename(tmp, p) != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // siteHeaders are what gofile's own page sends.

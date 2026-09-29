@@ -338,8 +338,9 @@ name = "gofile"
 # Measured 2026-09-29. A gofile.io/d/<code> link is a folder (a single
 # upload is a folder with one file); subfolders are followed. The API only
 # lists with an account token: without your own (account_token below) a
-# guest account is made once per session, because gofile limits how often
-# those can be made. The download servers want the same token as a cookie
+# guest account is made and kept for a day (gofile-guest.json next to the
+# queue file), because gofile limits how often those can be made. The
+# download servers want the same token as a cookie
 # and redirect to gofile's page without it; Siphon then resolves the file
 # again with a fresh token.
 domains = ["gofile.io"]
