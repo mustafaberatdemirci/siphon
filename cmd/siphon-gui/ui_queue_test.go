@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -189,5 +190,89 @@ func TestHeaderSorts(t *testing.T) {
 	q.sortBy(sortName)
 	if q.visible[0].Job.Filename != "b.bin" {
 		t.Errorf("back to queue order starts with %s", q.visible[0].Job.Filename)
+	}
+}
+
+// typeShortcut fires sc through the window's canvas the way the desktop
+// driver hands Ctrl+A and Ctrl+V over: as ShortcutSelectAll and
+// ShortcutPaste, not as key combinations. (The test window wraps the canvas
+// that dispatches shortcuts; it is reached through the embedded field.)
+func typeShortcut(t *testing.T, w fyne.Window, sc fyne.Shortcut) {
+	t.Helper()
+	inner := reflect.ValueOf(w.Canvas()).Elem().FieldByName("WindowlessCanvas")
+	h, ok := inner.Interface().(interface{ TypedShortcut(fyne.Shortcut) })
+	if !ok {
+		t.Fatal("the test canvas no longer dispatches shortcuts this way")
+	}
+	h.TypedShortcut(sc)
+}
+
+func TestCtrlASelectsEveryRowShown(t *testing.T) {
+	q, _, w := newTestQueue(t, "a.bin", "b.bin", "c.bin")
+	typeShortcut(t, w, &fyne.ShortcutSelectAll{})
+	if n := len(q.selectedJobs()); n != 3 {
+		t.Fatalf("Ctrl+A selected %d rows, want 3", n)
+	}
+}
+
+func TestCtrlVOpensAddWithThePastedLinks(t *testing.T) {
+	q, _, w := newTestQueue(t, "a.bin")
+	q.pending = "https://list.test/failed-before"
+	fyne.CurrentApp().Clipboard().SetContent("https://list.test/pasted\n")
+	typeShortcut(t, w, &fyne.ShortcutPaste{Clipboard: fyne.CurrentApp().Clipboard()})
+	if q.addEntry == nil {
+		t.Fatal("Ctrl+V didn't open the Add dialog")
+	}
+	if got := q.addEntry.Text; got != "https://list.test/failed-before\nhttps://list.test/pasted" {
+		t.Errorf("the dialog opened with %q", got)
+	}
+}
+
+// With a dialog open over the table, Delete and Ctrl+A don't reach the
+// rows behind it.
+func TestKeysLeaveTheTableAloneUnderADialog(t *testing.T) {
+	q, eng, w := newTestQueue(t, "a.bin", "b.bin")
+	q.sel.all(q.visibleIDs)
+	q.showSettings()
+	w.Canvas().Unfocus()
+	w.Canvas().OnTypedKey()(&fyne.KeyEvent{Name: fyne.KeyDelete})
+	if n := len(eng.Jobs()); n != 2 {
+		t.Fatalf("Delete under the Settings dialog removed jobs: %d left", n)
+	}
+}
+
+func TestMoreMenuOffersWhatApplies(t *testing.T) {
+	q, _, _ := newTestQueue(t, "a.bin")
+	on := map[string]bool{}
+	for _, it := range q.moreMenu().Items {
+		if !it.IsSeparator {
+			on[it.Label] = !it.Disabled
+		}
+	}
+	want := map[string]bool{"Retry failed": false, "Clear finished": false, "Cancel all…": true, "Open download folder": true}
+	for label, enabled := range want {
+		if got, ok := on[label]; !ok || got != enabled {
+			t.Errorf("%q: present %v, enabled %v; want enabled %v", label, ok, got, enabled)
+		}
+	}
+}
+
+// Links that couldn't be added wait for the next Add dialog; the ones
+// that worked are queued, and the folder becomes the default.
+func TestResolveLinksKeepsTheFailedOnes(t *testing.T) {
+	q, eng, _ := newTestQueue(t, "a.bin")
+	dir := t.TempDir()
+	added, errs, failed := q.resolveLinks([]string{"https://list.test/other", "https://unknown.test/x"}, dir)
+	if added != 1 || len(errs) != 1 || len(failed) != 1 || failed[0] != "https://unknown.test/x" {
+		t.Errorf("added %d, errs %v, failed %v", added, errs, failed)
+	}
+	if n := len(eng.Jobs()); n != 2 {
+		t.Errorf("%d jobs, want the first album's and the new one", n)
+	}
+
+	// Without a folder nothing is resolved and the links are kept.
+	q.addLinks("https://list.test/kept", "   ")
+	if q.pending != "https://list.test/kept" {
+		t.Errorf("pending = %q", q.pending)
 	}
 }

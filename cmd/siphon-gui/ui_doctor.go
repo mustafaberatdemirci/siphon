@@ -14,8 +14,8 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// doctorTab is the "Diagnose" tab: a seven-layer report for each site, and
-// the external tools (found or not, and a way to install them).
+// doctorTab is the Diagnose window's content: a seven-layer report for each
+// site, and the external tools (found or not, and a way to install them).
 type doctorTab struct {
 	out   *widget.Entry
 	btn   *widget.Button

@@ -200,9 +200,16 @@ func (r *jobRow) set(rw row, selected bool) {
 	r.icon.SetResource(stateIcon(j.State))
 	r.name.SetText(j.Filename)
 	r.size.SetText(sizeText(j))
+	// A job with nothing to show (not started, or no size known) gets no
+	// bar: a column of empty bars is only clutter.
 	r.barText = progressText(j)
-	r.bar.SetValue(rowProgress(j))
-	r.bar.Refresh() // the text may change while the value doesn't
+	if r.barText == "" {
+		r.bar.Hide()
+	} else {
+		r.bar.Show()
+		r.bar.SetValue(rowProgress(j))
+		r.bar.Refresh() // the text may change while the value doesn't
+	}
 	r.speed.SetText(speedText(rw))
 	r.eta.SetText(etaText(rw))
 	r.status.Importance = statusImportance(j.State)
@@ -293,7 +300,6 @@ func newSidebarItem() fyne.CanvasObject {
 	name.Truncation = fyne.TextTruncateEllipsis
 	count := widget.NewLabel("")
 	count.Alignment = fyne.TextAlignTrailing
-	count.Importance = widget.LowImportance
 	return container.NewBorder(nil, nil, nil, count, name)
 }
 

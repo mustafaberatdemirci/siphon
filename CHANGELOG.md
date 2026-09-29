@@ -31,15 +31,17 @@ actually share links from, in a single file with nothing to install.
 
 **Downloading**
 
-- A persistent queue (`siphon-gui`): pause, resume, cancel, several files at
-  once; it keeps running in the notification area when the window is closed.
+- A persistent queue (`siphon-gui`): a table with filters, sorting and
+  multi-select, pause, resume, cancel, several files at once; paste links
+  with Ctrl+V; it keeps running in the notification area when the window is
+  closed.
 - Resumable downloads that survive crashes, several connections per file,
   and a per-site ceiling on connections.
 - Integrity: every file is hashed, and compared with the site's hash when it
   gives one; mega files are checked against their MAC.
 - A ledger per output folder, so running the same links again skips what is
   done.
-- `siphon doctor` (and the **Diagnose** tab) checks each site layer by layer,
+- `siphon doctor` (and **Diagnose** in the window) checks each site layer by layer,
   DNS, TLS, Cloudflare challenge, fetch, parse, item page and CDN, and names
   the one that broke.
 - Site definitions live in an embedded `sites.toml` that a file next to the

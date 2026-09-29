@@ -149,7 +149,7 @@ yt-dlp first, then gallery-dl.
   ones Siphon doesn't offer (ffmpeg, and gallery-dl on macOS).
 - Siphon doesn't bundle them. Tools you install yourself work too: next to
   Siphon, on your PATH, or at paths set in `sites.toml` (the `direct` entry).
-  `siphon tools` (or the **Diagnose** tab) lists which ones were found.
+  `siphon tools` (or **Diagnose** in the window) lists which ones were found.
 - Install **ffmpeg** too if you download video: many sites (YouTube among
   them) send picture and sound separately, and only ffmpeg can merge them.
   Without it, Siphon asks yt-dlp for the best single file that has both, and
@@ -185,11 +185,13 @@ tests Linux and macOS too.
 
 ## Using the window version
 
-1. Paste links into the **Links** box (one per line; blank lines and lines
-   starting with `#` are ignored) and press **Add**.
+1. Press **Add links** (or just press Ctrl+V in the window: the dialog opens
+   with what you copied), put in one link per line (blank lines and lines
+   starting with `#` are ignored), check the folder and press **Add**.
 2. Siphon resolves each link and queues its files. The queue is saved, so
    closing and reopening the app keeps the list, and unfinished downloads
-   continue where they stopped.
+   continue where they stopped. Links that couldn't be added are waiting in
+   the dialog the next time it opens.
 
 The queue is a table: name, size, progress, speed, time left and status,
 with the connections each download really has. Click a column title to sort
@@ -209,20 +211,25 @@ The toolbar has:
 
 | Control | What it does |
 | --- | --- |
+| Add links | Opens the dialog for links and the folder they go to. |
 | Resume / Pause / Remove | Act on the selected rows. |
 | Pause all / Resume all | Stops starting new downloads and pauses running ones; press again to resume. |
-| Cancel all | Stops and removes every unfinished download. It asks first and offers to delete the partial files. Finished files are never touched. |
-| Retry failed | Puts every failed job back in the queue. |
-| Clear finished | Removes finished rows from the list (the files stay). |
-| Open folder | Opens the selected download's folder, or else the folder of the last finished file, with the file selected. |
+| More → Retry failed | Puts every failed job back in the queue. |
+| More → Clear finished | Removes finished rows from the list (the files stay). |
+| More → Cancel all… | Stops and removes every unfinished download. It asks first and offers to delete the partial files. Finished files are never touched. |
+| More → Open download folder | Opens the selected download's folder, or else the folder of the last finished file, with the file selected. |
+| Diagnose | Opens a window with the same layer check as `siphon doctor`, the external tools found, and **Install tools…**. |
+| Settings | Download folder, speed limit, downloads at once, connections per file and the VPN switch command. |
+
+In **Settings**, changes take effect right away:
+
+| Setting | What it does |
+| --- | --- |
+| Download folder | Where new links are saved; the Add dialog can change it for a batch, and remembers it. |
 | Speed limit | Total limit in MB/s across all downloads (empty or 0 = unlimited). |
-| Downloads at once | How many files download at the same time (default 4). Takes effect right away. |
-| Connections/file | How many connections a single file may use; also applies to downloads already running. See below. |
-
-**Advanced → VPN switch command** is optional. It is only for mega's quota;
-see [Quota handling](#quota-handling-mega).
-
-The **Diagnose** tab runs the same layer check as `siphon doctor`.
+| Downloads at once | How many files download at the same time (default 4). |
+| Connections per file | How many connections a single file may use; also applies to downloads already running. See below. |
+| VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
 
 **Closing the window doesn't stop the downloads.** Siphon hides in the
 notification area next to the clock (on Windows 11 the icon may be under the
@@ -294,7 +301,7 @@ doesn't break anything.
 
 ## Connections per file
 
-The **Connections/file** setting is a *request*. Each site has a *ceiling*
+The **Connections per file** setting is a *request*. Each site has a *ceiling*
 (`max_segments` in `sites.toml`), and the setting cannot exceed it:
 
 | Site | Ceiling | Why |
@@ -399,7 +406,7 @@ The per-site connection settings:
 | Key | Meaning |
 | --- | --- |
 | `max_concurrent` | Files downloaded at once from the site (per host). |
-| `max_segments` | Connections per file: the ceiling of **Connections/file**. |
+| `max_segments` | Connections per file: the ceiling of the **Connections per file** setting. |
 | `max_connections` | Connections to one host at once, the files' own connections included. Default: `max_concurrent` × `max_segments`. |
 Invalid TOML is a hard error; Siphon doesn't silently fall back to the
 embedded copy.

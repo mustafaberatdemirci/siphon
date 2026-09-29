@@ -72,12 +72,8 @@ func TestREADMEScreenshot(t *testing.T) {
 
 	w := test.NewTempWindow(t, container.NewStack())
 	q, view := newQueueTab(w, a.Preferences(), eng, vm, nil)
-	q.outDir.SetText(`D:\Downloads\Siphon`)
-	w.SetContent(container.NewAppTabs(
-		container.NewTabItem("Download", view),
-		container.NewTabItem("Diagnose", container.NewStack()),
-	))
-	w.Resize(fyne.NewSize(1100, 760))
+	w.SetContent(view)
+	w.Resize(fyne.NewSize(1100, 640))
 	q.render()
 
 	out := filepath.Join("..", "..", "docs", "screenshot.png")

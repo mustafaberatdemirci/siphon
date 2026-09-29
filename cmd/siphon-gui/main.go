@@ -132,12 +132,23 @@ func main() {
 	tr := setupTray(a, w, a.Preferences(), quit)
 
 	q, queueView := newQueueTab(w, a.Preferences(), eng, vm, tr.setQuota)
-	_, doctorView := newDoctorTab(w)
-	downloadTab := container.NewTabItem("Download", queueView)
-	tabs := container.NewAppTabs(downloadTab, container.NewTabItem("Diagnose", doctorView))
-	// Delete and Ctrl+A act on the table only while it is on screen.
-	q.shown = func() bool { return tabs.Selected() == downloadTab }
-	w.SetContent(tabs)
+	// Diagnose opens in a window of its own, made when first asked for: the
+	// main window is the queue's alone.
+	var diag fyne.Window
+	q.openDiagnose = func() {
+		if diag != nil {
+			diag.Show()
+			diag.RequestFocus()
+			return
+		}
+		diag = a.NewWindow("Siphon — Diagnose")
+		_, view := newDoctorTab(diag)
+		diag.SetContent(view)
+		diag.Resize(fyne.NewSize(900, 640))
+		diag.SetOnClosed(func() { diag = nil })
+		diag.Show()
+	}
+	w.SetContent(queueView)
 
 	if statePath == "" {
 		dialog.ShowInformation("Persistence off",

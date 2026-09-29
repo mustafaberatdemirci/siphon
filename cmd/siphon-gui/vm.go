@@ -328,7 +328,7 @@ func connsLabel(n int) string {
 	}
 }
 
-// segmentsNotice explains a new "Connections/file" choice: the number is a
+// segmentsNotice explains a new "Connections per file" choice: the number is a
 // request, and sites whose ceiling is lower are named so the user isn't left
 // wondering why a row shows fewer.
 func segmentsNotice(n int, ceilings []queue.SiteCeiling) string {
