@@ -55,6 +55,8 @@ type segServer struct {
 	// finished lists the Range headers of the requests served, in the order
 	// they finished.
 	finished []string
+	// ifRanges counts requests that carried an If-Range header.
+	ifRanges int32
 }
 
 func newSegServer(t *testing.T, size int) *segServer {
@@ -78,6 +80,9 @@ func (s *segServer) serve(w http.ResponseWriter, r *http.Request) {
 		if n <= m || atomic.CompareAndSwapInt32(&s.maxFly, m, n) {
 			break
 		}
+	}
+	if r.Header.Get("If-Range") != "" {
+		atomic.AddInt32(&s.ifRanges, 1)
 	}
 	s.mu.Lock()
 	s.ranges = append(s.ranges, r.Header.Get("Range"))

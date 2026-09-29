@@ -71,6 +71,21 @@ func Component(name string) string {
 	return ComponentLimit(name, MaxComponentUTF16)
 }
 
+// DirPath makes an item's folder safe. Item.Dir may name nested folders
+// separated by "/" (a folder inside a mega, mediafire or gofile folder);
+// every level is sanitized on its own, so no level can name a parent or
+// climb out of the output folder, and levels left empty are dropped. ""
+// means the output root.
+func DirPath(dir string) string {
+	var parts []string
+	for _, level := range strings.Split(dir, "/") {
+		if c := Component(level); c != "" {
+			parts = append(parts, c)
+		}
+	}
+	return filepath.Join(parts...)
+}
+
 // ComponentLimit is the same as Component but the caller sets the length
 // limit. The caller must reserve room for the suffixes it will append.
 //

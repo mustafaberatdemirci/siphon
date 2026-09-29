@@ -42,10 +42,7 @@ func TestConcurrentDownloadsDistinctNames(t *testing.T) {
 			t.Fatalf("item %d: %v", i, err)
 		}
 	}
-	entries, err := os.ReadDir(out)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := ownEntries(t, out)
 	if len(entries) != n {
 		t.Fatalf("%d files created, want %d", len(entries), n)
 	}
@@ -96,10 +93,7 @@ func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 		seen[p] = true
 	}
 
-	entries, err := os.ReadDir(out)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := ownEntries(t, out)
 	if len(entries) != n {
 		t.Fatalf("%d files created, want %d; claim() has a race", len(entries), n)
 	}
@@ -145,10 +139,7 @@ func TestConcurrentDownloadsAcrossDirectories(t *testing.T) {
 
 	for di := 0; di < dirs; di++ {
 		dir := filepath.Join(out, fmt.Sprintf("album-%d", di))
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatalf("%s: %v", dir, err)
-		}
+		entries := ownEntries(t, dir)
 		if len(entries) != perDir {
 			t.Errorf("%d files in %s, want %d", len(entries), dir, perDir)
 		}
@@ -180,10 +171,7 @@ func TestConcurrentCancelLeavesNoFinalPartialFiles(t *testing.T) {
 	wg.Wait()
 	close(release)
 
-	entries, err := os.ReadDir(out)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := ownEntries(t, out)
 	for _, e := range entries {
 		name := e.Name()
 		if filepath.Ext(name) == ".bin" {
@@ -225,7 +213,7 @@ func TestDownloadTwiceReturnsSamePath(t *testing.T) {
 	if r1.Path != r2.Path {
 		t.Fatalf("the second run returned a different path:\n%s\n%s", r1.Path, r2.Path)
 	}
-	entries, _ := os.ReadDir(out)
+	entries := ownEntries(t, out)
 	if len(entries) != 1 {
 		t.Fatalf("%d files present, want 1", len(entries))
 	}

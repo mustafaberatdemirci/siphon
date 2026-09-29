@@ -243,10 +243,7 @@ func TestGeneratedDedupNameIsAlsoDeduped(t *testing.T) {
 			t.Fatalf("item %d: %v", i, err)
 		}
 	}
-	entries, err := os.ReadDir(out)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := ownEntries(t, out)
 	if len(entries) != 3 {
 		var names []string
 		for _, e := range entries {

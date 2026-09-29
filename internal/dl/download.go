@@ -52,6 +52,14 @@ const (
 	ValidatorNone         = ""
 	ValidatorETag         = "etag"
 	ValidatorLastModified = "last_modified"
+	// ValidatorSHA256: the server names no version (no strong ETag, no
+	// Last-Modified) but the site told us the file's SHA-256. It is never
+	// sent (there is no If-Range for it); parts fetched at different times
+	// are trusted because the hash check over the finished file would catch
+	// a mix-up, and a resume only continues while the site still reports the
+	// same hash. Why it exists: mediafire's download servers send neither
+	// header, so its files could use neither several connections nor resume.
+	ValidatorSHA256 = "sha256"
 )
 
 // State is the schema of the `.part.state` file.
@@ -91,6 +99,22 @@ func freshState() State { return State{TotalSize: -1, ItemSize: -1} }
 // we'd glue together parts of two different files and never notice.
 func (s State) resumable() bool {
 	return s.Offset > 0 && s.Validator != "" && s.ValidatorType != ValidatorNone && s.TotalSize >= 0
+}
+
+// ifRange is the If-Range value for a Range request: only a validator the
+// server gave us; "" otherwise.
+func (s State) ifRange() string {
+	if s.ValidatorType == ValidatorETag || s.ValidatorType == ValidatorLastModified {
+		return s.Validator
+	}
+	return ""
+}
+
+// sameVersion reports whether a state's validator still describes the item
+// being downloaded. Only a hash validator can be checked before a request;
+// the others are checked by the server through If-Range.
+func (s State) sameVersion(it site.Item) bool {
+	return s.ValidatorType != ValidatorSHA256 || strings.EqualFold(s.Validator, it.SHA256)
 }
 
 // expectedTotal is the size used for the completeness check.
@@ -234,12 +258,19 @@ func (d *Downloader) report(it site.Item, st State) {
 
 // validate applies the site-specific response validation.
 // The error is PERMANENT: maintenance lasts hours and won't clear within a
-// 10-minute retry budget; retrying does nothing but spend bandwidth.
+// 10-minute retry budget; retrying does nothing but spend bandwidth. Unless
+// the validator says so itself: a retryable error is retried, and
+// site.ErrLinkExpired has the item resolved again like a 403/410.
 func (d *Downloader) validate(resp *http.Response) error {
 	if d.Validate == nil {
 		return nil
 	}
-	return d.Validate(resp)
+	err := d.Validate(resp)
+	if errors.Is(err, site.ErrLinkExpired) {
+		d.logf("%v", err)
+		return &urlExpiredError{status: resp.StatusCode}
+	}
+	return err
 }
 
 func (d *Downloader) client() *http.Client {
@@ -323,7 +354,7 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		return Result{}, fmt.Errorf("unusable file name: %q (%s)", it.Filename, it.SourcePage)
 	}
 	it.Filename = name
-	it.Dir = Component(it.Dir) // may stay empty; means the root
+	it.Dir = DirPath(it.Dir) // may stay empty; means the root
 
 	dir := filepath.Join(outRoot, it.Dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -401,8 +432,12 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 			if rerr != nil {
 				return Result{}, fmt.Errorf("re-resolution failed: %w", rerr)
 			}
-			// Name and folder are kept; only the download URL is refreshed.
+			// Name and folder are kept; the download URL and what goes with
+			// it (a session cookie) are refreshed.
 			item.URL = fresh.URL
+			if fresh.Headers != nil {
+				item.Headers = fresh.Headers
+			}
 			if item.SHA256 == "" {
 				item.SHA256 = fresh.SHA256
 			}
@@ -501,6 +536,9 @@ func (d *Downloader) prepare(part, statePath string, it site.Item) (State, hash.
 	if d.Decode != nil && len(st.DecoderState) == 0 {
 		return reset("no decoder state, cannot resume")
 	}
+	if !st.sameVersion(it) {
+		return reset("the site now reports a different SHA-256, the file changed")
+	}
 
 	fi, err := os.Stat(part)
 	switch {
@@ -578,7 +616,9 @@ func (d *Downloader) attempt(
 	// guarantee. The only correct signal is the status code of the real request.
 	if !viaURL && st.resumable() {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(st.Offset, 10)+"-")
-		req.Header.Set("If-Range", st.Validator)
+		if v := st.ifRange(); v != "" {
+			req.Header.Set("If-Range", v)
+		}
 	}
 
 	resp, err := d.client().Do(req)
@@ -622,7 +662,7 @@ func (d *Downloader) attempt(
 		if st.Offset > 0 {
 			d.logf("server returned 200, the source may have changed: downloading from scratch")
 		}
-		st = mergeServerState(st, resp)
+		st = mergeServerState(st, resp, it)
 		hasher.Reset()
 		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
 			return false, st, nil, err
@@ -831,7 +871,7 @@ func (d *Downloader) stream(
 // A weak ETag (W/ prefix) CANNOT be used in If-Range (RFC 7232): a weak
 // validator means "semantically equivalent", not "byte-for-byte identical".
 // Using it brings back exactly the corrupt-file class you're trying to close.
-func mergeServerState(prev State, resp *http.Response) State {
+func mergeServerState(prev State, resp *http.Response, it site.Item) State {
 	st := freshState()
 	st.ItemSize = prev.ItemSize
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
@@ -839,19 +879,22 @@ func mergeServerState(prev State, resp *http.Response) State {
 			st.TotalSize = n
 		}
 	}
-	st.Validator, st.ValidatorType = pickValidator(resp)
+	st.Validator, st.ValidatorType = pickValidator(resp, it)
 	return st
 }
 
-// pickValidator picks the validator used for If-Range: a strong ETag,
-// otherwise Last-Modified, otherwise none (resume is not attempted).
-func pickValidator(resp *http.Response) (string, string) {
+// pickValidator picks what tells versions of the file apart: a strong ETag,
+// otherwise Last-Modified, otherwise the SHA-256 the site reported,
+// otherwise none (resume is not attempted).
+func pickValidator(resp *http.Response, it site.Item) (string, string) {
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
 	switch {
 	case etag != "" && !strings.HasPrefix(etag, "W/"):
 		return etag, ValidatorETag
 	case resp.Header.Get("Last-Modified") != "":
 		return resp.Header.Get("Last-Modified"), ValidatorLastModified
+	case it.SHA256 != "":
+		return strings.ToLower(it.SHA256), ValidatorSHA256
 	default:
 		return "", ValidatorNone
 	}
@@ -1007,6 +1050,6 @@ func (d *Downloader) Plan(outRoot string, it site.Item) (string, error) {
 		return "", fmt.Errorf("unusable file name: %q (%s)", it.Filename, it.SourcePage)
 	}
 	it.Filename = name
-	dir := filepath.Join(outRoot, Component(it.Dir))
+	dir := filepath.Join(outRoot, DirPath(it.Dir))
 	return filepath.Join(dir, d.claim(dir, it)), nil
 }

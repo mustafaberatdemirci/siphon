@@ -221,8 +221,9 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 		// Forbidden characters and a trailing dot.
 		{`bad:name?.mp4`, "", "bad-name-.mp4", ""},
 		{"trailing dot.mp4.", "", "trailing dot.mp4", ""},
-		// The folder name goes through the same sanitizer.
-		{"ok.bin", "Album: Summer / 2026", "ok.bin", "Album- Summer - 2026"},
+		// The folder name goes through the same sanitizer; "/" separates
+		// nested levels, each sanitized on its own.
+		{"ok.bin", "Album: Summer / 2026", "ok.bin", filepath.Join("Album- Summer", "2026")},
 	}
 
 	for _, c := range cases {
@@ -270,5 +271,23 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 	}
 	if !found {
 		t.Error("the file with the long name was not found on disk")
+	}
+}
+
+func TestDirPathKeepsLevelsAndStaysInside(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"Album", "Album"},
+		{"Parent/Child", filepath.Join("Parent", "Child")},
+		{"/Parent//Child/", filepath.Join("Parent", "Child")},
+		{"../../etc", "etc"},
+		{"a/./b", filepath.Join("a", "b")},
+		{`back\slash`, "back-slash"},
+		{"CON/x", filepath.Join("_CON", "x")},
+	}
+	for _, c := range cases {
+		if got := DirPath(c.in); got != c.want {
+			t.Errorf("DirPath(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

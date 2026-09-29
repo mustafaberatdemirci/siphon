@@ -183,8 +183,9 @@ func (d *Downloader) hasSegmentState(statePath string) bool {
 
 // versionSafe: can segments fetched at different times be trusted to belong
 // to the same version of the file? A validator guarantees it (If-Range on
-// every request); without one, a decoder's integrity check over the finished
-// file catches a mix-up instead. Why the second path: it is NOT verified that
+// every request, or the site's SHA-256 checked over the finished file);
+// without one, a decoder's integrity check over the finished file catches a
+// mix-up instead. Why the second path: it is NOT verified that
 // mega's storage servers send an ETag or Last-Modified, and the content of a
 // mega file never changes under the same key anyway.
 func (d *Downloader) versionSafe(validator, vtype string) bool {
@@ -204,7 +205,7 @@ func (d *Downloader) segmented(ctx context.Context, final, part, statePath strin
 	if len(st.Segments) > 0 {
 		fi, err := os.Stat(part)
 		switch {
-		case err != nil, fi.Size() != st.TotalSize, !d.versionSafe(st.Validator, st.ValidatorType):
+		case err != nil, fi.Size() != st.TotalSize, !d.versionSafe(st.Validator, st.ValidatorType), !st.sameVersion(it):
 			// File missing, size doesn't match or no way to tell versions apart: from scratch.
 			d.logf("segmented state unusable, downloading from scratch")
 			st = freshState()
@@ -235,6 +236,9 @@ func (d *Downloader) segmented(ctx context.Context, final, part, statePath strin
 				return Result{}, fmt.Errorf("re-resolution failed: %w", rerr)
 			}
 			item.URL = fresh.URL
+			if fresh.Headers != nil {
+				item.Headers = fresh.Headers
+			}
 			if item.SHA256 == "" {
 				item.SHA256 = fresh.SHA256
 			}
@@ -627,7 +631,7 @@ func (d *Downloader) probe(ctx context.Context, target string, it site.Item) (si
 		if _, total, perr := parseContentRange(resp.Header.Get("Content-Range")); perr == nil && total > 0 {
 			size = total
 		}
-		v, vt := pickValidator(resp)
+		v, vt := pickValidator(resp, it)
 		return size, v, vt, nil
 	case resp.StatusCode == http.StatusPartialContent:
 		if verr := d.validate(resp); verr != nil {
@@ -637,10 +641,15 @@ func (d *Downloader) probe(ctx context.Context, target string, it site.Item) (si
 		if perr != nil || total <= 0 {
 			return 0, "", "", errNoRangeSupport
 		}
-		v, vt := pickValidator(resp)
+		v, vt := pickValidator(resp, it)
 		return total, v, vt, nil
 	case resp.StatusCode == http.StatusOK:
-		// The range was ignored.
+		// The range was ignored. Unless the answer isn't the file at all (a
+		// web page for an expired session): that is for the validator to
+		// say, before falling back to a single stream hides it.
+		if verr := d.validate(resp); verr != nil {
+			return 0, "", "", verr
+		}
 		return 0, "", "", errNoRangeSupport
 	default:
 		return 0, "", "", d.classifyStatus(resp, body)
@@ -761,10 +770,10 @@ func (d *Downloader) fetchSegment(ctx context.Context, target string, it site.It
 	d.setHeaders(req, it)
 	if d.RangeURL == nil {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end-1))
-		if st.Validator != "" {
+		if v := st.ifRange(); v != "" {
 			// The segments MUST belong to the same version; if the server
 			// changed the file it returns 200, caught below.
-			req.Header.Set("If-Range", st.Validator)
+			req.Header.Set("If-Range", v)
 		}
 	}
 	resp, err := d.client().Do(req)

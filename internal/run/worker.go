@@ -233,7 +233,7 @@ func (w *Worker) SelfDownloads(it site.Item) bool {
 // with progress going the same way as the downloader's (at most every
 // 250 ms: yt-dlp reports far more often).
 func (w *Worker) downloadSelf(ctx context.Context, outDir string, it site.Item) (dl.Result, error) {
-	dir := filepath.Join(outDir, dl.Component(it.Dir))
+	dir := filepath.Join(outDir, dl.DirPath(it.Dir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return dl.Result{}, fmt.Errorf("could not create folder: %w", err)
 	}

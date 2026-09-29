@@ -147,7 +147,7 @@ type LayerResult struct {
 type Item struct {
 	URL        string // the real URL to download (CDN, may expire)
 	SourcePage string // item page used for re-resolution. Required.
-	Dir        string // album folder relative to the output root ("" = root)
+	Dir        string // album folder relative to the output root ("" = root); "/" separates nested folders
 	Filename   string
 	Headers    map[string]string // Referer included, derived from RefererPolicy
 	SHA256     string            // pixeldrain provides it, bunkr does not; may be empty
@@ -390,6 +390,16 @@ type ResponseValidator interface {
 type URLPreparer interface {
 	PrepareURL(ctx context.Context, rawURL string) (string, error)
 }
+
+// ErrLinkExpired is what a ResponseValidator wraps when the answer shows the
+// download link, or what it needs alongside (a session cookie), is no longer
+// valid: the downloader then resolves the item again once, as it does for a
+// 403/410, and takes both the new URL and the new headers.
+//
+// Why it is needed: gofile answers a download whose session token expired
+// with a redirect to its web page, a 200 with HTML. By status alone that is
+// neither an expired link nor an error.
+var ErrLinkExpired = errors.New("the download link expired")
 
 // StreamDecoder is an optional interface for resolvers whose body must be
 // decoded BEFORE it is written to disk. The downloader uses it via type
