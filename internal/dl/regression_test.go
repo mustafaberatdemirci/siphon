@@ -1,7 +1,7 @@
 package dl
 
-// Bu dosya, kod incelemesinde bulunan hatalar için regresyon testleri tutar.
-// Her test bir bulguya karşılık gelir ve düzeltmenin geri alınmasını engeller.
+// This file holds regression tests for bugs found in code review. Each test
+// corresponds to a finding and keeps the fix from being reverted.
 
 import (
 	"bytes"
@@ -20,17 +20,18 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// BULGU 1. En sinsi tutarsızlık: `.part` silinmiş ama `.part.state` duruyor ve
-// kaydedilmiş sha256 durumunu taşıyor. Naif resume dosyanın başına offset kadar
-// SIFIR deliği açar; hash durumu state'ten geldiği için sha256 kontrolü GEÇER
-// ve bozuk dosya nihai adıyla yazılır.
+// FINDING 1. The sneakiest inconsistency: the `.part` was deleted but the
+// `.part.state` remains and carries a saved sha256 state. A naive resume
+// opens a ZERO hole of offset bytes at the start of the file; since the hash
+// state comes from the state file the sha256 check PASSES and the corrupt file
+// is written under its final name.
 //
-// Düzeltmeden önce ölçüldü: 20000 sıfır baytlı dosya "OK" olarak yazıldı ve
-// Download nil döndü.
+// Measured before the fix: a file with 20000 zero bytes was written as "OK"
+// and Download returned nil.
 func TestMissingPartWithStateMustNotCorrupt(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
-	part := filepath.Join(out, "veri.bin.part")
+	part := filepath.Join(out, "data.bin.part")
 
 	h := sha256.New()
 	h.Write(payload[:20000])
@@ -46,55 +47,57 @@ func TestMissingPartWithStateMustNotCorrupt(t *testing.T) {
 	if err := os.WriteFile(part+".state", data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// .part KASITLI olarak yok.
+	// The .part is DELIBERATELY missing.
 
 	d := &Downloader{Client: srv.Client()}
-	it := testItem(srv.URL+"/veri.bin", "veri.bin")
+	it := testItem(srv.URL+"/data.bin", "data.bin")
 	it.SHA256 = payloadSHA()
 	if _, err := d.Download(context.Background(), out, it); err != nil {
-		t.Fatalf("baştan indirme başarısız olmamalı: %v", err)
+		t.Fatalf("downloading from scratch must not fail: %v", err)
 	}
-	got, rerr := os.ReadFile(filepath.Join(out, "veri.bin"))
+	got, rerr := os.ReadFile(filepath.Join(out, "data.bin"))
 	if rerr != nil {
-		t.Fatalf("dosya yok: %v", rerr)
+		t.Fatalf("file missing: %v", rerr)
 	}
 	if !bytes.Equal(got, payload) {
 		zeros := bytes.Count(got[:20000], []byte{0})
-		t.Fatalf("BOZUK DOSYA: ilk 20000 baytta %d sıfır var", zeros)
+		t.Fatalf("CORRUPT FILE: %d zeros in the first 20000 bytes", zeros)
 	}
 }
 
-// BULGU 2. Hash uyuşmazlığında `.part` ve state diskte kalırsa her koşu aynı
-// hatayı tekrarlar ve item elle silinmeden kurtarılamaz.
+// FINDING 2. If the `.part` and state stay on disk after a hash mismatch,
+// every run repeats the same failure and the item can't be recovered without
+// deleting it by hand.
 func TestSHA256MismatchCleansUpForRetry(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
 
-	bad := testItem(srv.URL+"/veri.bin", "veri.bin")
+	bad := testItem(srv.URL+"/data.bin", "data.bin")
 	bad.SHA256 = strings.Repeat("00", 32)
 	d := &Downloader{Client: srv.Client()}
 	if _, err := d.Download(context.Background(), out, bad); !errors.Is(err, ErrSHA256Mismatch) {
-		t.Fatalf("ErrSHA256Mismatch bekleniyordu: %v", err)
+		t.Fatalf("expected ErrSHA256Mismatch: %v", err)
 	}
-	part := filepath.Join(out, "veri.bin.part")
+	part := filepath.Join(out, "data.bin.part")
 	for _, f := range []string{part, part + ".state"} {
 		if _, err := os.Stat(f); err == nil {
-			t.Errorf("%s temizlenmedi; sonraki koşu aynı hataya düşer", filepath.Base(f))
+			t.Errorf("%s was not cleaned up; the next run hits the same failure", filepath.Base(f))
 		}
 	}
 
-	// Doğru hash ile aynı klasörde tekrar denenebilmeli.
-	good := testItem(srv.URL+"/veri.bin", "veri.bin")
+	// It must be retryable in the same folder with the right hash.
+	good := testItem(srv.URL+"/data.bin", "data.bin")
 	good.SHA256 = payloadSHA()
 	d2 := &Downloader{Client: srv.Client()}
 	if _, err := d2.Download(context.Background(), out, good); err != nil {
-		t.Fatalf("temizlikten sonra tekrar denenemiyor: %v", err)
+		t.Fatalf("cannot retry after cleanup: %v", err)
 	}
 }
 
-// BULGU 3. user_agent ve Item.Headers transfer isteğine de uygulanmalı.
-// Yalnızca API çağrılarına uygulanması sessiz bir yarım uygulama, ve bunkr'da
-// item sayfası Referer'ı transferde zorunlu.
+// FINDING 3. user_agent and Item.Headers must be applied to the transfer
+// request too. Applying them only to API calls is a silent half
+// implementation, and on bunkr the item page Referer is mandatory on the
+// transfer.
 func TestUserAgentAndHeadersAppliedToTransfer(t *testing.T) {
 	var gotUA, gotReferer string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,23 +110,23 @@ func TestUserAgentAndHeadersAppliedToTransfer(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &Downloader{Client: srv.Client(), UserAgent: "siphon/test"}
-	it := testItem(srv.URL+"/veri.bin", "veri.bin")
-	it.Headers = map[string]string{"Referer": "https://ornek.test/u/abc"}
+	it := testItem(srv.URL+"/data.bin", "data.bin")
+	it.Headers = map[string]string{"Referer": "https://example.test/u/abc"}
 	it.SHA256 = payloadSHA()
 	if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if gotUA != "siphon/test" {
-		t.Errorf("User-Agent = %q, transfere uygulanmadı", gotUA)
+		t.Errorf("User-Agent = %q, not applied to the transfer", gotUA)
 	}
-	if gotReferer != "https://ornek.test/u/abc" {
-		t.Errorf("Referer = %q; Item.Headers transfere uygulanmadı", gotReferer)
+	if gotReferer != "https://example.test/u/abc" {
+		t.Errorf("Referer = %q; Item.Headers not applied to the transfer", gotReferer)
 	}
 }
 
-// BULGU 5. Sınıflandırıcı varsa 403 "imzalı URL süresi doldu" sayılmamalı ve
-// yeniden çözümleme TETİKLENMEMELİ. Aksi halde araç rate limitliyken URL'i
-// yeniden çözüp tekrar dener, yani limiti kendi eliyle derinleştirir.
+// FINDING 5. With a classifier, a 403 must not count as "signed URL expired"
+// and must NOT trigger re-resolution. Otherwise the tool would re-resolve and
+// retry while rate limited, deepening the limit with its own hands.
 func TestClassifierPreventsReresolveOn403(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -139,16 +142,16 @@ func TestClassifierPreventsReresolveOn403(t *testing.T) {
 		Classify:  func(resp *http.Response, body []byte) error { return sentinel },
 		Reresolve: func(context.Context, string) (site.Item, error) { calls++; return site.Item{}, nil },
 	}
-	_, err := d.Download(context.Background(), tempDir(t), testItem(srv.URL+"/x", "veri.bin"))
+	_, err := d.Download(context.Background(), tempDir(t), testItem(srv.URL+"/x", "data.bin"))
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("sınıflandırıcının hatası bekleniyordu, %v geldi", err)
+		t.Fatalf("expected the classifier's error, got %v", err)
 	}
 	if calls != 0 {
-		t.Fatalf("Reresolve %d kez çağrıldı; rate limitliyken yeniden çözmek limiti derinleştirir", calls)
+		t.Fatalf("Reresolve called %d times; re-resolving while rate limited deepens the limit", calls)
 	}
 }
 
-// Sınıflandırıcı nil döndürdüğünde (tanınmayan gövde) eski davranış korunmalı.
+// When the classifier returns nil (unrecognized body) the old behavior must be kept.
 func TestClassifierReturningNilFallsBackToExpired(t *testing.T) {
 	good := rangeServer(t, `"v1"`, nil)
 	expired := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -162,24 +165,24 @@ func TestClassifierReturningNilFallsBackToExpired(t *testing.T) {
 		Classify: func(resp *http.Response, body []byte) error { return nil },
 		Reresolve: func(context.Context, string) (site.Item, error) {
 			calls++
-			return testItem(good.URL+"/veri.bin", "veri.bin"), nil
+			return testItem(good.URL+"/data.bin", "data.bin"), nil
 		},
 	}
-	it := testItem(expired.URL+"/x", "veri.bin")
+	it := testItem(expired.URL+"/x", "data.bin")
 	it.SHA256 = payloadSHA()
 	if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if calls != 1 {
-		t.Fatalf("Reresolve %d kez çağrıldı, 1 bekleniyordu", calls)
+		t.Fatalf("Reresolve called %d times, want 1", calls)
 	}
 }
 
-// BULGU 9. Content-Length yok ve hash yok: kırpılmış gövde "tamamlandı"
-// sayılmamalı. Resolver'ın bildirdiği boyut yedek olarak devreye girer.
+// FINDING 9. No Content-Length and no hash: a truncated body must not count
+// as "complete". The resolver-reported size kicks in as a fallback.
 func TestTruncatedBodyCaughtByItemSize(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Content-Length YOK ve gövde kasıtlı olarak kısa.
+		// NO Content-Length and the body is deliberately short.
 		w.Header().Set("Transfer-Encoding", "chunked")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(payload[:1000])
@@ -188,17 +191,18 @@ func TestTruncatedBodyCaughtByItemSize(t *testing.T) {
 
 	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
-	it := testItem(srv.URL+"/veri.bin", "veri.bin") // Size = len(payload)
+	it := testItem(srv.URL+"/data.bin", "data.bin") // Size = len(payload)
 	if _, err := d.Download(context.Background(), out, it); !errors.Is(err, ErrIncomplete) {
-		t.Fatalf("ErrIncomplete bekleniyordu, %v geldi", err)
+		t.Fatalf("expected ErrIncomplete, got %v", err)
 	}
-	if _, serr := os.Stat(filepath.Join(out, "veri.bin")); serr == nil {
-		t.Fatal("kırpılmış gövde nihai adla yazıldı")
+	if _, serr := os.Stat(filepath.Join(out, "data.bin")); serr == nil {
+		t.Fatal("a truncated body was written under the final name")
 	}
 }
 
-// Resolver boyutu bilmiyorsa (Size -1) kontrol yapılamaz; eski davranış korunur.
-// Bu, chunked yanıtta resume denenmemesi kararının da dokunulmadığını gösterir.
+// If the resolver doesn't know the size (Size -1) no check is possible; the
+// old behavior is kept. This also shows the decision not to resume chunked
+// responses is untouched.
 func TestUnknownSizeChunkedStillCompletes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Transfer-Encoding", "chunked")
@@ -207,7 +211,7 @@ func TestUnknownSizeChunkedStillCompletes(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	d := &Downloader{Client: srv.Client()}
-	it := testItem(srv.URL+"/veri.bin", "veri.bin")
+	it := testItem(srv.URL+"/data.bin", "data.bin")
 	it.Size = -1
 	it.SHA256 = payloadSHA()
 	if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
@@ -215,23 +219,24 @@ func TestUnknownSizeChunkedStillCompletes(t *testing.T) {
 	}
 }
 
-// BULGU 8. Üretilen "(N)" adının kendisi de çakışabilir; o durumda ikinci item
-// "zaten var" dalına düşüp hiç indirilmeden OK raporlanırdı.
+// FINDING 8. A generated "(N)" name can itself collide; in that case the
+// second item fell into the "already exists" branch and was reported OK
+// without ever being downloaded.
 func TestGeneratedDedupNameIsAlsoDeduped(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
 	d := &Downloader{Client: srv.Client()}
 
-	// Üçü de çakışıyor: b'nin üreteceği ad ("ayni (2).bin") c'nin düz adıyla aynı.
-	a := testItem(srv.URL+"/veri.bin", "ayni.bin")
+	// All three collide: the name b would generate ("same (2).bin") equals c's plain name.
+	a := testItem(srv.URL+"/data.bin", "same.bin")
 	a.Index = 0
-	a.SourcePage = "https://ornek.test/u/a"
-	b := testItem(srv.URL+"/veri.bin", "ayni.bin")
+	a.SourcePage = "https://example.test/u/a"
+	b := testItem(srv.URL+"/data.bin", "same.bin")
 	b.Index = 1
-	b.SourcePage = "https://ornek.test/u/b"
-	c := testItem(srv.URL+"/veri.bin", "ayni (2).bin")
+	b.SourcePage = "https://example.test/u/b"
+	c := testItem(srv.URL+"/data.bin", "same (2).bin")
 	c.Index = 2
-	c.SourcePage = "https://ornek.test/u/c"
+	c.SourcePage = "https://example.test/u/c"
 
 	for i, it := range []site.Item{a, b, c} {
 		if _, err := d.Download(context.Background(), out, it); err != nil {
@@ -247,6 +252,6 @@ func TestGeneratedDedupNameIsAlsoDeduped(t *testing.T) {
 		for _, e := range entries {
 			names = append(names, e.Name())
 		}
-		t.Fatalf("%d dosya oluştu, 3 bekleniyordu: %v", len(entries), names)
+		t.Fatalf("%d files created, want 3: %v", len(entries), names)
 	}
 }

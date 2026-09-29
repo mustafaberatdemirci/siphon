@@ -1,10 +1,10 @@
-// Package config, sites.toml'un yüklenmesi ve birleştirilmesinden sorumludur.
+// Package config is responsible for loading and merging sites.toml.
 //
-// Dosya düzeni dokümanında ayrı bir config paketi yoktu; birleştirme mantığı
-// main.go'ya bırakılmıştı. Ayrı paket olmasının gerekçesi: union merge,
-// domains_remove ve schema_version doğrulaması tablo testi isteyen gerçek
-// mantık, ve bunları bayrak ayrıştırmasıyla aynı dosyada tutmak ikisini de
-// zorlaştırıyor.
+// The original file layout had no separate config package; merge logic was
+// left to main.go. The reason for a package of its own: union merge,
+// domains_remove and schema_version validation are real logic that deserves
+// table tests, and keeping them in the same file as flag parsing makes both
+// harder.
 package config
 
 import (
@@ -19,13 +19,14 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// SchemaVersion, bu binary'nin anladığı şema sürümü.
+// SchemaVersion is the schema version this binary understands.
 const SchemaVersion = 1
 
-// ErrUsage, çıkış kodu 3 ile eşleşen hata sınıfıdır: geçersiz TOML,
-// schema_version uyuşmazlığı, okunamayan dosya. "Site tarafında bir şey oldu"
-// (çıkış 2) ile karıştırılmaz; teşhis yolları tamamen farklı.
-var ErrUsage = errors.New("konfigürasyon hatası")
+// ErrUsage is the error class that maps to exit code 3: invalid TOML,
+// schema_version mismatch, unreadable file. It is not to be confused with
+// "something happened on the site side" (exit 2); the diagnosis paths are
+// completely different.
+var ErrUsage = errors.New("configuration error")
 
 type file struct {
 	SchemaVersion *int      `toml:"schema_version"`
@@ -41,55 +42,57 @@ type rawSite struct {
 	CDNPatterns   []string `toml:"cdn_patterns"`
 	CanaryURLs    []string `toml:"canary_urls"`
 
-	// Silme açık olmak zorunda. Dizi alanları birleştiği için, bir domain'i
-	// listeden çıkarmanın başka yolu yok.
+	// Removal must be explicit. Since array fields are merged, there is no
+	// other way to take a domain out of the list.
 	DomainsRemove     []string `toml:"domains_remove"`
 	CDNPatternsRemove []string `toml:"cdn_patterns_remove"`
 
-	UserAgent     string `toml:"user_agent"`
-	RefererPolicy string `toml:"referer_policy"`
-	MaxConcurrent int    `toml:"max_concurrent"`
-	MaxSegments   int    `toml:"max_segments"`
-	DNSResolver   string `toml:"dns_resolver"`
+	UserAgent      string `toml:"user_agent"`
+	RefererPolicy  string `toml:"referer_policy"`
+	MaxConcurrent  int    `toml:"max_concurrent"`
+	MaxSegments    int    `toml:"max_segments"`
+	MaxConnections int    `toml:"max_connections"`
+	DNSResolver    string `toml:"dns_resolver"`
 
 	MaxRetries int    `toml:"max_retries"`
 	BaseDelay  string `toml:"base_delay"`
 	MaxDelay   string `toml:"max_delay"`
 	MaxElapsed string `toml:"max_elapsed"`
 
-	// Extra, siteye özgü anahtar/değer ayarları (bunkr'ın api_endpoint'i gibi).
+	// Extra holds site-specific key/value settings (like bunkr's api_endpoint).
 	Extra map[string]string `toml:"extra"`
 }
 
-// Source, konfigürasyonun nereden geldiğini söyler. -v çıktısında basılır;
-// "hangi config yüklendi" sorusu teşhisin ilk adımı.
+// Source says where the configuration came from. It is printed with -v;
+// "which config was loaded" is the first step of any diagnosis.
 type Source struct {
-	Path     string // boşsa gömülü kopya
+	Path     string // empty for the embedded copy
 	Embedded bool
 }
 
 func (s Source) String() string {
 	if s.Embedded {
-		return "gömülü"
+		return "embedded"
 	}
 	return s.Path
 }
 
-// Load, gömülü kopyayı okur ve bulunursa dış kopyayı üzerine bindirir.
+// Load reads the embedded copy and overlays the external copy if one is found.
 //
-// Arama sırası: explicitPath -> exe'nin yanı -> cwd. İlk bulunan kullanılır.
-// explicitPath verilmiş ama dosya yoksa bu bir kullanım hatasıdır; sessizce
-// gömülüye düşmek teşhisi imkânsızlaştırır.
+// Search order: explicitPath -> next to the exe -> cwd. The first one found is
+// used. If explicitPath is given but the file does not exist that is a usage
+// error; silently falling back to the embedded copy makes diagnosis
+// impossible.
 func Load(embedded []byte, explicitPath string) ([]site.SiteConfig, Source, error) {
-	base, err := parse(embedded, "gömülü sites.toml")
+	base, err := parse(embedded, "embedded sites.toml")
 	if err != nil {
 		return nil, Source{}, err
 	}
 	if base.SchemaVersion == nil {
-		return nil, Source{}, fmt.Errorf("%w: gömülü sites.toml'da schema_version yok", ErrUsage)
+		return nil, Source{}, fmt.Errorf("%w: embedded sites.toml has no schema_version", ErrUsage)
 	}
 	if *base.SchemaVersion != SchemaVersion {
-		return nil, Source{}, fmt.Errorf("%w: gömülü schema_version=%d, bu binary %d bekliyor",
+		return nil, Source{}, fmt.Errorf("%w: embedded schema_version=%d, this binary expects %d",
 			ErrUsage, *base.SchemaVersion, SchemaVersion)
 	}
 
@@ -104,15 +107,15 @@ func Load(embedded []byte, explicitPath string) ([]site.SiteConfig, Source, erro
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, Source{}, fmt.Errorf("%w: %s okunamadı: %v", ErrUsage, path, err)
+		return nil, Source{}, fmt.Errorf("%w: could not read %s: %v", ErrUsage, path, err)
 	}
 	ext, err := parse(data, path)
 	if err != nil {
 		return nil, Source{}, err
 	}
-	// Dış dosyada schema_version opsiyonel; verilmişse uyuşmak zorunda.
+	// schema_version is optional in the external file; if given it must match.
 	if ext.SchemaVersion != nil && *ext.SchemaVersion != SchemaVersion {
-		return nil, Source{}, fmt.Errorf("%w: %s schema_version=%d, bu binary %d bekliyor",
+		return nil, Source{}, fmt.Errorf("%w: %s schema_version=%d, this binary expects %d",
 			ErrUsage, path, *ext.SchemaVersion, SchemaVersion)
 	}
 
@@ -120,11 +123,12 @@ func Load(embedded []byte, explicitPath string) ([]site.SiteConfig, Source, erro
 	return cfgs, Source{Path: path}, err
 }
 
-// locate, dış config dosyasını arar. Bulunamazsa boş yol döner (gömülü kullanılır).
+// locate looks for the external config file. Returns an empty path if none
+// is found (the embedded copy is used).
 func locate(explicitPath string) (string, error) {
 	if explicitPath != "" {
 		if _, err := os.Stat(explicitPath); err != nil {
-			return "", fmt.Errorf("%w: -c ile verilen %s açılamadı: %v", ErrUsage, explicitPath, err)
+			return "", fmt.Errorf("%w: could not open %s given with -c: %v", ErrUsage, explicitPath, err)
 		}
 		return explicitPath, nil
 	}
@@ -145,15 +149,15 @@ func locate(explicitPath string) (string, error) {
 
 func parse(data []byte, label string) (file, error) {
 	var f file
-	// Geçersiz TOML hard fail: sessizce gömülüye dönmek, aracın tüm amacı olan
-	// teşhis edilebilirliği yok eder.
+	// Invalid TOML is a hard fail: silently falling back to the embedded copy
+	// destroys the diagnosability that is the whole point of the tool.
 	if _, err := toml.Decode(string(data), &f); err != nil {
-		return file{}, fmt.Errorf("%w: %s geçersiz TOML: %v", ErrUsage, label, err)
+		return file{}, fmt.Errorf("%w: %s is not valid TOML: %v", ErrUsage, label, err)
 	}
 	return f, nil
 }
 
-// merge, dış dosyayı temel üzerine bindirir.
+// merge overlays the external file on top of the base.
 func merge(base, ext file) file {
 	out := file{SchemaVersion: base.SchemaVersion}
 	out.Sites = append(out.Sites, base.Sites...)
@@ -176,17 +180,17 @@ func merge(base, ext file) file {
 }
 
 func mergeSite(b, e rawSite) rawSite {
-	// Diziler birleşir. Silme burada DEĞİL build()'de uygulanıyor: aksi halde
-	// dış dosyanın yeni tanımladığı bir sitenin kendi domains_remove'u hiç
-	// çalışmazdı (o dal merge'e girmiyor).
+	// Arrays are merged. Removal is applied in build(), NOT here: otherwise
+	// a site newly defined by the external file would never have its own
+	// domains_remove applied (that branch never enters merge).
 	b.Domains = union(b.Domains, e.Domains)
 	b.CDNPatterns = union(b.CDNPatterns, e.CDNPatterns)
 	b.LegacyDomains = union(b.LegacyDomains, e.LegacyDomains)
 	b.MatchPatterns = union(b.MatchPatterns, e.MatchPatterns)
 	b.CanaryURLs = union(b.CanaryURLs, e.CanaryURLs)
 
-	// Extra anahtar bazında eziliyor: dış dosya yalnızca değiştirmek istediği
-	// anahtarı yazsın, tüm haritayı yeniden yazmak zorunda kalmasın.
+	// Extra is overwritten per key: the external file writes only the key it
+	// wants to change instead of rewriting the whole map.
 	if len(e.Extra) > 0 {
 		if b.Extra == nil {
 			b.Extra = map[string]string{}
@@ -198,7 +202,7 @@ func mergeSite(b, e rawSite) rawSite {
 	b.DomainsRemove = union(b.DomainsRemove, e.DomainsRemove)
 	b.CDNPatternsRemove = union(b.CDNPatternsRemove, e.CDNPatternsRemove)
 
-	// Skalerler ezilir, ama yalnızca verilmişlerse.
+	// Scalars are overwritten, but only if given.
 	if e.UserAgent != "" {
 		b.UserAgent = e.UserAgent
 	}
@@ -213,6 +217,9 @@ func mergeSite(b, e rawSite) rawSite {
 	}
 	if e.MaxSegments != 0 {
 		b.MaxSegments = e.MaxSegments
+	}
+	if e.MaxConnections != 0 {
+		b.MaxConnections = e.MaxConnections
 	}
 	if e.MaxRetries != 0 {
 		b.MaxRetries = e.MaxRetries
@@ -229,7 +236,7 @@ func mergeSite(b, e rawSite) rawSite {
 	return b
 }
 
-// union, sıra koruyarak birleştirir ve yinelenenleri atar.
+// union merges preserving order and drops duplicates.
 func union(a, b []string) []string {
 	seen := make(map[string]bool, len(a)+len(b))
 	out := make([]string, 0, len(a)+len(b))
@@ -243,12 +250,11 @@ func union(a, b []string) []string {
 	return out
 }
 
-// remove, silme listesini uygular.
+// remove applies a removal list.
 //
-// Karşılaştırma NORMALİZE edilerek yapılır: eşleştirme tarafı (site.MatchHost)
-// host'u küçük harfe çeviriyor ve sondaki noktayı atıyor. Burada ham string
-// karşılaştırmak, `domains_remove = ["PixelDrain.COM"]` yazan bir kullanıcının
-// silmesinin sessizce hiçbir şey yapmaması demek olurdu.
+// The comparison is NORMALIZED: the matching side (site.MatchHost) lowercases
+// the host and drops a trailing dot. Comparing raw strings here would mean a
+// user writing `domains_remove = ["PixelDrain.COM"]` silently removes nothing.
 func remove(from, drop []string) []string {
 	if len(drop) == 0 {
 		return from
@@ -271,35 +277,39 @@ func remove(from, drop []string) []string {
 
 func build(f file) ([]site.SiteConfig, error) {
 	if len(f.Sites) == 0 {
-		return nil, fmt.Errorf("%w: hiç site tanımı yok", ErrUsage)
+		return nil, fmt.Errorf("%w: no site definitions", ErrUsage)
 	}
 	out := make([]site.SiteConfig, 0, len(f.Sites))
 	seen := map[string]bool{}
 	for _, r := range f.Sites {
 		if r.Name == "" {
-			return nil, fmt.Errorf("%w: adı olmayan site tanımı", ErrUsage)
+			return nil, fmt.Errorf("%w: site definition without a name", ErrUsage)
 		}
 		if seen[r.Name] {
-			return nil, fmt.Errorf("%w: %q iki kez tanımlanmış", ErrUsage, r.Name)
+			return nil, fmt.Errorf("%w: %q is defined twice", ErrUsage, r.Name)
 		}
 		seen[r.Name] = true
 
 		switch r.RefererPolicy {
 		case "", site.RefererNone, site.RefererItemPage, site.RefererOrigin:
 		default:
-			return nil, fmt.Errorf("%w: %s: geçersiz referer_policy %q (none|item_page|origin)",
+			return nil, fmt.Errorf("%w: %s: invalid referer_policy %q (none|item_page|origin)",
 				ErrUsage, r.Name, r.RefererPolicy)
 		}
-		// Silme burada uygulanıyor: hem birleştirilmiş hem dış dosyanın yeni
-		// tanımladığı siteler aynı yoldan geçsin.
+		// Removal is applied here: both merged sites and sites newly defined
+		// by the external file go through the same path.
 		domains := remove(r.Domains, r.DomainsRemove)
 		cdn := remove(r.CDNPatterns, r.CDNPatternsRemove)
 
-		if len(r.Domains) == 0 {
-			return nil, fmt.Errorf("%w: %s: domains boş", ErrUsage, r.Name)
-		}
-		if len(domains) == 0 {
-			return nil, fmt.Errorf("%w: %s: domains_remove tüm domainleri sildi", ErrUsage, r.Name)
+		// Every site needs domains, except the plain-file-link fallback: it
+		// takes whatever no site recognizes.
+		if r.Name != site.DirectName {
+			if len(r.Domains) == 0 {
+				return nil, fmt.Errorf("%w: %s: domains is empty", ErrUsage, r.Name)
+			}
+			if len(domains) == 0 {
+				return nil, fmt.Errorf("%w: %s: domains_remove removed every domain", ErrUsage, r.Name)
+			}
 		}
 
 		base, err := dur(r.Name, "base_delay", r.BaseDelay)
@@ -316,22 +326,23 @@ func build(f file) ([]site.SiteConfig, error) {
 		}
 
 		out = append(out, site.SiteConfig{
-			Name:          r.Name,
-			Domains:       domains,
-			LegacyDomains: r.LegacyDomains,
-			MatchPatterns: r.MatchPatterns,
-			CDNPatterns:   cdn,
-			Extra:         r.Extra,
-			CanaryURLs:    r.CanaryURLs,
-			UserAgent:     r.UserAgent,
-			RefererPolicy: r.RefererPolicy,
-			MaxConcurrent: r.MaxConcurrent,
-			MaxSegments:   r.MaxSegments,
-			DNSResolver:   r.DNSResolver,
-			MaxRetries:    r.MaxRetries,
-			BaseDelay:     base,
-			MaxDelay:      maxD,
-			MaxElapsed:    elapsed,
+			Name:           r.Name,
+			Domains:        domains,
+			LegacyDomains:  r.LegacyDomains,
+			MatchPatterns:  r.MatchPatterns,
+			CDNPatterns:    cdn,
+			Extra:          r.Extra,
+			CanaryURLs:     r.CanaryURLs,
+			UserAgent:      r.UserAgent,
+			RefererPolicy:  r.RefererPolicy,
+			MaxConcurrent:  r.MaxConcurrent,
+			MaxSegments:    r.MaxSegments,
+			MaxConnections: r.MaxConnections,
+			DNSResolver:    r.DNSResolver,
+			MaxRetries:     r.MaxRetries,
+			BaseDelay:      base,
+			MaxDelay:       maxD,
+			MaxElapsed:     elapsed,
 		}.WithDefaults())
 	}
 	return out, nil
@@ -343,7 +354,7 @@ func dur(siteName, field, v string) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %s: %s=%q ayrıştırılamadı: %v", ErrUsage, siteName, field, v, err)
+		return 0, fmt.Errorf("%w: %s: could not parse %s=%q: %v", ErrUsage, siteName, field, v, err)
 	}
 	return d, nil
 }

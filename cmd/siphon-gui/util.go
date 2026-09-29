@@ -9,21 +9,22 @@ import (
 	"strings"
 )
 
-// normalizeDir, kullanıcıdan veya klasör seçiciden gelen yolu Windows'un
-// beklediği biçime çevirir.
+// normalizeDir converts a path coming from the user or the folder picker into
+// the form Windows expects.
 //
-// ÖLÇÜLDÜ: Fyne'ın klasör seçicisi yolu URI'den türetiyor ve EĞİK ÇİZGİYLE
-// veriyor — "E:\x" seçince kutuya "E:/x" yazılıyor. Go'nun dosya çağrıları
-// eğik çizgiyi kabul ettiği için indirme doğru yere iniyor ve hata görünmez
-// kalıyor; ama explorer.exe kabul etmiyor. Yolu tanımayınca hata da vermiyor,
-// sessizce Belgeler klasörünü açıyor. Kullanıcının gördüğü davranış buydu.
+// MEASURED: Fyne's folder picker derives the path from a URI and returns it
+// with FORWARD SLASHES — picking "E:\x" writes "E:/x" into the box. Go's file
+// calls accept forward slashes, so the download lands in the right place and
+// the bug stays invisible; but explorer.exe doesn't accept them. When it
+// doesn't recognize the path it doesn't even fail, it silently opens the
+// Documents folder. That was the behavior the user saw.
 //
-// Clean ayrıca sondaki ayracı atıyor ve bu ikinci bir tuzağı kapatıyor:
-// "E:\x\" komut satırında explorer "E:\x\" olarak tırnaklanır, sondaki ters
-// çizgi kapanış tırnağını kaçırır ve explorer yine yolu tanımaz.
+// Clean also drops a trailing separator, which closes a second trap: on the
+// command line explorer gets "E:\x\" quoted, the trailing backslash escapes
+// the closing quote and explorer again doesn't recognize the path.
 //
-// Tırnaklar da soyuluyor: Windows'un "Yol olarak kopyala" komutu yolu
-// tırnak içinde veriyor ve yapıştıran herkes bunu fark etmiyor.
+// Quotes are stripped too: Windows' "Copy as path" command gives the path in
+// quotes and not everyone who pastes it notices.
 func normalizeDir(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, `"`)
@@ -31,20 +32,20 @@ func normalizeDir(s string) string {
 	if s == "" {
 		return ""
 	}
-	// Çıplak sürücü harfi ("E:") SÜRÜCÜYE GÖRELİ bir yoldur, kökü değil:
-	// Clean onu "E:." yapar, yani "E: sürücüsünün geçerli dizini". Bu, işlem
-	// durumuna bağlı bir yer; klasör kutusuna "E:" yazan kimse bunu kastetmez.
-	// Kök olarak yorumluyoruz.
+	// A bare drive letter ("E:") is a path RELATIVE TO THE DRIVE, not its
+	// root: Clean makes it "E:.", i.e. "the current directory of drive E:".
+	// That is a place depending on process state; nobody writing "E:" in the
+	// folder box means that. We interpret it as the root.
 	//
-	// VolumeName girdinin TAMAMINA eşitse elde yalnızca sürücü harfi var
-	// demektir ("E:"). "E:\", "E:/x" ve UNC yolları eşit olmaz, dokunulmaz.
+	// If VolumeName equals the WHOLE input we only have the drive letter
+	// ("E:"). "E:\", "E:/x" and UNC paths aren't equal and are left alone.
 	if s == filepath.VolumeName(s) {
 		s += string(filepath.Separator)
 	}
 	return filepath.Clean(filepath.FromSlash(s))
 }
 
-// defaultOutDir, makul bir başlangıç klasörü seçer.
+// defaultOutDir picks a reasonable starting folder.
 func defaultOutDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		d := filepath.Join(home, "Downloads")
@@ -58,14 +59,15 @@ func defaultOutDir() string {
 	return "."
 }
 
-// pickOpenTarget, "Klasörü aç" için en anlamlı hedefi seçer.
+// pickOpenTarget picks the most meaningful target for "Open folder".
 //
-// Sıra: son inen dosya (klasöründe SEÇİLİ) -> başlayan albümün klasörü ->
-// çıktı kökü. Çıktı kökü "E:\" iken dosyalar "E:\Albüm\" altına indiği için
-// kökü açmak kullanıcıya "yanlış klasör açıldı" görünüyordu; IDM'in yaptığı
-// gibi dosyanın kendisine gitmek doğru davranış.
+// Order: the last downloaded file (SELECTED in its folder) -> the folder of
+// the album that started -> the output root. When the output root is "E:\"
+// the files land under "E:\Album\", so opening the root looked to the user
+// like "the wrong folder opened"; going to the file itself, like IDM does, is
+// the right behavior.
 //
-// Klasör SESSİZCE OLUŞTURULMUYOR: yoksa sebebi söyleniyor.
+// The folder is NOT CREATED SILENTLY: if it is missing, the reason is given.
 func pickOpenTarget(lastPath, lastDir, outDir string) (target string, selectFile bool, reason string) {
 	if lastPath != "" {
 		if fi, err := os.Stat(lastPath); err == nil && !fi.IsDir() {
@@ -83,21 +85,21 @@ func pickOpenTarget(lastPath, lastDir, outDir string) (target string, selectFile
 	fi, err := os.Stat(outDir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return "", false, "Klasör henüz yok: " + outDir + " — indirme başlayınca oluşacak."
+		return "", false, "The folder doesn't exist yet: " + outDir + " — it will be created when a download starts."
 	case err != nil:
-		return "", false, "Klasöre erişilemedi: " + err.Error()
+		return "", false, "Could not access the folder: " + err.Error()
 	case !fi.IsDir():
-		return "", false, "Bu bir klasör değil: " + outDir
+		return "", false, "This is not a folder: " + outDir
 	}
-	// Göreli yol verilirse explorer onu KENDİ çalışma dizinine göre çözerdi.
+	// Given a relative path, explorer would resolve it against ITS OWN working directory.
 	if abs, aerr := filepath.Abs(outDir); aerr == nil {
 		outDir = abs
 	}
 	return outDir, false, ""
 }
 
-// parseLinks, metin alanını URL listesine çevirir.
-// Komut satırındaki -i dosyası ile AYNI kurallar: boş satır ve # atlanır.
+// parseLinks turns the text field into a URL list.
+// The SAME rules as the command line's -i file: blank lines and # are skipped.
 func parseLinks(text string) []string {
 	var out []string
 	for _, line := range strings.Split(text, "\n") {
@@ -146,8 +148,9 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f PB", v/unit)
 }
 
-// parseSpeedLimit, "2", "2.5", "0" gibi MB/s girdisini bayt/saniyeye çevirir.
-// Boş veya 0 sınırsız demek; anlaşılmayan girdi hata döner, sessizce 0 sayılmaz.
+// parseSpeedLimit converts MB/s input like "2", "2.5", "0" into bytes per
+// second. Empty or 0 means unlimited; input that can't be understood returns
+// an error instead of silently counting as 0.
 func parseSpeedLimit(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ReplaceAll(s, ",", "."))
 	if s == "" {
@@ -155,10 +158,10 @@ func parseSpeedLimit(s string) (int64, error) {
 	}
 	var mbps float64
 	if _, err := fmt.Sscanf(s, "%g", &mbps); err != nil {
-		return 0, fmt.Errorf("hız sınırı anlaşılamadı: %q", s)
+		return 0, fmt.Errorf("could not understand the speed limit: %q", s)
 	}
 	if mbps < 0 {
-		return 0, fmt.Errorf("hız sınırı negatif olamaz")
+		return 0, fmt.Errorf("the speed limit can't be negative")
 	}
 	return int64(mbps * 1024 * 1024), nil
 }

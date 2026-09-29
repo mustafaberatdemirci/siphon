@@ -6,16 +6,17 @@ import (
 	"syscall"
 )
 
-// shellCommand, satırı cmd.exe'ye verir.
+// shellCommand hands the line to cmd.exe.
 //
-// Go'nun argüman kaçışlaması cmd için yanlış: "/C" ve satırı ayrı argüman
-// verince satır boşluk içeriyorsa tırnaklanır ve cmd onu tek bir program adı
-// sanır. Bu yüzden komut satırı ham yazılıyor. /S ile cmd ilk ve son tırnağı
-// atıp arasını olduğu gibi işler; böylece kullanıcının satırı boşluklu yol
-// ve argüman içerse de bozulmaz: cmd /S /C "  "C:\vpn\degistir.bat" tr  ".
+// Go's argument escaping is wrong for cmd: passing "/C" and the line as
+// separate arguments quotes the line if it contains spaces, and cmd takes it
+// as a single program name. So the command line is written raw. With /S, cmd
+// strips the first and last quote and processes what's between as is; that
+// way the user's line survives even with paths and arguments containing
+// spaces: cmd /S /C "  "C:\vpn\switch.bat" us  ".
 //
-// HideWindow: GUI konsolsuz (windowsgui) derlendiği için her kota dolduğunda
-// siyah bir pencere fırlamasın.
+// HideWindow: the GUI is built without a console (windowsgui), so a black
+// window must not pop up every time the quota runs out.
 func shellCommand(ctx context.Context, line string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "cmd.exe")
 	cmd.SysProcAttr = &syscall.SysProcAttr{

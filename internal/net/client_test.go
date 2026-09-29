@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,12 +14,45 @@ import (
 
 func TestNewClientHasNoOverallTimeout(t *testing.T) {
 	c := NewClient()
-	// Client.Timeout govde okumayi da kapsar; gigabaytlik bir indirmeyi
-	// ortasindan keser. Bu alanin BOS kalmasi bilincli bir karar.
+	// Client.Timeout also covers reading the body; it would cut a
+	// multi-gigabyte download in the middle. Leaving this field EMPTY is a
+	// deliberate decision.
 	if c.Timeout != 0 {
-		t.Fatalf("Client.Timeout = %v, 0 olmaliydi (govde okumayi da kapsar)", c.Timeout)
+		t.Fatalf("Client.Timeout = %v, should be 0 (it also covers reading the body)", c.Timeout)
 	}
 }
+
+// IsTransient must recognize "network is unavailable right now" errors; it
+// must not recognize the user's cancellation or real server answers (404,
+// deleted).
+func TestIsTransient(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connectex: network is unreachable")}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"dns", &net.DNSError{Err: "no such host", Name: "x"}, true},
+		{"wrapped dns", &url.Error{Op: "Get", URL: "https://x", Err: &net.DNSError{Err: "no such host"}}, true},
+		{"connection", dial, true},
+		{"layered connection", fmt.Errorf("re-resolve: %w", &url.Error{Op: "Get", URL: "u", Err: dial}), true},
+		{"timeout", &url.Error{Op: "Get", URL: "u", Err: timeoutErr{}}, true},
+		{"canceled", &url.Error{Op: "Get", URL: "u", Err: context.Canceled}, false},
+		{"server answer", errors.New("API 400: file deleted"), false},
+	}
+	for _, c := range cases {
+		if got := IsTransient(c.err); got != c.want {
+			t.Errorf("%s: IsTransient = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 func TestHostLimiterCapsConcurrencyPerHost(t *testing.T) {
 	const limit = 2
@@ -30,7 +65,7 @@ func TestHostLimiterCapsConcurrencyPerHost(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			release, err := l.Acquire(context.Background(), "ornek.test")
+			release, err := l.Acquire(context.Background(), "example.test")
 			if err != nil {
 				t.Errorf("Acquire: %v", err)
 				return
@@ -50,15 +85,15 @@ func TestHostLimiterCapsConcurrencyPerHost(t *testing.T) {
 	wg.Wait()
 
 	if got := peak.Load(); got > limit {
-		t.Fatalf("en yuksek eszamanlilik %d, sinir %d", got, limit)
+		t.Fatalf("peak concurrency %d, limit %d", got, limit)
 	}
 	if peak.Load() < 2 {
-		t.Error("hic eszamanlilik olusmadi; test anlamsiz")
+		t.Error("no concurrency happened at all; the test is meaningless")
 	}
 }
 
-// Sinir HOST basina: farkli hostlar birbirini bloklamamali. Aksi halde bir
-// albumun CDN hostlari arasinda gereksiz daraltma olurdu.
+// The limit is PER HOST: different hosts must not block each other.
+// Otherwise there would be needless throttling across an album's CDN hosts.
 func TestHostLimiterIsPerHost(t *testing.T) {
 	l := NewHostLimiter(1)
 	rel1, err := l.Acquire(context.Background(), "a.test")
@@ -67,19 +102,19 @@ func TestHostLimiterIsPerHost(t *testing.T) {
 	}
 	defer rel1()
 
-	// Ayni host dolu: kisa ctx ile hemen zaman asimina dusmeli.
+	// Same host is full: a short ctx must time out right away.
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	if _, err := l.Acquire(ctx, "a.test"); err == nil {
-		t.Error("ayni host icin ikinci yuva verildi, sinir 1 olmasina ragmen")
+		t.Error("a second slot was handed out for the same host despite a limit of 1")
 	}
 
-	// Baska host serbest olmali.
+	// Another host must be free.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
 	defer cancel2()
 	rel2, err := l.Acquire(ctx2, "b.test")
 	if err != nil {
-		t.Fatalf("farkli host bloklandi: %v", err)
+		t.Fatalf("a different host was blocked: %v", err)
 	}
 	rel2()
 }
@@ -91,13 +126,13 @@ func TestHostLimiterReleaseIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
-	release() // iki kez cagirmak yuva sayisini bozmamali
+	release() // calling it twice must not corrupt the slot count
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	r2, err := l.Acquire(ctx, "a.test")
 	if err != nil {
-		t.Fatalf("yuva geri alinamadi: %v", err)
+		t.Fatalf("slot could not be reacquired: %v", err)
 	}
 	r2()
 }
@@ -106,12 +141,12 @@ func TestHostOf(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"https://pixeldrain.com/api/file/x", "pixeldrain.com"},
 		{"https://cdn.bunkr.ws:8443/a/b", "cdn.bunkr.ws:8443"},
-		{"bozuk url", "?"},
+		{"broken url", "?"},
 		{"", "?"},
 	}
 	for _, c := range cases {
 		if got := HostOf(c.in); got != c.want {
-			t.Errorf("HostOf(%q) = %q, beklenen %q", c.in, got, c.want)
+			t.Errorf("HostOf(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -119,19 +154,19 @@ func TestHostOf(t *testing.T) {
 func TestBackoffGrowsAndIsCapped(t *testing.T) {
 	b := Backoff{Base: 100 * time.Millisecond, Max: 2 * time.Second}
 
-	// Yarim jitter: bekleme [d/2, d) araliginda. Asla sifir olmamali, cunku
-	// sifir bir denemeyi bosa harcar.
+	// Half jitter: the delay is in [d/2, d). Never zero, because zero wastes
+	// an attempt.
 	for attempt := 0; attempt < 12; attempt++ {
 		d := b.Delay(attempt)
 		if d <= 0 {
-			t.Fatalf("Delay(%d) = %v; sifir bir denemeyi bosa harcar", attempt, d)
+			t.Fatalf("Delay(%d) = %v; zero wastes an attempt", attempt, d)
 		}
 		if d > b.Max {
-			t.Fatalf("Delay(%d) = %v, ust sinir %v", attempt, d, b.Max)
+			t.Fatalf("Delay(%d) = %v, cap %v", attempt, d, b.Max)
 		}
 	}
 
-	// Buyume: ilk denemelerin ortalamasi sonrakilerden kucuk olmali.
+	// Growth: the average of early attempts must be smaller than later ones.
 	avg := func(attempt int) time.Duration {
 		var total time.Duration
 		for i := 0; i < 200; i++ {
@@ -140,7 +175,7 @@ func TestBackoffGrowsAndIsCapped(t *testing.T) {
 		return total / 200
 	}
 	if avg(0) >= avg(3) {
-		t.Errorf("ustel buyume yok: attempt0=%v attempt3=%v", avg(0), avg(3))
+		t.Errorf("no exponential growth: attempt0=%v attempt3=%v", avg(0), avg(3))
 	}
 }
 
@@ -150,10 +185,10 @@ func TestBackoffJitterSpreadsValues(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		seen[b.Delay(2)] = true
 	}
-	// Sabit gecikme, ayni anda limite carpan istekleri ayni anda geri getirip
-	// suruyu yeniden olusturur. Jitter bunu dagitmak icin var.
+	// A fixed delay brings requests that hit the limit together back together
+	// and re-forms the herd. Jitter exists to spread them.
 	if len(seen) < 10 {
-		t.Fatalf("%d farkli deger uretildi; jitter calismiyor", len(seen))
+		t.Fatalf("only %d distinct values produced; jitter is not working", len(seen))
 	}
 }
 
@@ -161,7 +196,7 @@ func TestBackoffZeroValuesUseDefaults(t *testing.T) {
 	var b Backoff
 	d := b.Delay(0)
 	if d <= 0 || d > time.Minute {
-		t.Fatalf("varsayilanlar makul degil: %v", d)
+		t.Fatalf("defaults are not reasonable: %v", d)
 	}
 }
 
@@ -169,12 +204,12 @@ func TestBackoffZeroValuesUseDefaults(t *testing.T) {
 
 type retryableTestErr struct{ n int }
 
-func (e *retryableTestErr) Error() string   { return fmt.Sprintf("gecici %d", e.n) }
+func (e *retryableTestErr) Error() string   { return fmt.Sprintf("transient %d", e.n) }
 func (e *retryableTestErr) Retryable() bool { return true }
 
 type captchaTestErr struct{}
 
-func (captchaTestErr) Error() string         { return "captcha gerekli" }
+func (captchaTestErr) Error() string         { return "captcha required" }
 func (captchaTestErr) Retryable() bool       { return false }
 func (captchaTestErr) CaptchaRequired() bool { return true }
 
@@ -192,10 +227,10 @@ func TestPolicyRetriesThenExhausts(t *testing.T) {
 		return &retryableTestErr{n: attempt}
 	})
 	if !errors.Is(err, ErrExhausted) {
-		t.Fatalf("ErrExhausted bekleniyordu: %v", err)
+		t.Fatalf("expected ErrExhausted: %v", err)
 	}
 	if calls != 4 {
-		t.Fatalf("%d deneme yapildi, 4 bekleniyordu", calls)
+		t.Fatalf("%d attempts made, want 4", calls)
 	}
 }
 
@@ -209,14 +244,14 @@ func TestPolicySucceedsAfterRetry(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("basarili olmaliydi: %v", err)
+		t.Fatalf("should have succeeded: %v", err)
 	}
 	if calls != 3 {
-		t.Fatalf("%d deneme, 3 bekleniyordu", calls)
+		t.Fatalf("%d attempts, want 3", calls)
 	}
 }
 
-// Kalici hata tekrar denenmez: ayni cevabi getirir ve bant genisligi harcar.
+// A permanent error is not retried: it brings the same answer and wastes bandwidth.
 func TestPolicyPermanentErrorIsNotRetried(t *testing.T) {
 	permanent := errors.New("404 not found")
 	calls := 0
@@ -225,15 +260,15 @@ func TestPolicyPermanentErrorIsNotRetried(t *testing.T) {
 		return permanent
 	})
 	if !errors.Is(err, permanent) {
-		t.Fatalf("kalici hata aynen donmeliydi: %v", err)
+		t.Fatalf("the permanent error should be returned as is: %v", err)
 	}
 	if calls != 1 {
-		t.Fatalf("%d deneme yapildi, kalici hata 1 kez denenmeli", calls)
+		t.Fatalf("%d attempts made, a permanent error must be tried once", calls)
 	}
 }
 
-// Captcha her seyden once gelir: beklemek cozmez ve denemeye devam etmek
-// durumu kotulestirir. Kapsam siniri geregi captcha cozmuyoruz.
+// Captcha comes before everything: waiting doesn't solve it and continuing
+// makes things worse. By scope we don't solve captchas.
 func TestPolicyCaptchaStopsImmediately(t *testing.T) {
 	calls := 0
 	err := fastPolicy(5).Do(context.Background(), func(int) error {
@@ -241,10 +276,10 @@ func TestPolicyCaptchaStopsImmediately(t *testing.T) {
 		return captchaTestErr{}
 	})
 	if !errors.Is(err, ErrStop) {
-		t.Fatalf("ErrStop bekleniyordu: %v", err)
+		t.Fatalf("expected ErrStop: %v", err)
 	}
 	if calls != 1 {
-		t.Fatalf("%d deneme yapildi, captcha 1 kez denenmeli", calls)
+		t.Fatalf("%d attempts made, a captcha must be tried once", calls)
 	}
 }
 
@@ -262,14 +297,14 @@ func TestPolicyContextCancelStopsRetrying(t *testing.T) {
 		return &retryableTestErr{}
 	})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("context.Canceled bekleniyordu: %v", err)
+		t.Fatalf("expected context.Canceled: %v", err)
 	}
 	if calls > 3 {
-		t.Errorf("iptalden sonra %d deneme yapildi", calls)
+		t.Errorf("%d attempts made after cancellation", calls)
 	}
 }
 
-// MaxElapsed olmadan yavas bir hata 5 denemede saatler harcardi.
+// Without MaxElapsed a slow error would burn hours over 5 attempts.
 func TestPolicyMaxElapsedCutsWaiting(t *testing.T) {
 	start := time.Now()
 	calls := 0
@@ -283,13 +318,13 @@ func TestPolicyMaxElapsedCutsWaiting(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrExhausted) {
-		t.Fatalf("ErrExhausted bekleniyordu: %v", err)
+		t.Fatalf("expected ErrExhausted: %v", err)
 	}
 	if calls >= 20 {
-		t.Errorf("butce devreye girmedi: %d deneme", calls)
+		t.Errorf("the budget never kicked in: %d attempts", calls)
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("butce asildi: %v", elapsed)
+		t.Errorf("the budget was exceeded: %v", elapsed)
 	}
 }
 
@@ -300,7 +335,7 @@ func TestPolicyZeroAttemptsRunsOnce(t *testing.T) {
 		return &retryableTestErr{}
 	})
 	if calls != 1 {
-		t.Fatalf("%d deneme, sifir yapilandirmada 1 bekleniyordu", calls)
+		t.Fatalf("%d attempts, want 1 with a zero configuration", calls)
 	}
 }
 
@@ -308,6 +343,6 @@ func TestSleepRespectsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := Sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Fatalf("iptal edilmis ctx'te beklememeli: %v", err)
+		t.Fatalf("must not wait on a canceled ctx: %v", err)
 	}
 }

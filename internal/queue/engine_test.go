@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,28 +21,33 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
-// --- Sahte site ---
+// --- Fake site ---
 //
-// Tek httptest sunucusu N dosya sunuyor; her dosya Range destekli. "hold" ile
-// bir dosyanin govdesi ilk parcadan sonra askiya alinabiliyor (duraklatma ve
-// kapanis testleri icin).
+// A single httptest server serves N files; each file supports Range. With
+// "hold" a file's body can be suspended after the first chunk (for pause and
+// shutdown tests).
 
 type fakeSite struct {
 	t     *testing.T
 	srv   *httptest.Server
-	files map[string][]byte // ad -> icerik
+	files map[string][]byte // name -> content
 
 	mu     sync.Mutex
-	hold   map[string]chan struct{} // ad -> serbest birakma kanali
+	hold   map[string]chan struct{} // name -> release channel
 	hits   map[string]int
 	delay  time.Duration
-	forbid map[string]bool // ad -> 403 don (captcha simulasyonu)
-	quota  bool            // true ise her dosyaya 509 (mega kota simulasyonu)
+	forbid map[string]bool // name -> return 403 (captcha simulation)
+	quota  bool            // if true, 509 for every file (mega quota simulation)
+	// ranges records every request's Range header per file.
+	ranges map[string][]string
+	// gen plays mega's IP-bound URLs: a URL handed out before the last
+	// switchIP (an older ?gen=) is answered with 403.
+	gen int
 }
 
 func newFakeSite(t *testing.T, names ...string) *fakeSite {
 	t.Helper()
-	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}, forbid: map[string]bool{}}
+	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}, forbid: map[string]bool{}, ranges: map[string][]string{}}
 	for _, n := range names {
 		b := make([]byte, 96*1024)
 		_, _ = rand.Read(b)
@@ -71,12 +78,18 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.hits[name]++
+	f.ranges[name] = append(f.ranges[name], r.Header.Get("Range"))
+	stale := r.URL.Query().Get("gen") != fmt.Sprint(f.gen)
 	ch := f.hold[name]
 	delete(f.hold, name)
 	delay := f.delay
 	forbid := f.forbid[name]
 	quota := f.quota
 	f.mu.Unlock()
+	if stale {
+		http.Error(w, "URL bound to another IP", http.StatusForbidden)
+		return
+	}
 	if forbid {
 		http.Error(w, `{"value":"file_rate_limited_captcha_required"}`, http.StatusForbidden)
 		return
@@ -101,7 +114,7 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, name, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), bytes.NewReader(body))
 }
 
-// holdNext, adi verilen dosyanin bir SONRAKI istegini 32 KB'den sonra askiya alir.
+// holdNext suspends the NEXT request for the named file after 32 KB.
 func (f *fakeSite) holdNext(name string) chan struct{} {
 	ch := make(chan struct{})
 	f.mu.Lock()
@@ -116,28 +129,58 @@ func (f *fakeSite) setQuota(on bool) {
 	f.mu.Unlock()
 }
 
+// switchIP plays a VPN switch: the quota is open again and every URL handed out
+// so far expires (mega binds the download URL to the requesting IP).
+func (f *fakeSite) switchIP() {
+	f.mu.Lock()
+	f.gen++
+	f.quota = false
+	f.mu.Unlock()
+}
+
+// rangesOf returns the Range headers of every request made for the file.
+func (f *fakeSite) rangesOf(name string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ranges[name]...)
+}
+
 func (f *fakeSite) hitCount(name string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.hits[name]
 }
 
-// fakeResolver: "album://x" -> tum dosyalar; "file://<ad>" -> tek dosya.
+// fakeResolver: "album://x" -> every file; "file://<name>" -> a single file.
 type fakeResolver struct {
 	f       *fakeSite
-	captcha bool // true ise 403 "captcha gerekli" olarak siniflanir (pixeldrain gibi)
-	// quotaWait, 509'a eklenen sifirlanma suresi (mega'nin "uq" cevabi gibi).
+	captcha bool // if true a 403 is classified as "captcha required" (like pixeldrain)
+	// quotaWait is the reset time attached to the 509 (like mega's "uq" answer).
 	quotaWait time.Duration
 
 	mu          sync.Mutex
 	resolveOnes int
+	// failOnes/failErr: the next failOnes ResolveOne calls return failErr
+	// (no network, file deleted...).
+	failOnes int
+	failErr  error
+	// If prefix is set only "<prefix>album://" and "<prefix>file://" are
+	// recognized: to build two different sites in the same engine.
+	prefix string
 }
 
-// fakeCaptchaErr, site.StatusClassifier'in captcha sinyali: politika bunu
-// gorunce ErrStop ile kosuyu durdurur.
+// failNextResolveOne fails the next n re-resolutions with err.
+func (r *fakeResolver) failNextResolveOne(n int, err error) {
+	r.mu.Lock()
+	r.failOnes, r.failErr = n, err
+	r.mu.Unlock()
+}
+
+// fakeCaptchaErr is site.StatusClassifier's captcha signal: seeing it, the
+// policy stops the run with ErrStop.
 type fakeCaptchaErr struct{}
 
-func (fakeCaptchaErr) Error() string         { return "captcha gerekli (sahte)" }
+func (fakeCaptchaErr) Error() string         { return "captcha required (fake)" }
 func (fakeCaptchaErr) CaptchaRequired() bool { return true }
 
 func (r *fakeResolver) ClassifyStatus(resp *http.Response, _ []byte) error {
@@ -145,7 +188,7 @@ func (r *fakeResolver) ClassifyStatus(resp *http.Response, _ []byte) error {
 		return fakeCaptchaErr{}
 	}
 	if resp.StatusCode == 509 {
-		return &site.QuotaError{Wait: r.quotaWait, Err: site.Errorf(site.LayerCDN, "fake", "kota doldu (sahte 509)")}
+		return &site.QuotaError{Wait: r.quotaWait, Err: site.Errorf(site.LayerCDN, "fake", "quota exceeded (fake 509)")}
 	}
 	return nil
 }
@@ -157,20 +200,29 @@ func (r *fakeResolver) resolveOneCount() int {
 }
 
 func (r *fakeResolver) Match(u string) bool {
+	if !strings.HasPrefix(u, r.prefix) {
+		return false
+	}
+	u = strings.TrimPrefix(u, r.prefix)
 	return strings.HasPrefix(u, "album://") || strings.HasPrefix(u, "file://")
 }
 
+// item resolves a file; its URL carries the current "IP" (see fakeSite.gen).
 func (r *fakeResolver) item(name string) site.Item {
+	r.f.mu.Lock()
+	gen := r.f.gen
+	r.f.mu.Unlock()
 	return site.Item{
-		URL:        r.f.srv.URL + "/f/" + name,
+		URL:        r.f.srv.URL + "/f/" + name + "?gen=" + fmt.Sprint(gen),
 		SourcePage: "file://" + name,
-		Dir:        "Albüm",
+		Dir:        "Album",
 		Filename:   name,
 		Size:       int64(len(r.f.files[name])),
 	}
 }
 
 func (r *fakeResolver) Resolve(ctx context.Context, u string, yield func(site.Item) error) ([]site.ItemError, error) {
+	u = strings.TrimPrefix(u, r.prefix)
 	if strings.HasPrefix(u, "file://") {
 		return nil, yield(r.item(strings.TrimPrefix(u, "file://")))
 	}
@@ -178,7 +230,7 @@ func (r *fakeResolver) Resolve(ctx context.Context, u string, yield func(site.It
 	for n := range r.f.files {
 		names = append(names, n)
 	}
-	// deterministik sira
+	// deterministic order
 	for i := 0; i < len(names); i++ {
 		for j := i + 1; j < len(names); j++ {
 			if names[j] < names[i] {
@@ -199,17 +251,23 @@ func (r *fakeResolver) Resolve(ctx context.Context, u string, yield func(site.It
 func (r *fakeResolver) ResolveOne(ctx context.Context, sourcePage string) (site.Item, error) {
 	r.mu.Lock()
 	r.resolveOnes++
+	if r.failOnes > 0 {
+		r.failOnes--
+		err := r.failErr
+		r.mu.Unlock()
+		return site.Item{}, err
+	}
 	r.mu.Unlock()
 	name := strings.TrimPrefix(sourcePage, "file://")
 	if _, ok := r.f.files[name]; !ok {
-		return site.Item{}, fmt.Errorf("yok: %s", name)
+		return site.Item{}, fmt.Errorf("missing: %s", name)
 	}
 	return r.item(name), nil
 }
 
 func (r *fakeResolver) Diagnose(context.Context) ([]site.LayerResult, error) { return nil, nil }
 
-// --- Yardimcilar ---
+// --- Helpers ---
 
 type harness struct {
 	t      *testing.T
@@ -258,11 +316,11 @@ func (h *harness) stop() {
 	select {
 	case <-h.done:
 	case <-time.After(10 * time.Second):
-		h.t.Fatal("motor 10 sn'de kapanmadi")
+		h.t.Fatal("the engine did not shut down within 10 s")
 	}
 }
 
-// waitState, id'li isin verilen duruma gelmesini bekler.
+// waitState waits for the job with id to reach the given state.
 func (h *harness) waitState(id string, want State, timeout time.Duration) Job {
 	h.t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -280,7 +338,7 @@ func (h *harness) waitState(id string, want State, timeout time.Duration) Job {
 			got = j.State
 		}
 	}
-	h.t.Fatalf("is %s %s durumuna gelmedi (%v icinde); su an: %s", id, want, timeout, got)
+	h.t.Fatalf("job %s did not reach %s (within %v); now: %s", id, want, timeout, got)
 	return Job{}
 }
 
@@ -301,7 +359,7 @@ func (h *harness) waitAll(want State, timeout time.Duration) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	h.t.Fatalf("tum isler %s olmadi: %+v", want, states(h.e.Jobs()))
+	h.t.Fatalf("not every job reached %s: %+v", want, states(h.e.Jobs()))
 }
 
 func states(jobs []Job) map[string]State {
@@ -321,7 +379,7 @@ func jobByName(e *Engine, name string) Job {
 	return Job{}
 }
 
-// --- Testler ---
+// --- Tests ---
 
 func TestAddResolvesAndDownloads(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
@@ -336,19 +394,19 @@ func TestAddResolvesAndDownloads(t *testing.T) {
 	h.waitAll(StateDone, 10*time.Second)
 
 	for name, want := range f.files {
-		got, err := os.ReadFile(filepath.Join(h.out, "Albüm", name))
+		got, err := os.ReadFile(filepath.Join(h.out, "Album", name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if !bytes.Equal(got, want) {
-			t.Fatalf("%s icerigi bozuk", name)
+			t.Fatalf("%s content is corrupt", name)
 		}
 	}
-	// Kayit yazilmis olmali.
+	// The ledger must have been written.
 	if _, err := os.Stat(filepath.Join(h.out, "done.jsonl")); err != nil {
-		t.Error("kayit dosyasi yok")
+		t.Error("no ledger file")
 	}
-	// Olay akisi: her is queued -> running -> done gormeli.
+	// Event flow: every job must see queued -> running -> done.
 	h.mu.Lock()
 	seen := map[string]map[State]bool{}
 	for _, ev := range h.events {
@@ -360,16 +418,16 @@ func TestAddResolvesAndDownloads(t *testing.T) {
 	h.mu.Unlock()
 	for id, m := range seen {
 		if !m[StateQueued] || !m[StateRunning] || !m[StateDone] {
-			t.Errorf("is %s icin olaylar eksik: %v", id, m)
+			t.Errorf("missing events for job %s: %v", id, m)
 		}
 	}
 }
 
-// Ayni linki iki kez eklemek kuyrugu cogaltmamali.
+// Adding the same link twice must not duplicate the queue.
 func TestAddIsIdempotent(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin")
 	h := newHarness(t, f, "", 1)
-	// Motoru baslatmadan ekle: isler queued kalsin.
+	// Add without starting the engine: the jobs stay queued.
 	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
 		t.Fatal(err)
 	}
@@ -378,12 +436,13 @@ func TestAddIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 0 || len(h.e.Jobs()) != 2 {
-		t.Fatalf("ikinci ekleme %d yeni is uretti, kuyrukta %d is", n, len(h.e.Jobs()))
+		t.Fatalf("the second add produced %d new jobs, %d jobs in the queue", n, len(h.e.Jobs()))
 	}
 }
 
-// Calisan isi duraklat: .part kalmali, durum Paused; devam edince kaldigi
-// yerden bitmeli (sunucu Range gormeli, bastan indirmemeli).
+// Pause a running job: the .part must stay, the state Paused; on resume it
+// must finish from where it stopped (the server must see a Range, no
+// download from scratch).
 func TestPauseThenResumeContinuesFromPart(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	h := newHarness(t, f, "", 1)
@@ -395,41 +454,41 @@ func TestPauseThenResumeContinuesFromPart(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := h.waitState(jobByName(h.e, "a.bin").ID, StateRunning, 5*time.Second)
-	// Ilk 32 KB'nin diske inmesi icin kisa bir sure.
+	// A short while for the first 32 KB to reach the disk.
 	time.Sleep(300 * time.Millisecond)
 
 	h.e.Pause(j.ID)
 	close(hold)
 	j = h.waitState(j.ID, StatePaused, 5*time.Second)
 
-	part := filepath.Join(h.out, "Albüm", "a.bin.part")
+	part := filepath.Join(h.out, "Album", "a.bin.part")
 	fi, err := os.Stat(part)
 	if err != nil {
-		t.Fatalf(".part yok: %v", err)
+		t.Fatalf("no .part: %v", err)
 	}
 	if fi.Size() <= 0 || fi.Size() >= int64(len(f.files["a.bin"])) {
-		t.Fatalf(".part boyutu %d: kismi ilerleme bekleniyordu", fi.Size())
+		t.Fatalf(".part size %d: partial progress expected", fi.Size())
 	}
 	if j.Path == "" || filepath.Base(j.Path) != "a.bin" {
-		t.Errorf("duraklayan isin yolu kaydedilmemis: %q", j.Path)
+		t.Errorf("the paused job's path was not recorded: %q", j.Path)
 	}
 
 	h.e.Resume(j.ID)
 	h.waitState(j.ID, StateDone, 10*time.Second)
 
-	got, _ := os.ReadFile(filepath.Join(h.out, "Albüm", "a.bin"))
+	got, _ := os.ReadFile(filepath.Join(h.out, "Album", "a.bin"))
 	if !bytes.Equal(got, f.files["a.bin"]) {
-		t.Fatal("devam sonrasi icerik bozuk")
+		t.Fatal("content corrupted after resume")
 	}
 	if _, err := os.Stat(part); !os.IsNotExist(err) {
-		t.Error("tamamlanan isin .part'i kaldi")
+		t.Error("the completed job's .part remained")
 	}
 	if f.hitCount("a.bin") != 2 {
-		t.Errorf("sunucu %d kez cagrildi, 2 bekleniyordu (1 kesik + 1 devam)", f.hitCount("a.bin"))
+		t.Errorf("the server was called %d times, want 2 (1 cut + 1 resume)", f.hitCount("a.bin"))
 	}
 }
 
-// Siradaki (henuz baslamamis) isi duraklatmak onu atlamali; digerleri akmali.
+// Pausing a queued (not yet started) job must skip it; the others must flow.
 func TestPauseQueuedJobIsSkippedByDispatcher(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin")
 	h := newHarness(t, f, "", 1)
@@ -443,11 +502,11 @@ func TestPauseQueuedJobIsSkippedByDispatcher(t *testing.T) {
 
 	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
 	if got := jobByName(h.e, "a.bin").State; got != StatePaused {
-		t.Fatalf("duraklatilan is %s oldu, paused kalmaliydi", got)
+		t.Fatalf("the paused job became %s, it should have stayed paused", got)
 	}
 }
 
-// Kaldir + dosyalari sil: .part ve state gitmeli, is listeden dusmeli.
+// Remove + delete files: the .part and state must go, the job must drop from the list.
 func TestRemoveRunningJobWipesPartial(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	h := newHarness(t, f, "", 1)
@@ -465,7 +524,7 @@ func TestRemoveRunningJobWipesPartial(t *testing.T) {
 	close(hold)
 
 	deadline := time.Now().Add(5 * time.Second)
-	part := filepath.Join(h.out, "Albüm", "a.bin.part")
+	part := filepath.Join(h.out, "Album", "a.bin.part")
 	for time.Now().Before(deadline) {
 		_, perr := os.Stat(part)
 		_, serr := os.Stat(part + ".state")
@@ -474,10 +533,10 @@ func TestRemoveRunningJobWipesPartial(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("kaldirilan isin dosyalari kaldi veya is listede: %d is", len(h.e.Jobs()))
+	t.Fatalf("the removed job's files remained or the job is still listed: %d jobs", len(h.e.Jobs()))
 }
 
-// MaxActive ayni anda calisan is sayisini sinirlamali.
+// MaxActive must limit the number of jobs running at the same time.
 func TestMaxActiveIsRespected(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin", "d.bin", "e.bin")
 	f.delay = 150 * time.Millisecond
@@ -510,15 +569,15 @@ func TestMaxActiveIsRespected(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if maxSeen > 2 {
-		t.Fatalf("ayni anda %d is calisti, en fazla 2 olmaliydi", maxSeen)
+		t.Fatalf("%d jobs ran at the same time, should be at most 2", maxSeen)
 	}
 	if maxSeen == 0 {
-		t.Fatal("hic calisan is gorulmedi")
+		t.Fatal("no running job was ever seen")
 	}
 }
 
-// Kapanis: calisan is iptal edilir, kuyruk dosyasina "queued" yazilir, yeni
-// motor onu okuyup kaldigi yerden bitirir.
+// Shutdown: the running job is canceled, "queued" is written to the queue
+// file, and a new engine reads it and finishes from where it stopped.
 func TestPersistenceAcrossRestart(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin")
 	statePath := filepath.Join(testutil.TempDir(t), "queue.json")
@@ -531,41 +590,41 @@ func TestPersistenceAcrossRestart(t *testing.T) {
 	}
 	h.waitState(jobByName(h.e, "a.bin").ID, StateRunning, 5*time.Second)
 	time.Sleep(300 * time.Millisecond)
-	h.stop() // kapanis: a.bin iptal edilir
+	h.stop() // shutdown: a.bin is canceled
 	close(hold)
 
 	raw, err := os.ReadFile(statePath)
 	if err != nil {
-		t.Fatalf("kuyruk dosyasi yok: %v", err)
+		t.Fatalf("no queue file: %v", err)
 	}
 	if !strings.Contains(string(raw), `"a.bin"`) || !strings.Contains(string(raw), `"b.bin"`) {
-		t.Fatalf("kuyruk dosyasi isleri icermiyor: %s", raw)
+		t.Fatalf("the queue file doesn't contain the jobs: %s", raw)
 	}
 	if strings.Contains(string(raw), `"running"`) {
-		t.Fatal("kapanista running yazilmis; queued olmaliydi")
+		t.Fatal("running was written at shutdown; it should have been queued")
 	}
 
-	// Yeni motor, ayni dosya: iki is de bitmeli, a.bin devam etmeli.
+	// A new engine, the same file: both jobs must finish, a.bin must continue.
 	h2 := newHarness(t, f, statePath, 1)
 	h2.out = h.out
 	if len(h2.e.Jobs()) != 2 {
-		t.Fatalf("yeniden acilista %d is, 2 bekleniyordu", len(h2.e.Jobs()))
+		t.Fatalf("%d jobs on reopen, want 2", len(h2.e.Jobs()))
 	}
 	h2.start()
 	defer h2.stop()
 	h2.waitAll(StateDone, 15*time.Second)
 	for name, want := range f.files {
-		got, _ := os.ReadFile(filepath.Join(h.out, "Albüm", name))
+		got, _ := os.ReadFile(filepath.Join(h.out, "Album", name))
 		if !bytes.Equal(got, want) {
-			t.Fatalf("%s yeniden acilis sonrasi bozuk", name)
+			t.Fatalf("%s is corrupt after the reopen", name)
 		}
 	}
 }
 
-// Kuyruk dosyasi bozuksa uygulama acilmali (bos kuyruk) ve bunu soylemeli.
+// If the queue file is corrupt the app must open (empty queue) and say so.
 func TestCorruptStateFileStartsEmpty(t *testing.T) {
 	statePath := filepath.Join(testutil.TempDir(t), "queue.json")
-	if err := os.WriteFile(statePath, []byte("{bozuk"), 0o600); err != nil {
+	if err := os.WriteFile(statePath, []byte("{corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f := newFakeSite(t, "a.bin")
@@ -577,17 +636,17 @@ func TestCorruptStateFileStartsEmpty(t *testing.T) {
 		Events: runEvents(func(s string) { logged = append(logged, s) }),
 	})
 	if err != nil {
-		t.Fatalf("bozuk kuyruk motoru acilmaz yapti: %v", err)
+		t.Fatalf("a corrupt queue kept the engine from opening: %v", err)
 	}
 	if len(e.Jobs()) != 0 {
-		t.Fatal("bozuk dosyadan is okundu")
+		t.Fatal("jobs were read from a corrupt file")
 	}
-	if len(logged) == 0 || !strings.Contains(logged[0], "bozuk") {
-		t.Errorf("bozuk kuyruk bildirilmedi: %v", logged)
+	if len(logged) == 0 || !strings.Contains(logged[0], "corrupt") {
+		t.Errorf("the corrupt queue was not reported: %v", logged)
 	}
 }
 
-// PauseAll yeni is baslatmayi kesmeli; ResumeAll hepsini geri koymali.
+// PauseAll must stop starting new jobs; ResumeAll must put them all back.
 func TestPauseAllResumeAll(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
 	f.delay = 100 * time.Millisecond
@@ -602,7 +661,7 @@ func TestPauseAllResumeAll(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	for _, j := range h.e.Jobs() {
 		if j.State == StateRunning || j.State == StateDone {
-			t.Fatalf("PauseAll acikken is ilerledi: %s %s", j.Filename, j.State)
+			t.Fatalf("a job progressed while PauseAll was on: %s %s", j.Filename, j.State)
 		}
 	}
 	if !h.e.Paused() {
@@ -612,13 +671,13 @@ func TestPauseAllResumeAll(t *testing.T) {
 	h.waitAll(StateDone, 15*time.Second)
 }
 
-// Hiz siniri motora yansimali ve kaldirilabilmeli.
+// The speed limit must reach the engine and be removable.
 func TestSpeedLimitIsApplied(t *testing.T) {
 	f := newFakeSite(t, "a.bin") // 96 KB
 	h := newHarness(t, f, "", 1)
-	h.e.SetSpeedLimit(192 * 1024) // 2 saniyede 96 KB -> ~0.5 sn
+	h.e.SetSpeedLimit(192 * 1024) // 96 KB in 2 seconds -> ~0.5 s
 	if h.e.SpeedLimit() != 192*1024 {
-		t.Fatal("sinir okunamadi")
+		t.Fatal("could not read the limit")
 	}
 	h.start()
 	defer h.stop()
@@ -629,11 +688,11 @@ func TestSpeedLimitIsApplied(t *testing.T) {
 	}
 	h.waitState(jobByName(h.e, "a.bin").ID, StateDone, 10*time.Second)
 	if el := time.Since(start); el < 350*time.Millisecond {
-		t.Fatalf("sinirli indirme %v surdu; sinir uygulanmamis", el)
+		t.Fatalf("the limited download took %v; the limit was not applied", el)
 	}
 }
 
-// Ikinci ekleme: zaten inen dosya "skipped" olmali, yeniden inmemeli.
+// Second add: an already downloaded file must be "skipped", not downloaded again.
 func TestSecondRunSkipsCompleted(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	statePath := filepath.Join(testutil.TempDir(t), "queue.json")
@@ -655,26 +714,26 @@ func TestSecondRunSkipsCompleted(t *testing.T) {
 	}
 	h2.waitState(jobByName(h2.e, "a.bin").ID, StateSkipped, 10*time.Second)
 	if f.hitCount("a.bin") != 1 {
-		t.Errorf("dosya %d kez indirildi, 1 bekleniyordu", f.hitCount("a.bin"))
+		t.Errorf("the file was downloaded %d times, want 1", f.hitCount("a.bin"))
 	}
 }
 
-// Ayni item icin ikinci Add, calisan isi bozmamali.
+// A second Add for the same item must not break the running job.
 func TestJobIDIsStable(t *testing.T) {
 	a := jobID("E:\\x", "https://s/f/1", "Alb", "a.mp4")
 	b := jobID("E:\\x", "https://s/f/1", "Alb", "a.mp4")
 	c := jobID("E:\\y", "https://s/f/1", "Alb", "a.mp4")
 	if a != b || a == c || len(a) != 16 {
-		t.Fatalf("kimlikler: %s %s %s", a, b, c)
+		t.Fatalf("ids: %s %s %s", a, b, c)
 	}
 }
 
-// runEvents, Errorf'u verilen fonksiyona baglayan minimal Events.
+// runEvents is a minimal Events wiring Errorf to the given function.
 func runEvents(errorf func(string)) run.Events {
 	return run.Events{Errorf: func(f string, a ...any) { errorf(fmt.Sprintf(f, a...)) }}
 }
 
-// Kullanici ayari site tavanini asamaz; 1 parcaliyi kapatir.
+// The user setting can't exceed the site ceiling; 1 turns segmenting off.
 func TestSetSegmentsRespectsSiteCap(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	cfg := site.SiteConfig{Name: "fake", MaxSegments: 3}.WithDefaults()
@@ -682,34 +741,34 @@ func TestSetSegmentsRespectsSiteCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Varsayilan istek 4, tavan 3 -> etkin 3.
+	// Default request 4, ceiling 3 -> effective 3.
 	if got := e.workers["fake"].Down.Segments; got != 3 {
-		t.Errorf("varsayilanda etkin parca = %d, 3 bekleniyordu", got)
+		t.Errorf("effective segments by default = %d, want 3", got)
 	}
 	e.SetSegments(8)
 	if got := e.workers["fake"].Down.Segments; got != 3 {
-		t.Errorf("8 istenince etkin = %d, tavan 3 olmaliydi", got)
+		t.Errorf("effective with 8 requested = %d, the ceiling 3 should apply", got)
 	}
 	e.SetSegments(2)
 	if got := e.workers["fake"].Down.Segments; got != 2 {
-		t.Errorf("2 istenince etkin = %d", got)
+		t.Errorf("effective with 2 requested = %d", got)
 	}
 	e.SetSegments(0)
 	if got := e.workers["fake"].Down.Segments; got != 1 || e.Segments() != 1 {
-		t.Errorf("0 istenince etkin = %d, istek = %d; ikisi de 1 olmaliydi", got, e.Segments())
+		t.Errorf("effective with 0 requested = %d, requested = %d; both should be 1", got, e.Segments())
 	}
 }
 
-// KULLANICININ YASADIGI: captcha kuyrugu durdurdu, VPN degistirdi, ise
-// tekrar basti -> is "sirada" gorunuyor ama hic baslamiyordu, cunku genel
-// duraklatma acikti. Tek bir isin "devam"i captcha duraklatmasini kaldirmali.
+// WHAT THE USER EXPERIENCED: a captcha stopped the queue, they switched VPN
+// and pressed the job again -> it showed "queued" but never started, because
+// the global pause was on. Resuming a single job must lift the captcha hold.
 func TestCaptchaPauseIsClearedBySingleResume(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin")
 	f.mu.Lock()
 	f.forbid["a.bin"] = true
 	f.mu.Unlock()
 	h := newHarness(t, f, "", 1)
-	// resolver'i captcha kipine al
+	// put the resolver into captcha mode
 	h.e.resolvers[0].(*fakeResolver).captcha = true
 	h.e.workers["fake"] = newWorkerFor(t, h, true)
 	h.start()
@@ -719,24 +778,79 @@ func TestCaptchaPauseIsClearedBySingleResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := h.waitState(jobByName(h.e, "a.bin").ID, StateStopped, 10*time.Second)
-	if !h.e.Paused() || !h.e.PausedByCaptcha() {
-		t.Fatal("captcha sonrasi genel duraklatma acilmadi")
+	if got := h.e.CaptchaHeld(); len(got) != 1 || got[0] != "fake" {
+		t.Fatalf("the site was not held after the captcha: %v", got)
+	}
+	// A new job of the same site must not start while the hold lasts.
+	if _, err := h.e.Add(context.Background(), "file://b.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if f.hitCount("b.bin") != 0 {
+		t.Fatal("a job of the same site started while the captcha hold was on")
 	}
 
-	// "VPN degistirdi": sunucu artik izin veriyor. Kullanici tek ise ▶ basiyor.
+	// "They switched VPN": the server allows it now. The user presses ▶ on the single job.
 	f.mu.Lock()
 	f.forbid["a.bin"] = false
 	f.mu.Unlock()
 	h.e.Resume(a.ID)
 
 	h.waitState(a.ID, StateDone, 10*time.Second)
-	if h.e.Paused() {
-		t.Error("tek isin devami captcha duraklatmasini kaldirmadi")
+	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
+	if got := h.e.CaptchaHeld(); len(got) != 0 {
+		t.Errorf("resuming a single job did not lift the captcha hold: %v", got)
 	}
 }
 
-// Kullanicinin KENDI "Tumunu duraklat"i ise tek bir isin devamiyla kalkmamali:
-// niyet farkli, digerleri duraklatilmis kalmali.
+// A captcha is SITE-specific (pixeldrain's per-file counter): a global pause
+// used to be switched on and other sites' (mega, bunkr) jobs stopped for nothing.
+func TestCaptchaHoldsOnlyThatSite(t *testing.T) {
+	fa := newFakeSite(t, "a.bin", "a2.bin")
+	fb := newFakeSite(t, "b.bin")
+	fa.forbid["a.bin"] = true
+	ra := &fakeResolver{f: fa, captcha: true, prefix: "px+"}
+	rb := &fakeResolver{f: fb, prefix: "mg+"}
+	e, err := New(Options{
+		MaxActive: 1,
+		Client:    fa.srv.Client(),
+		Resolvers: []site.Resolver{ra, rb},
+		Configs: []site.SiteConfig{
+			site.SiteConfig{Name: "px", MaxConcurrent: 8, MaxRetries: 2}.WithDefaults(),
+			site.SiteConfig{Name: "mg", MaxConcurrent: 8, MaxRetries: 2}.WithDefaults(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{t: t, e: e, out: testutil.TempDir(t)}
+	h.start()
+	defer h.stop()
+
+	if _, err := e.Add(context.Background(), "px+file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.waitState(jobByName(e, "a.bin").ID, StateStopped, 10*time.Second)
+
+	for _, u := range []string{"px+file://a2.bin", "mg+file://b.bin"} {
+		if _, err := e.Add(context.Background(), u, h.out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.waitState(jobByName(e, "b.bin").ID, StateDone, 10*time.Second)
+	if e.Paused() {
+		t.Error("the captcha switched on the global pause")
+	}
+	if fa.hitCount("a2.bin") != 0 {
+		t.Error("a job of the site under captcha started")
+	}
+	if got := e.CaptchaHeld(); len(got) != 1 || got[0] != "px" {
+		t.Errorf("held sites %v, want [px]", got)
+	}
+}
+
+// The user's OWN "Pause all", however, must not lift with a single job's
+// resume: the intent differs, the others must stay paused.
 func TestUserPauseAllSurvivesSingleResume(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin")
 	h := newHarness(t, f, "", 1)
@@ -748,15 +862,124 @@ func TestUserPauseAllSurvivesSingleResume(t *testing.T) {
 	h.e.Pause(a.ID) // queued -> paused
 	h.e.Resume(a.ID)
 	if !h.e.Paused() {
-		t.Fatal("kullanicinin genel duraklatmasi tek isin devamiyla kalkti")
+		t.Fatal("the user's global pause lifted with a single job's resume")
 	}
-	if h.e.PausedByCaptcha() {
-		t.Fatal("kullanici duraklatmasi captcha sanildi")
+	if len(h.e.CaptchaHeld()) != 0 {
+		t.Fatal("the user's pause was taken for a captcha")
 	}
 }
 
-// newWorkerFor, sahte resolver'in ClassifyStatus'unu tasiyan bir Worker kurar
-// (harness varsayilan olarak captcha'siz resolver ile kuruluyor).
+// --- Network outage ---
+
+// netDown is the error when the local network is unavailable (Wi-Fi connecting, VPN switching).
+var netDown = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connectex: network is unreachable")}
+
+// forgetItems forgets the resolved items as if the app had been reopened:
+// jobs have to go through ResolveOne when they start.
+func forgetItems(e *Engine) {
+	e.mu.Lock()
+	e.items = map[string]site.Item{}
+	e.mu.Unlock()
+}
+
+func (h *harness) sawState(id string, s State) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, ev := range h.events {
+		if ev.ID == id && ev.State == s {
+			return true
+		}
+	}
+	return false
+}
+
+// WHAT THE USER WOULD EXPERIENCE: the app opened before the network. Every
+// job used to fall into "failed" at ResolveOne right away, the next started
+// and fell too; within seconds the whole queue was "failed" and each had to be
+// pressed ▶ one by one. A network error must not fail the job: it must stay
+// queued and wait.
+func TestTransientResolveErrorKeepsJobsQueued(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	h := newHarness(t, f, "", 1)
+	h.e.opt.NetRetryBase = 20 * time.Millisecond
+	var mu sync.Mutex
+	var notices []string
+	h.e.opt.OnNotice = func(s string) { mu.Lock(); notices = append(notices, s); mu.Unlock() }
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	forgetItems(h.e)
+	h.e.workers["fake"].Resolver.(*fakeResolver).failNextResolveOne(3, netDown)
+	h.start()
+	defer h.stop()
+
+	h.waitAll(StateDone, 10*time.Second)
+	for _, j := range h.e.Jobs() {
+		if h.sawState(j.ID, StateFailed) {
+			t.Errorf("%s fell into 'failed' on a network error", j.Filename)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, n := range notices {
+		if strings.Contains(n, "network") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the network error was not reported to the user: %v", notices)
+	}
+}
+
+// A real answer from the server (file deleted) is NOT a network error:
+// waiting doesn't fix it, "failed" right away as before.
+func TestPermanentResolveErrorStillFails(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	h := newHarness(t, f, "", 1)
+	h.e.opt.NetRetryBase = 20 * time.Millisecond
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	forgetItems(h.e)
+	r := h.e.workers["fake"].Resolver.(*fakeResolver)
+	r.failNextResolveOne(100, errors.New("file deleted"))
+	h.start()
+	defer h.stop()
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateFailed, 5*time.Second)
+	if got := r.resolveOneCount(); got != 1 {
+		t.Errorf("the permanent error was tried %d times, want 1", got)
+	}
+
+	// "Retry failed": the file is back.
+	r.failNextResolveOne(0, nil)
+	h.e.RetryFailed()
+	h.waitState(a.ID, StateDone, 10*time.Second)
+}
+
+// If the network never comes back the job must not stay "queued" forever:
+// when the backoff budget runs out it falls into "failed" as before and the
+// user sees it.
+func TestTransientResolveGivesUpEventually(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	h := newHarness(t, f, "", 1)
+	h.e.opt.NetRetryBase = time.Millisecond
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	forgetItems(h.e)
+	r := h.e.workers["fake"].Resolver.(*fakeResolver)
+	r.failNextResolveOne(1000, netDown)
+	h.start()
+	defer h.stop()
+	h.waitState(jobByName(h.e, "a.bin").ID, StateFailed, 10*time.Second)
+	if got := r.resolveOneCount(); got != maxNetFails+1 {
+		t.Errorf("%d attempts made, want %d", got, maxNetFails+1)
+	}
+}
+
+// newWorkerFor builds a Worker carrying the fake resolver's ClassifyStatus
+// (the harness is built with a captcha-free resolver by default).
 func newWorkerFor(t *testing.T, h *harness, captcha bool) *run.Worker {
 	t.Helper()
 	return newWorkerWith(t, h, &fakeResolver{f: h.f, captcha: captcha})
@@ -769,15 +992,15 @@ func newWorkerWith(t *testing.T, h *harness, r *fakeResolver) *run.Worker {
 	return run.NewWorker(r, cfg, h.f.srv.Client(), ev)
 }
 
-// --- Kota (mega 509) ---
+// --- Quota (mega 509) ---
 
-// Kota dolunca is HATA degil BEKLEME'ye dusmeli, ayni sitenin siradakileri de
-// beklemeli (hepsi ayni 509'u alacakti), ve sitenin bildirdigi surede
-// kendiliginden yeniden denenmeli. Yeniden deneme TAZE cozumlemeyle yapilir:
-// mega'nin indirme adresi isteyen IP'ye bagli.
+// When the quota runs out the job must fall into WAITING, not FAILED; the
+// same site's queued jobs must wait too (they'd all get the same 509), and it
+// must be retried by itself at the time the site reported. The retry is done
+// with a FRESH resolution: mega's download URL is bound to the requesting IP.
 //
-// Kullanicinin gordugu: "hata: mega aktarim kotasi doldu" satirlari oylece
-// kaliyor, digerleri inerken bunlar hic denenmiyordu.
+// What the user saw: "failed: mega transfer quota exceeded" rows just sat
+// there and were never retried while the others downloaded.
 func TestQuotaPutsSiteOnHoldAndRetriesAtResetTime(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
 	f.setQuota(true)
@@ -792,36 +1015,37 @@ func TestQuotaPutsSiteOnHoldAndRetriesAtResetTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
-	if !strings.Contains(a.Error, "kota") {
-		t.Errorf("bekleyen isin sebebi yok: %q", a.Error)
+	if !strings.Contains(a.Error, "quota") {
+		t.Errorf("the waiting job has no reason: %q", a.Error)
 	}
 	if a.RetryAt.IsZero() {
-		t.Error("RetryAt bos")
+		t.Error("RetryAt is empty")
 	}
-	// Siradakiler de bekliyor, hem de ayni anda.
+	// The queued ones wait too, all at the same time.
 	for _, n := range []string{"b.bin", "c.bin"} {
 		j := h.waitState(jobByName(h.e, n).ID, StateWaiting, 2*time.Second)
 		if !j.RetryAt.Equal(a.RetryAt) {
-			t.Errorf("%s RetryAt %v, a ile ayni olmali (%v)", n, j.RetryAt, a.RetryAt)
+			t.Errorf("%s RetryAt %v, should equal a's (%v)", n, j.RetryAt, a.RetryAt)
 		}
 	}
 	if h.e.Paused() {
-		t.Error("kota genel duraklatma ACMAMALI; baska siteler devam edebilir")
+		t.Error("a quota must NOT switch on the global pause; other sites can continue")
 	}
 	before := r.resolveOneCount()
 
-	// Sure doluyor; kota acilmis olsun.
+	// The time runs out; let the quota be open.
 	f.setQuota(false)
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateDone, 10*time.Second)
 	}
 	if r.resolveOneCount() <= before {
-		t.Error("yeniden denemede taze cozumleme yapilmadi (IP'ye bagli adres eskimis olabilirdi)")
+		t.Error("the retry did no fresh resolution (the IP-bound URL could have gone stale)")
 	}
 }
 
-// Kullanici VPN degistirip bekleyen tek ise ▶ derse: o is hemen denenir, basarili
-// olursa sitenin diger bekleyenleri de serbest kalir (kotanin acildigi kanitlandi).
+// If the user switches VPN and presses ▶ on a single waiting job: that job is
+// tried right away, and if it succeeds the site's other waiting jobs are
+// released too (the quota was proven open).
 func TestQuotaResumeOneProbesAndReleasesSiblings(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
 	f.setQuota(true)
@@ -838,21 +1062,23 @@ func TestQuotaResumeOneProbesAndReleasesSiblings(t *testing.T) {
 	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
 	h.waitState(jobByName(h.e, "c.bin").ID, StateWaiting, 2*time.Second)
 
-	// VPN degisti, kullanici a'ya ▶ basti.
+	// The VPN switched, the user pressed ▶ on a.
 	f.setQuota(false)
 	h.e.Resume(a.ID)
 	h.waitState(a.ID, StateDone, 10*time.Second)
-	// b ve c bir saat beklememeli.
+	// b and c must not wait an hour.
 	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
 	h.waitState(jobByName(h.e, "c.bin").ID, StateDone, 10*time.Second)
 }
 
-// Kota hala doluyken ▶ denenirse is yeniden beklemeye duser, diger bekleyenler
-// serbest KALMAZ; kuyruk sifirlanma saatini korur.
+// If ▶ is tried while the quota is still full, the job falls back into
+// waiting, the other waiting jobs are NOT released; the queue keeps the reset
+// time.
 func TestQuotaResumeOneFailingKeepsSiblingsWaiting(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin")
 	f.setQuota(true)
 	h := newHarness(t, f, "", 1)
+	h.e.opt.QuotaProbeEvery = time.Hour // only the user's ▶ may touch the files here
 	r := &fakeResolver{f: f, quotaWait: time.Hour}
 	h.e.resolvers[0] = r
 	h.e.workers["fake"] = newWorkerWith(t, h, r)
@@ -867,7 +1093,7 @@ func TestQuotaResumeOneFailingKeepsSiblingsWaiting(t *testing.T) {
 	hitsB := f.hitCount("b.bin")
 
 	h.e.Resume(a.ID)
-	// a denendi ve yine 509 aldi -> yeniden bekliyor.
+	// a was tried and got 509 again -> waiting again.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if f.hitCount("a.bin") >= 2 && jobByName(h.e, "a.bin").State == StateWaiting {
@@ -876,27 +1102,29 @@ func TestQuotaResumeOneFailingKeepsSiblingsWaiting(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
-		t.Fatalf("a %s, yeniden waiting olmaliydi", got)
+		t.Fatalf("a is %s, it should be waiting again", got)
 	}
 	if f.hitCount("b.bin") != hitsB {
-		t.Error("basarisiz deneme b'yi de bosuna baslatti")
+		t.Error("the failed attempt started b for nothing too")
 	}
 	if got := jobByName(h.e, "b.bin"); got.State != StateWaiting || got.ID != b.ID {
-		t.Errorf("b %s, beklemede kalmaliydi", got.State)
+		t.Errorf("b is %s, it should have stayed waiting", got.State)
 	}
 }
 
-// MegaBasterd davranisi: kullanici VPN'i degistirir, BASKA HICBIR SEY YAPMAZ,
-// indirmeler kendiliginden surer. Kuyruk bekleyen is varken en KUCUK bekleyen
-// dosyayi araliklarla gercekten deniyor; inince digerleri de kuyruga doner.
+// MegaBasterd behavior: the user switches the VPN and DOES NOTHING ELSE,
+// downloads continue by themselves. While jobs wait for quota the queue asks
+// for the first byte of a waiting file every QuotaProbeEvery; as soon as one
+// comes back, EVERY waiting job returns to the queue at once. Nothing waits
+// for a whole file to download first (the probe used to be a full download
+// of the smallest file, and the rest waited until it finished).
 //
-// API'ye "payim var mi" diye sorulmuyor: canli olcumde "uq" kota doluyken de
-// boşken de ayni cevabi verdi.
-func TestQuotaProbeResumesWithoutUserAction(t *testing.T) {
+// The API isn't asked "do I have allowance": in a live measurement "uq" gave
+// the same answer with the quota full and empty.
+func TestQuotaProbeReleasesAllWaitingAtOnce(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
-	f.files["c.bin"] = f.files["c.bin"][:16*1024] // en kucuk: yoklama bunu secmeli
 	f.setQuota(true)
-	h := newHarness(t, f, "", 1)
+	h := newHarness(t, f, "", 3)
 	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
 	r := &fakeResolver{f: f, quotaWait: time.Hour}
 	h.e.resolvers[0] = r
@@ -910,34 +1138,63 @@ func TestQuotaProbeResumesWithoutUserAction(t *testing.T) {
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateWaiting, 10*time.Second)
 	}
-	// Kota doluyken yoklama surmeli (c.bin denenir, 509 alir, yine bekler);
-	// buyuk dosyalara dokunulmamali.
-	hitsA, hitsB := f.hitCount("a.bin"), f.hitCount("b.bin")
+	// While the quota is full the probes ask for ONE BYTE, and nothing else
+	// is requested: no job starts, no file is downloaded to find out.
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && f.hitCount("c.bin") < 2 {
+	for time.Now().Before(deadline) && len(probesOf(f, "a.bin", "b.bin", "c.bin")) < 3 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if f.hitCount("c.bin") < 2 {
-		t.Fatalf("yoklama yapilmiyor: c.bin %d istek", f.hitCount("c.bin"))
+	if n := len(probesOf(f, "a.bin", "b.bin", "c.bin")); n < 3 {
+		t.Fatalf("%d one-byte probes while the quota was full; probing doesn't happen", n)
 	}
-	if f.hitCount("a.bin") != hitsA || f.hitCount("b.bin") != hitsB {
-		t.Error("yoklama en kucuk dosya yerine buyukleri de denedi")
+	for _, j := range h.e.Jobs() {
+		if j.State != StateWaiting {
+			t.Fatalf("%s is %s while the quota is full; probing must not start jobs", j.Filename, j.State)
+		}
 	}
-	before := r.resolveOneCount()
 
-	// VPN degisti: CDN izin veriyor. Kullanici hicbir sey yapmiyor.
+	// The quota opens (time passed, or the VPN changed). The user does nothing.
+	h.mu.Lock()
+	h.events = nil
+	h.mu.Unlock()
 	f.setQuota(false)
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateDone, 10*time.Second)
 	}
-	if r.resolveOneCount() <= before {
-		t.Error("salinan isler taze cozumleme yapmadi (adres eski IP'ye bagliydi)")
+	// All three went back to the queue BEFORE any of them finished.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	requeued := map[string]bool{}
+	for _, ev := range h.events {
+		if ev.State == StateDone {
+			break
+		}
+		if ev.State == StateQueued || ev.State == StateRunning {
+			requeued[ev.Filename] = true
+		}
+	}
+	if len(requeued) != 3 {
+		t.Errorf("only %v went back to the queue before the first file finished; all three should have", requeued)
 	}
 }
 
-// Kota dolu kaldikca yoklama seyrelmeli (2x, 10 dk tavan): sonsuz bir
-// "dene-509-bekle" dongusu her 30 saniyede istek harcamasin.
-func TestQuotaProbeBacksOffWhileQuotaStaysFull(t *testing.T) {
+// probesOf returns the one-byte probe requests made for the given files.
+func probesOf(f *fakeSite, names ...string) []string {
+	var out []string
+	for _, n := range names {
+		for _, r := range f.rangesOf(n) {
+			if r == "bytes=0-0" {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// While the quota stays full, probing keeps a fixed, short interval: the user
+// may switch the VPN at any moment (it used to back off to 10 minutes). The
+// probe reuses its resolved URL instead of asking the API every time.
+func TestQuotaProbeKeepsFixedCadence(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	f.setQuota(true)
 	h := newHarness(t, f, "", 1)
@@ -953,33 +1210,103 @@ func TestQuotaProbeBacksOffWhileQuotaStaysFull(t *testing.T) {
 	}
 	id := jobByName(h.e, "a.bin").ID
 	h.waitState(id, StateWaiting, 10*time.Second)
+	resolvesBefore := r.resolveOneCount()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && f.hitCount("a.bin") < 3 {
-		time.Sleep(10 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond)
+	probes := len(probesOf(f, "a.bin"))
+	if probes < 6 {
+		t.Errorf("%d probes in 1.2 s at a 100 ms interval; the interval must not grow", probes)
 	}
-	if f.hitCount("a.bin") < 3 {
-		t.Fatalf("yoklama isi yeniden denemedi: %d istek", f.hitCount("a.bin"))
-	}
-	h.e.mu.Lock()
-	every := h.e.probeEvery["fake"]
-	h.e.mu.Unlock()
-	if every < 400*time.Millisecond {
-		t.Errorf("yoklama seyrelmedi: %s (en az 4x beklenirdi)", every)
+	if got := r.resolveOneCount() - resolvesBefore; got > 1 {
+		t.Errorf("%d resolutions for %d probes; the probe should reuse its URL", got, probes)
 	}
 	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
-		t.Errorf("yoklama sonrasi durum %s, waiting olmali", got)
+		t.Errorf("state is %s, should still be waiting", got)
 	}
 }
 
-// Kota komutu (MegaBasterd "509'da komut calistir"): kota dolunca kullanicinin
-// komutu BIR kez calisir (ayni anda uc is 509 alsa da), bitince yoklama one
-// cekilir ve pay varsa isler ▶ beklemeden surer. Bildirimler OnNotice'a gider.
+// A VPN switch: the quota is open again, and the URL the probe kept is bound
+// to the old IP (403). The probe must resolve it again at once and release
+// the jobs, without waiting for another round.
+func TestQuotaProbeFollowsVPNSwitch(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 2)
+	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
+	h.waitState(jobByName(h.e, "b.bin").ID, StateWaiting, 10*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(probesOf(f, "a.bin", "b.bin")) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	f.switchIP()
+	for _, n := range []string{"a.bin", "b.bin"} {
+		h.waitState(jobByName(h.e, n).ID, StateDone, 10*time.Second)
+	}
+	for _, n := range []string{"a.bin", "b.bin"} {
+		got, _ := os.ReadFile(filepath.Join(h.out, "Album", n))
+		if !bytes.Equal(got, f.files[n]) {
+			t.Errorf("%s is corrupt", n)
+		}
+	}
+}
+
+// If the probed file itself is gone (a permanent error, not the quota) that
+// job fails and probing moves on to another waiting file; a dead file at the
+// head of the queue must not keep the site waiting until the reset time.
+func TestQuotaProbeSkipsDeadFile(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	f.setQuota(true)
+	h := newHarness(t, f, "", 1)
+	h.e.opt.QuotaProbeEvery = 100 * time.Millisecond
+	r := &fakeResolver{f: f, quotaWait: time.Hour}
+	h.e.resolvers[0] = r
+	h.e.workers["fake"] = newWorkerWith(t, h, r)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	a := h.waitState(jobByName(h.e, "a.bin").ID, StateWaiting, 10*time.Second)
+	h.waitState(jobByName(h.e, "b.bin").ID, StateWaiting, 2*time.Second)
+
+	// a now gives a permanent error (403 even with a fresh URL).
+	f.mu.Lock()
+	f.forbid["a.bin"] = true
+	f.mu.Unlock()
+	h.waitState(a.ID, StateFailed, 5*time.Second)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(probesOf(f, "b.bin")) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(probesOf(f, "b.bin")) == 0 {
+		t.Fatal("after the probed file failed, the site's other waiting file was never probed")
+	}
+	f.setQuota(false)
+	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
+}
+
+// Quota command (MegaBasterd's "run command on 509"): when the quota runs out
+// the user's command runs ONCE (even if three jobs get 509 at the same time),
+// when it finishes the probe is pulled forward and if there is allowance the
+// jobs go on without ▶. Notifications go to OnNotice.
 func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
 	f.setQuota(true)
-	h := newHarness(t, f, "", 3)        // uc is ayni anda 509 alsin
-	h.e.opt.QuotaProbeEvery = time.Hour // normal yoklama devre disi; komut one cekmeli
+	h := newHarness(t, f, "", 3)        // three jobs get 509 at the same time
+	h.e.opt.QuotaProbeEvery = time.Hour // normal probing off; the command must pull it forward
 	var mu sync.Mutex
 	var notices []string
 	h.e.opt.OnNotice = func(s string) {
@@ -990,9 +1317,9 @@ func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 	r := &fakeResolver{f: f, quotaWait: time.Hour}
 	h.e.resolvers[0] = r
 	h.e.workers["fake"] = newWorkerWith(t, h, r)
-	marker := filepath.Join(testutil.TempDir(t), "vpn calisti.txt")
-	// "echo x>> dosya" hem cmd'de hem sh'de calisir; her calisma bir satir ekler.
-	h.e.SetQuotaCommand(`echo degisti>> "` + marker + `"`)
+	marker := filepath.Join(testutil.TempDir(t), "vpn ran.txt")
+	// "echo x>> file" works in both cmd and sh; every run appends a line.
+	h.e.SetQuotaCommand(`echo switched>> "` + marker + `"`)
 	h.start()
 	defer h.stop()
 
@@ -1002,7 +1329,7 @@ func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateWaiting, 10*time.Second)
 	}
-	// Komut calisip bitmis olmali.
+	// The command must have run and finished.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(marker); err == nil && len(b) > 0 {
@@ -1012,13 +1339,13 @@ func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 	}
 	b, err := os.ReadFile(marker)
 	if err != nil {
-		t.Fatalf("kota komutu calismadi: %v", err)
+		t.Fatalf("the quota command did not run: %v", err)
 	}
 	if lines := strings.Count(strings.TrimSpace(string(b)), "\n") + 1; lines != 1 {
-		t.Errorf("komut %d kez calisti, soguma yuzunden 1 bekleniyordu", lines)
+		t.Errorf("the command ran %d times, 1 was expected because of the cooldown", lines)
 	}
 
-	// Komut bitince yoklama one cekilmeli (normalde 1 saat sonraydi).
+	// When the command finishes the probe must be pulled forward (it was an hour away).
 	f.setQuota(false)
 	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
 		h.waitState(jobByName(h.e, n).ID, StateDone, 15*time.Second)
@@ -1027,15 +1354,15 @@ func TestQuotaCommandRunsOnceAndPullsProbeForward(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	joined := strings.Join(notices, "\n")
-	for _, want := range []string{"komut çalıştırılıyor", "Kota komutu bitti", "pay açıldı"} {
+	for _, want := range []string{"running the command", "Quota command finished", "allowance available again"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("bildirimlerde %q yok:\n%s", want, joined)
+			t.Errorf("%q missing from the notifications:\n%s", want, joined)
 		}
 	}
 }
 
-// Kota dolunca OnQuotaHold BIR kez cagrilmali (uc is ayni anda 509 alsa da);
-// arayuz bunu sistem bildirimine ceviriyor.
+// When the quota runs out OnQuotaHold must be called ONCE (even if three jobs
+// get 509 at the same time); the UI turns it into a system notification.
 func TestQuotaHoldNotifiesOnce(t *testing.T) {
 	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
 	f.setQuota(true)
@@ -1044,7 +1371,7 @@ func TestQuotaHoldNotifiesOnce(t *testing.T) {
 	got := make(chan string, 8)
 	h.e.opt.OnQuotaHold = func(site string, at time.Time) {
 		if at.IsZero() {
-			t.Error("RetryAt bos geldi")
+			t.Error("RetryAt arrived empty")
 		}
 		got <- site
 	}
@@ -1066,17 +1393,18 @@ func TestQuotaHoldNotifiesOnce(t *testing.T) {
 			t.Errorf("site = %q", s)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("OnQuotaHold cagrilmadi")
+		t.Fatal("OnQuotaHold was not called")
 	}
 	select {
 	case <-got:
-		t.Error("OnQuotaHold ikinci kez cagrildi; site basina 10 dk'da bir olmali")
+		t.Error("OnQuotaHold was called a second time; it should be once every 10 min per site")
 	case <-time.After(300 * time.Millisecond):
 	}
 }
 
-// Basarisiz komut kuyrugu bozmamali: is beklemede kalir, bildirim sebebi ve
-// komutun ciktisini soyler, sonraki kota yine (sogumadan sonra) deneyebilir.
+// A failing command must not break the queue: the job stays waiting, the
+// notification states the reason and the command's output, and the next
+// quota can try again (after the cooldown).
 func TestQuotaCommandFailureIsReported(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	f.setQuota(true)
@@ -1087,7 +1415,7 @@ func TestQuotaCommandFailureIsReported(t *testing.T) {
 	r := &fakeResolver{f: f, quotaWait: time.Hour}
 	h.e.resolvers[0] = r
 	h.e.workers["fake"] = newWorkerWith(t, h, r)
-	h.e.SetQuotaCommand("echo vpn yok&& exit 7")
+	h.e.SetQuotaCommand("echo no vpn&& exit 7")
 	h.start()
 	defer h.stop()
 
@@ -1102,23 +1430,23 @@ func TestQuotaCommandFailureIsReported(t *testing.T) {
 	for failure == "" {
 		select {
 		case n := <-got:
-			if strings.Contains(n, "başarısız") {
+			if strings.Contains(n, "failed") {
 				failure = n
 			}
 		case <-deadline:
-			t.Fatal("basarisizlik bildirimi gelmedi")
+			t.Fatal("no failure notification arrived")
 		}
 	}
-	if !strings.Contains(failure, "vpn yok") {
-		t.Errorf("bildirimde komut ciktisi yok: %q", failure)
+	if !strings.Contains(failure, "no vpn") {
+		t.Errorf("the command output is missing from the notification: %q", failure)
 	}
 	if got := jobByName(h.e, "a.bin").State; got != StateWaiting {
-		t.Errorf("basarisiz komut isin durumunu bozdu: %s", got)
+		t.Errorf("the failing command broke the job's state: %s", got)
 	}
 }
 
-// Bekleme uygulama kapanip acilinca yerinde kalmali: RetryAt diske yaziliyor,
-// suresi gecmisse acilista kuyruga doner.
+// The hold must stay in place when the app is closed and reopened: RetryAt is
+// written to disk; if its time has passed the job returns to the queue on launch.
 func TestQuotaWaitSurvivesRestart(t *testing.T) {
 	f := newFakeSite(t, "a.bin")
 	f.setQuota(true)
@@ -1139,10 +1467,10 @@ func TestQuotaWaitSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(jobs) != 1 || jobs[0].State != StateWaiting || !jobs[0].RetryAt.Equal(a.RetryAt) {
-		t.Fatalf("yeniden yuklenen is: %+v", jobs[0])
+		t.Fatalf("reloaded job: %+v", jobs[0])
 	}
 
-	// Sifirlanma zamani gecmis olsun: acilista dogrudan kuyruga donmeli ve inmeli.
+	// Let the reset time be in the past: on launch it must go straight back to the queue and download.
 	jobs[0].RetryAt = time.Now().Add(-time.Second)
 	if err := save(state, jobs); err != nil {
 		t.Fatal(err)
@@ -1153,4 +1481,324 @@ func TestQuotaWaitSurvivesRestart(t *testing.T) {
 	h2.start()
 	defer h2.stop()
 	h2.waitState(a.ID, StateDone, 10*time.Second)
+}
+
+// --- Cancel all ---
+
+// cancelAllSetup builds a queue with one job in each interesting state: a
+// finished one (a), a paused one with a partial file (b), a running one held
+// mid-body (c) and a queued one (d). It returns the release channel of c.
+func cancelAllSetup(t *testing.T, h *harness) chan struct{} {
+	t.Helper()
+	add := func(name string) {
+		if _, err := h.e.Add(context.Background(), "file://"+name, h.out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("a.bin")
+	h.waitState(jobByName(h.e, "a.bin").ID, StateDone, 10*time.Second)
+
+	holdB := h.f.holdNext("b.bin")
+	add("b.bin")
+	b := h.waitState(jobByName(h.e, "b.bin").ID, StateRunning, 5*time.Second)
+	time.Sleep(300 * time.Millisecond) // the first 32 KB reaches the disk
+	h.e.Pause(b.ID)
+	close(holdB)
+	h.waitState(b.ID, StatePaused, 5*time.Second)
+
+	holdC := h.f.holdNext("c.bin")
+	add("c.bin")
+	h.waitState(jobByName(h.e, "c.bin").ID, StateRunning, 5*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	add("d.bin") // MaxActive is 1: stays queued behind c
+	return holdC
+}
+
+// "Cancel all": every unfinished job leaves the queue (the running one is
+// stopped), the partial files go, the finished file and its row stay, and
+// nothing starts afterwards.
+func TestCancelAllRemovesUnfinishedAndWipesPartials(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin", "d.bin")
+	h := newHarness(t, f, "", 1)
+	h.start()
+	defer h.stop()
+	holdC := cancelAllSetup(t, h)
+
+	if n := h.e.CancelAll(true); n != 3 {
+		t.Fatalf("CancelAll canceled %d jobs, want 3 (paused, running, queued)", n)
+	}
+	close(holdC)
+
+	jobs := h.e.Jobs()
+	if len(jobs) != 1 || jobs[0].Filename != "a.bin" || jobs[0].State != StateDone {
+		t.Fatalf("only the finished job should remain: %+v", states(jobs))
+	}
+	album := filepath.Join(h.out, "Album")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		left := []string{}
+		for _, name := range []string{"b.bin", "c.bin"} {
+			for _, suffix := range []string{".part", ".part.state"} {
+				if _, err := os.Stat(filepath.Join(album, name+suffix)); err == nil {
+					left = append(left, name+suffix)
+				}
+			}
+		}
+		if len(left) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("partial files remained after CancelAll(true): %v", left)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, err := os.ReadFile(filepath.Join(album, "a.bin")); err != nil || !bytes.Equal(got, f.files["a.bin"]) {
+		t.Fatalf("the finished file was touched: %v", err)
+	}
+	// A vanished .part could also mean the running job finished; it must not have.
+	if _, err := os.Stat(filepath.Join(album, "c.bin")); err == nil {
+		t.Error("the running job completed although it was canceled")
+	}
+
+	// Nothing may start afterwards: d was canceled before it ever ran.
+	time.Sleep(300 * time.Millisecond)
+	if n := f.hitCount("d.bin"); n != 0 {
+		t.Errorf("a canceled queued job was downloaded (%d requests)", n)
+	}
+	if len(h.e.Jobs()) != 1 {
+		t.Errorf("a canceled job came back: %+v", states(h.e.Jobs()))
+	}
+}
+
+// CancelAll(false) empties the queue the same way but leaves the partial
+// files: adding the same link later continues where it stopped.
+func TestCancelAllCanKeepPartials(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin", "d.bin")
+	h := newHarness(t, f, "", 1)
+	h.start()
+	defer h.stop()
+	holdC := cancelAllSetup(t, h)
+
+	if n := h.e.CancelAll(false); n != 3 {
+		t.Fatalf("CancelAll canceled %d jobs, want 3", n)
+	}
+	close(holdC)
+	h.waitActiveZero(5 * time.Second)
+
+	for _, name := range []string{"b.bin", "c.bin"} {
+		if _, err := os.Stat(filepath.Join(h.out, "Album", name+".part")); err != nil {
+			t.Errorf("%s: the partial file was deleted although it should be kept: %v", name, err)
+		}
+	}
+	// The same link again: b continues from its .part (a Range request).
+	before := f.hitCount("b.bin")
+	if _, err := h.e.Add(context.Background(), "file://b.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
+	got, _ := os.ReadFile(filepath.Join(h.out, "Album", "b.bin"))
+	if !bytes.Equal(got, f.files["b.bin"]) {
+		t.Fatal("content corrupted after continuing a kept partial")
+	}
+	if f.hitCount("b.bin") != before+1 {
+		t.Errorf("b was fetched %d more times, want 1 (a single resume)", f.hitCount("b.bin")-before)
+	}
+}
+
+// A quota or captcha hold belonged to the canceled jobs; it must not keep the
+// next job added for that site from starting.
+func TestCancelAllLiftsHolds(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin")
+	h := newHarness(t, f, "", 1)
+	h.e.mu.Lock()
+	h.e.captchaHold["fake"] = true
+	h.e.netBackoffUntil["fake"] = time.Now().Add(time.Hour)
+	h.e.mu.Unlock()
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.e.CancelAll(true)
+	if len(h.e.CaptchaHeld()) != 0 {
+		t.Fatalf("the captcha hold survived CancelAll: %v", h.e.CaptchaHeld())
+	}
+	h.start()
+	defer h.stop()
+	if _, err := h.e.Add(context.Background(), "file://b.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.waitState(jobByName(h.e, "b.bin").ID, StateDone, 10*time.Second)
+}
+
+// waitActiveZero waits until no job goroutine is running.
+func (h *harness) waitActiveZero(timeout time.Duration) {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		h.e.mu.Lock()
+		n := len(h.e.active)
+		h.e.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.t.Fatal("jobs are still running")
+}
+
+// --- Connections per file ---
+
+// The user's choice must reach the download: with 4 requested and a site
+// ceiling of 4 the job reports 4 connections while it runs, and 0 once it is
+// done. This is the number the row shows.
+func TestRunningJobReportsConnections(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	f.delay = 150 * time.Millisecond // every segment is in flight before data arrives
+	cfg := site.SiteConfig{Name: "fake", MaxConcurrent: 8, MaxSegments: 4, MaxRetries: 2}.WithDefaults()
+	var mu sync.Mutex
+	maxConns := 0
+	e, err := New(Options{
+		MaxActive: 1,
+		Client:    f.srv.Client(),
+		Resolvers: []site.Resolver{&fakeResolver{f: f}},
+		Configs:   []site.SiteConfig{cfg},
+		OnChange: func(j Job) {
+			mu.Lock()
+			if j.Conns > maxConns {
+				maxConns = j.Conns
+			}
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.workers["fake"].Down.MinSegmentSize = 16 << 10 // the fake file is 96 KB
+	e.SetSegments(8)                                 // the ceiling (4) applies
+	h := &harness{t: t, f: f, e: e, out: testutil.TempDir(t)}
+	h.start()
+	defer h.stop()
+
+	if _, err := e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	j := h.waitState(jobByName(e, "a.bin").ID, StateDone, 10*time.Second)
+	got, _ := os.ReadFile(filepath.Join(h.out, "Album", "a.bin"))
+	if !bytes.Equal(got, f.files["a.bin"]) {
+		t.Fatal("segmented content is corrupt")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxConns != 4 {
+		t.Errorf("the job reported at most %d connections, want 4", maxConns)
+	}
+	if j.Conns != 0 {
+		t.Errorf("a finished job still reports %d connections", j.Conns)
+	}
+}
+
+// SegmentCeilings lists every site's ceiling (for the UI's explanation).
+func TestSegmentCeilings(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	e, err := New(Options{
+		Client:    f.srv.Client(),
+		Resolvers: []site.Resolver{&fakeResolver{f: f}, &fakeResolver{f: f, prefix: "b-"}},
+		Configs: []site.SiteConfig{
+			site.SiteConfig{Name: "zeta", MaxSegments: 3}.WithDefaults(),
+			site.SiteConfig{Name: "alpha"}.WithDefaults(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.SegmentCeilings()
+	if len(got) != 2 || got[0] != (SiteCeiling{"alpha", 1}) || got[1] != (SiteCeiling{"zeta", 3}) {
+		t.Fatalf("SegmentCeilings = %+v", got)
+	}
+}
+
+// --- Downloads at once ---
+
+// maxRunning samples how many jobs run at once until every job is done.
+func (h *harness) maxRunning(timeout time.Duration, during func(seen int)) int {
+	h.t.Helper()
+	maxSeen := 0
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		n, done := 0, 0
+		jobs := h.e.Jobs()
+		for _, j := range jobs {
+			switch j.State {
+			case StateRunning:
+				n++
+			case StateDone:
+				done++
+			}
+		}
+		if n > maxSeen {
+			maxSeen = n
+		}
+		if during != nil {
+			during(n)
+		}
+		if done == len(jobs) && len(jobs) > 0 {
+			return maxSeen
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	h.t.Fatalf("not every job finished: %+v", states(h.e.Jobs()))
+	return maxSeen
+}
+
+// "Downloads at once" can change while the queue runs: raising it starts
+// more jobs right away.
+func TestSetMaxActiveTakesEffectLive(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin", "d.bin", "e.bin", "f.bin")
+	f.delay = 200 * time.Millisecond
+	h := newHarness(t, f, "", 1)
+	h.start()
+	defer h.stop()
+	if got := h.e.MaxActive(); got != 1 {
+		t.Fatalf("MaxActive = %d", got)
+	}
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	raised := false
+	max := h.maxRunning(15*time.Second, func(n int) {
+		if !raised && n == 1 {
+			raised = true
+			h.e.SetMaxActive(4)
+		}
+	})
+	if max != 4 {
+		t.Errorf("at most %d jobs ran at once after raising the limit to 4", max)
+	}
+}
+
+// A site's max_concurrent caps its share even when more downloads are
+// allowed at once: the rest stay "queued" rather than sitting inside the
+// worker as "downloading" at 0%.
+func TestSiteShareIsCappedByMaxConcurrent(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin", "d.bin")
+	f.delay = 150 * time.Millisecond
+	cfg := site.SiteConfig{Name: "fake", MaxConcurrent: 2, MaxRetries: 2}.WithDefaults()
+	e, err := New(Options{
+		MaxActive: 4,
+		Client:    f.srv.Client(),
+		Resolvers: []site.Resolver{&fakeResolver{f: f}},
+		Configs:   []site.SiteConfig{cfg},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{t: t, f: f, e: e, out: testutil.TempDir(t)}
+	h.start()
+	defer h.stop()
+	if _, err := e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	if max := h.maxRunning(15*time.Second, nil); max != 2 {
+		t.Errorf("%d of the site's jobs ran at once; max_concurrent is 2", max)
+	}
 }

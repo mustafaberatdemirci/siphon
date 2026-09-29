@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,119 +20,120 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// Parçalı çok bağlantılı indirme: tek dosya N bayt aralığına bölünür, her
-// aralık ayrı bir bağlantıyla çekilip önceden boyutlandırılmış .part
-// dosyasının kendi konumuna yazılır.
+// Segmented multi-connection download: a single file is split into chunks
+// kept in a queue, and every connection takes the next free chunk as soon as
+// it finishes one, writing it at its own position in a pre-sized .part file.
 //
-// Ne zaman DEVREYE GİRMEZ (kendiliğinden tek akışa düşer):
-//   - boyut bilinmiyorsa (Content-Length yok): aralık kurulamaz
-//   - sunucu Range'i yok sayıp 200 dönerse
-//   - dosya MinSegmentSize'dan küçükse: bölmenin maliyeti kazancını aşar
-//   - akış çözücüsü varsa (mega): AES-CTR parça parça çözülebilir ama
-//     bütünlük MAC'i sıralı; parçalı mega ayrı bir iş. mega zaten kota
-//     sınırlı, hız sınırlı değil.
-//   - tek akışlı bir .part yarım kalmışsa: o kaldığı yerden tek akışla biter
+// Why a queue and not one range per connection: connections don't run at the
+// same speed. With N fixed ranges the fast connections finish early and close,
+// and the end of the file comes down over one or two slow ones. With a queue
+// the fast connections simply take more chunks, so all of them stay busy
+// until the last few chunks. MegaBasterd downloads mega files the same way.
 //
-// Bütünlük: sha256 sıralı bir hash olduğu için parçalar bitince dosya BAŞTAN
-// okunup hesaplanıyor. Bir tam yerel okuma; SSD'de saniyeler, sessizce
-// "doğru" saymaktan çok daha ucuz.
+// When it does NOT kick in (falls back to a single stream by itself):
+//   - the size is unknown (no Content-Length): ranges can't be built
+//   - the server ignores the range request
+//   - the file is smaller than MinSegmentSize: splitting costs more than it gains
+//   - there is a stream decoder that can only decode from the start
+//     (Decode without DecodeRange)
+//   - a single-stream .part is half done: it finishes as a single stream
+//
+// Integrity: sha256 is a sequential hash, so once the chunks finish the file
+// is read FROM THE START and hashed. One full local read; seconds on an SSD,
+// and far cheaper than silently counting it as "correct". A decoder's own
+// integrity check (mega's meta-MAC, also a chain over the whole file) runs in
+// the same pass.
 
-// Segment, dosyanın bir bayt aralığı ve o aralıkta ne kadarının indiği.
+// Segment is a byte range of the file (a chunk of the queue) and how much of
+// it has been downloaded.
 type Segment struct {
 	Start int64 `json:"start"`
-	End   int64 `json:"end"` // hariç
+	End   int64 `json:"end"` // exclusive
 	Done  int64 `json:"done"`
 }
 
-// DefaultMinSegmentSize, altında bölme yapılmayan dosya boyutu.
+// DefaultMinSegmentSize is the file size below which no splitting happens.
 const DefaultMinSegmentSize = 8 << 20
 
-// segmentStateEvery, parça durumunun diske en sık yazılma aralığı.
+// Chunk sizing: large enough that the cost of one more request is noise,
+// small enough that every connection gets several chunks (and the fast ones
+// can take more). MegaBasterd uses 20 MB.
+const (
+	chunksPerConn = 4
+	minChunkSize  = 4 << 20
+	maxChunkSize  = 32 << 20
+)
+
+// segmentStateEvery is the most frequent interval at which download state is
+// written to disk (segmented and single-stream alike).
 const segmentStateEvery = time.Second
 
-// errNoRangeSupport, sunucunun aralık isteğini yok saydığını söyler; tek
-// akışa düşülür.
-var errNoRangeSupport = errors.New("sunucu Range desteklemiyor")
+// errNoRangeSupport says the server ignored the range request; fall back to a
+// single stream.
+var errNoRangeSupport = errors.New("server does not support Range")
 
-// errSourceChanged, devam sırasında sunucunun If-Range'i reddedip 200
-// döndüğünü söyler: parçalar artık aynı sürüme ait değil.
-var errSourceChanged = errors.New("kaynak değişmiş, parçalı durum geçersiz")
+// errSourceChanged says the server rejected If-Range while continuing and
+// returned 200: the segments no longer belong to the same version.
+var errSourceChanged = errors.New("source changed, segmented state is invalid")
 
-// Parça başına yeniden deneme sınırları. Dış politika (Worker) tüm indirmeyi
-// zaten yeniden deniyor; bu, tek bir parçanın geçici hatasının diğer üç
-// parçayı düşürmemesi için.
+// errYield: the server complained about the number of connections and the
+// pool lowered its limit; the connection hands its chunk back so another one
+// (or itself, if it is still allowed) takes it.
+var errYield = errors.New("chunk handed back")
+
+// Per-chunk retry limits. The outer policy (Worker) already retries the whole
+// download; this is so one chunk's transient error doesn't bring down the
+// other connections.
 const (
 	segmentTries       = 6
 	segmentBackoffBase = 500 * time.Millisecond
 	segmentBackoffMax  = 8 * time.Second
 )
 
-// shrinkSem, kapasitesi koşu sırasında DÜŞÜRÜLEBİLEN bir semafor.
-//
-// ÖLÇÜLDÜ (bunkr CDN, 2026-09-11): aynı dosyaya 4 paralel aralık isteğinden
-// biri 503 alıyor; sıralı istekler sorunsuz. Yani sunucu bağlantı sayısını
-// sınırlıyor. Bir parça 503/429 alınca kapasite bir düşürülüyor: kalan
-// parçalar daha az bağlantıyla sürüyor, indirme tamamen düşmüyor. IDM'in
-// yaptığı da bu.
-type shrinkSem struct {
-	mu   sync.Mutex
-	cond *sync.Cond
-	cap  int
-	used int
+// chunkSizeFor picks the chunk size of a fresh download: about chunksPerConn
+// chunks per connection, within [minChunkSize, maxChunkSize]. A file too
+// small for that gets one chunk per connection instead, so every connection
+// still has work. fixed > 0 overrides it (tests).
+func chunkSizeFor(size int64, want int, fixed int64) int64 {
+	if fixed > 0 {
+		return fixed
+	}
+	if want < 1 {
+		want = 1
+	}
+	c := size / int64(want*chunksPerConn)
+	if c < minChunkSize {
+		c = minChunkSize
+	}
+	if c > maxChunkSize {
+		c = maxChunkSize
+	}
+	if (size+c-1)/c < int64(want) {
+		c = (size + int64(want) - 1) / int64(want)
+	}
+	if c < 1 {
+		c = 1
+	}
+	return c
 }
 
-func newShrinkSem(ctx context.Context, n int) *shrinkSem {
-	s := &shrinkSem{cap: n}
-	s.cond = sync.NewCond(&s.mu)
-	// İptal bekleyenleri uyandırmalı; sync.Cond context bilmez.
-	go func() {
-		<-ctx.Done()
-		s.cond.Broadcast()
-	}()
-	return s
-}
-
-func (s *shrinkSem) acquire(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for s.used >= s.cap {
-		if ctx.Err() != nil {
-			return ctx.Err()
+// planChunks splits [0,size) into chunks of the given size; the last one takes the remainder.
+func planChunks(size, chunk int64) []Segment {
+	if chunk < 1 || size <= chunk {
+		return []Segment{{Start: 0, End: size}}
+	}
+	out := make([]Segment, 0, (size+chunk-1)/chunk)
+	for start := int64(0); start < size; start += chunk {
+		end := start + chunk
+		if end > size {
+			end = size
 		}
-		s.cond.Wait()
+		out = append(out, Segment{Start: start, End: end})
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	s.used++
-	return nil
+	return out
 }
 
-func (s *shrinkSem) release() {
-	s.mu.Lock()
-	s.used--
-	s.mu.Unlock()
-	s.cond.Broadcast()
-}
-
-// shrink, kapasiteyi bir düşürür (en az 1). Düştüyse true.
-func (s *shrinkSem) shrink() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cap <= 1 {
-		return false
-	}
-	s.cap--
-	return true
-}
-
-func (s *shrinkSem) capacity() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cap
-}
-
-// planSegments, [0,size) aralığını n eşit parçaya böler. Son parça artığı alır.
+// planSegments splits [0,size) into n equal segments. The last one takes the remainder.
 func planSegments(size int64, n int) []Segment {
 	if n < 1 {
 		n = 1
@@ -152,9 +154,10 @@ func planSegments(size int64, n int) []Segment {
 	return out
 }
 
-// segmentsFor, bu item için etkin parça sayısı.
+// segmentsFor is the effective number of segments for this item.
 func (d *Downloader) segmentsFor(it site.Item) int {
-	if d.Decode != nil || d.Segments < 2 {
+	n := d.segmentsWanted()
+	if !d.canSegment() || n < 2 {
 		return 1
 	}
 	min := d.MinSegmentSize
@@ -164,31 +167,58 @@ func (d *Downloader) segmentsFor(it site.Item) int {
 	if it.Size > 0 && it.Size < min {
 		return 1
 	}
-	return d.Segments
+	return n
 }
 
-// segmented, parçalı indirmeyi baştan sona yürütür.
+// canSegment: a decoder that can only decode from the start rules out
+// segments; one that decodes any range (DecodeRange) doesn't.
+func (d *Downloader) canSegment() bool {
+	return d.Decode == nil || d.DecodeRange != nil
+}
+
+// hasSegmentState reports whether a segmented download of this file was left half done.
+func (d *Downloader) hasSegmentState(statePath string) bool {
+	return d.canSegment() && len(loadState(statePath).Segments) > 0
+}
+
+// versionSafe: can segments fetched at different times be trusted to belong
+// to the same version of the file? A validator guarantees it (If-Range on
+// every request); without one, a decoder's integrity check over the finished
+// file catches a mix-up instead. Why the second path: it is NOT verified that
+// mega's storage servers send an ETag or Last-Modified, and the content of a
+// mega file never changes under the same key anyway.
+func (d *Downloader) versionSafe(validator, vtype string) bool {
+	return (validator != "" && vtype != ValidatorNone) || d.NewVerifier != nil
+}
+
+// segmented runs a segmented download from start to finish.
 //
-// Dönüş: (sonuç, nil) tamam; (Result{}, errNoRangeSupport) tek akışa düş;
-// başka hata: çağıran (politika) yeniden dener, parça durumu diskte.
+// Returns: (result, nil) done; (Result{}, errNoRangeSupport) fall back to a
+// single stream; any other error: the caller (policy) retries, the segment
+// state is on disk.
 func (d *Downloader) segmented(ctx context.Context, final, part, statePath string, it site.Item, want int) (Result, error) {
 	st := loadState(statePath)
 
-	// Devam edilebilir bir parçalı durum var mı?
+	// Is there a segmented state we can continue?
 	resuming := false
 	if len(st.Segments) > 0 {
 		fi, err := os.Stat(part)
 		switch {
-		case err != nil, fi.Size() != st.TotalSize, st.Validator == "", st.ValidatorType == ValidatorNone:
-			// Dosya yok, boyutu tutmuyor ya da doğrulayıcı yok: sıfırdan.
-			d.logf("parçalı durum kullanılamaz, baştan indiriliyor")
+		case err != nil, fi.Size() != st.TotalSize, !d.versionSafe(st.Validator, st.ValidatorType):
+			// File missing, size doesn't match or no way to tell versions apart: from scratch.
+			d.logf("segmented state unusable, downloading from scratch")
 			st = freshState()
 		default:
 			resuming = true
 		}
 	} else if st.Offset > 0 {
-		// Tek akışlı yarım dosya: ona parçalı devam edilmez, çağıran tek
-		// akışla bitirir.
+		// A half-done single-stream file: it is not continued segmented, the
+		// caller finishes it as a single stream.
+		return Result{}, errNoRangeSupport
+	}
+	if !resuming && want < 2 {
+		// Called only to continue a segmented state, and there is none left
+		// to continue.
 		return Result{}, errNoRangeSupport
 	}
 
@@ -199,10 +229,10 @@ func (d *Downloader) segmented(ctx context.Context, final, part, statePath strin
 		var expired *urlExpiredError
 		if errors.As(err, &expired) && d.Reresolve != nil && !reresolved {
 			reresolved = true
-			d.logf("imzalı URL %d döndü, yeniden çözülüyor: %s", expired.status, item.SourcePage)
+			d.logf("signed URL returned %d, re-resolving: %s", expired.status, item.SourcePage)
 			fresh, rerr := d.Reresolve(ctx, item.SourcePage)
 			if rerr != nil {
-				return Result{}, fmt.Errorf("yeniden çözümleme başarısız: %w", rerr)
+				return Result{}, fmt.Errorf("re-resolution failed: %w", rerr)
 			}
 			item.URL = fresh.URL
 			if item.SHA256 == "" {
@@ -213,6 +243,107 @@ func (d *Downloader) segmented(ctx context.Context, final, part, statePath strin
 		}
 		return res, err
 	}
+}
+
+// chunkPool hands the chunks of one download out to its connections. Its
+// mutex also guards the chunks' Done counters, which the connections update
+// as they write.
+type chunkPool struct {
+	mu   sync.Mutex
+	segs []Segment
+	busy []bool // a connection is fetching this chunk right now
+	// limit is how many connections the server tolerates; it starts
+	// unlimited and drops when the server answers 503/429.
+	limit int
+	// running is the number of connections alive.
+	running int
+}
+
+func newChunkPool(segs []Segment) *chunkPool {
+	return &chunkPool{segs: segs, busy: make([]bool, len(segs)), limit: math.MaxInt32}
+}
+
+func (p *chunkPool) allowed(want int) int {
+	if want < 1 {
+		want = 1
+	}
+	if p.limit < want {
+		return p.limit
+	}
+	return want
+}
+
+// take gives the calling connection the next free chunk. If there is none,
+// or there are more connections than allowed now (the server pushed back or
+// the user lowered the number), the connection is told to close; the count
+// drops in the same step so that two connections can't both decide to leave.
+func (p *chunkPool) take(want int) (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running > p.allowed(want) {
+		p.running--
+		return -1, false
+	}
+	for i := range p.segs {
+		if !p.busy[i] && p.segs[i].Done < p.segs[i].End-p.segs[i].Start {
+			p.busy[i] = true
+			return i, true
+		}
+	}
+	p.running--
+	return -1, false
+}
+
+// release hands a chunk back (finished, failed or yielded).
+func (p *chunkPool) release(i int) {
+	p.mu.Lock()
+	p.busy[i] = false
+	p.mu.Unlock()
+}
+
+// free is the number of chunks nobody has taken yet; under the lock.
+func (p *chunkPool) free() int {
+	n := 0
+	for i := range p.segs {
+		if !p.busy[i] && p.segs[i].Done < p.segs[i].End-p.segs[i].Start {
+			n++
+		}
+	}
+	return n
+}
+
+// wantsMore reports whether one more connection would have work to do and is allowed.
+func (p *chunkPool) wantsMore(want int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running < p.allowed(want) && p.free() > 0
+}
+
+// join counts a new connection in, re-checking wantsMore under the lock.
+func (p *chunkPool) join(want int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running >= p.allowed(want) || p.free() == 0 {
+		return false
+	}
+	p.running++
+	return true
+}
+
+// shrink lowers the limit to one below the connections in use (at least 1).
+// True if it dropped.
+func (p *chunkPool) shrink() (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cur := p.running
+	if p.limit < cur {
+		cur = p.limit
+	}
+	if cur <= 1 {
+		return cur, false
+	}
+	p.limit = cur - 1
+	return p.limit, true
 }
 
 func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath string, it site.Item, want int, st *State, resuming bool) (Result, error) {
@@ -226,14 +357,15 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 	}
 
 	if !resuming {
-		// Sonda: boyut, doğrulayıcı ve Range desteği tek küçük istekle.
+		// Probe: size, validator and range support in one small request.
 		size, validator, vtype, err := d.probe(ctx, target, it)
 		if err != nil {
 			return Result{}, err
 		}
-		if size <= 0 || validator == "" || vtype == ValidatorNone {
-			// Boyutsuz ya da doğrulayıcısız dosya parçalanamaz: parçaların
-			// aynı sürüme ait olduğunu garanti edemeyiz.
+		if size <= 0 || !d.versionSafe(validator, vtype) {
+			// A file without a size, or without a way to tell versions apart,
+			// can't be segmented: we couldn't guarantee the segments belong
+			// to the same version.
 			return Result{}, errNoRangeSupport
 		}
 		min := d.MinSegmentSize
@@ -246,7 +378,7 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		*st = freshState()
 		st.TotalSize, st.ItemSize = size, it.Size
 		st.Validator, st.ValidatorType = validator, vtype
-		st.Segments = planSegments(size, want)
+		st.Segments = planChunks(size, chunkSizeFor(size, want, d.ChunkSize))
 
 		f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
@@ -260,40 +392,39 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		saveState(statePath, *st, nil)
 	}
 
-	// Ek bağlantı yuvaları: host sınırı bağlantı sayısını sınırlıyor.
-	extra := len(st.Segments) - 1
-	release := func() {}
-	if extra > 0 && d.AcquireExtra != nil {
-		var got int
-		got, release = d.AcquireExtra(target, extra)
-		if got < extra {
-			d.logf("host sınırı: %d yerine %d ek bağlantı", extra, got)
-		}
-		extra = got
-	}
-	defer release()
-	workers := extra + 1
-	d.logf("%s: parçalı indirme, %d bağlantı, %d parça, %s", filepath.Base(final), workers, len(st.Segments), humanSize(st.TotalSize))
-
 	f, err := os.OpenFile(part, os.O_WRONLY, 0o644)
 	if err != nil {
 		return Result{}, err
 	}
-	// Windows açık dosyayı yeniden adlandırmaz: hash ve rename'den ÖNCE
-	// kapatılmak zorunda. closeOnce her yoldan bir kez kapatır.
+	// Windows won't rename an open file: it must be closed BEFORE hashing and
+	// renaming. closeOnce closes it exactly once on every path.
 	var closeOnce sync.Once
 	closeF := func() { closeOnce.Do(func() { _ = f.Sync(); _ = f.Close() }) }
 	defer closeF()
 
+	p := newChunkPool(st.Segments)
+	// The number of connections follows the user's CURRENT choice, not the
+	// one the download started with: raising it adds connections to running
+	// downloads, lowering it closes some after their chunk.
+	wantNow := func() int {
+		if n := d.segmentsWanted(); n >= 1 {
+			return n
+		}
+		return 1
+	}
+	if want < 2 {
+		// Resuming a segmented state with segmenting now turned down.
+		wantNow = func() int { return 1 }
+	}
+
 	var (
-		mu        sync.Mutex
 		lastSave  = time.Now()
 		lastRep   = time.Now()
+		lastConns = -1
 		total     = st.TotalSize
-		segs      = st.Segments
 		doneBytes = func() int64 {
 			var n int64
-			for _, s := range segs {
+			for _, s := range p.segs {
 				n += s.Done
 			}
 			return n
@@ -301,16 +432,16 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 	)
 	snapshot := func() State {
 		c := *st
-		c.Segments = append([]Segment(nil), segs...)
+		c.Segments = append([]Segment(nil), p.segs...)
 		c.Offset = 0
 		return c
 	}
-	// tick, her parça yazımından sonra çağrılır: ilerlemeyi bildirir ve
-	// parça durumunu periyodik olarak diske yazar. Kayıt İNDİRME SIRASINDA
-	// yapılmalı; yalnızca sonda yazılsaydı süreç ortada ölünce her şey
-	// sıfırdan başlardı.
+	// tick is called after every chunk write: it reports progress and
+	// periodically writes the chunk state to disk. Saving must happen WHILE
+	// DOWNLOADING; if it were only written at the end, a process that dies
+	// midway would start everything from scratch.
 	tick := func(force bool) {
-		mu.Lock()
+		p.mu.Lock()
 		now := time.Now()
 		doRep := force || now.Sub(lastRep) >= progressInterval
 		doSave := force || now.Sub(lastSave) >= segmentStateEvery
@@ -325,35 +456,84 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		if doSave {
 			snap = snapshot()
 		}
-		mu.Unlock()
+		// The connection count goes out only when it changed (connections
+		// join and leave, the server makes us shrink); rare enough that it
+		// needs no rate limit of its own.
+		conns := -1
+		if c := p.running; c != lastConns {
+			lastConns, conns = c, c
+		}
+		p.mu.Unlock()
 		if doSave {
 			saveState(statePath, snap, nil)
 		}
 		if doRep && d.Progress != nil {
 			d.Progress(it, n, total)
 		}
+		if conns >= 0 {
+			d.conns(it, conns)
+		}
 	}
-	tick(true)
 
 	g, gctx := errgroup.WithContext(ctx)
-	sem := newShrinkSem(gctx, workers)
-	for i := range segs {
-		i := i
-		if segs[i].Done >= segs[i].End-segs[i].Start {
-			continue
+	var conn func(releaseSlot func()) error
+	// grow opens more connections while there is work for them and the
+	// user's number, the server and the host's connection budget allow it.
+	// Called at the start and after every chunk: a slot freed by another
+	// download is picked up while this one is still running.
+	grow := func() {
+		for p.wantsMore(wantNow()) {
+			releaseSlot := func() {}
+			if d.AcquireExtra != nil {
+				var got int
+				got, releaseSlot = d.AcquireExtra(target, 1)
+				if got == 0 {
+					return // the host's connection budget is used up
+				}
+			}
+			if !p.join(wantNow()) {
+				releaseSlot()
+				return
+			}
+			g.Go(func() error { return conn(releaseSlot) })
 		}
-		g.Go(func() error {
-			return d.runSegment(gctx, sem, target, it, *st, f, &mu, &segs[i], tick)
-		})
 	}
+	conn = func(releaseSlot func()) error {
+		defer releaseSlot()
+		for {
+			i, ok := p.take(wantNow())
+			if !ok {
+				tick(false)
+				return nil
+			}
+			err := d.runChunk(gctx, p, i, target, it, *st, f, tick)
+			p.release(i)
+			if errors.Is(err, errYield) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			grow()
+		}
+	}
+
+	// The download's own connection comes with its file slot (the caller's
+	// host limit); every further one is an extra.
+	p.running = 1
+	tick(true)
+	g.Go(func() error { return conn(func() {}) })
+	grow()
+	d.logf("%s: segmented download, %d chunks, %s", filepath.Base(final), len(p.segs), humanSize(st.TotalSize))
+
 	gerr := g.Wait()
 	closeF()
 	tick(true)
 
 	if errors.Is(gerr, errSourceChanged) {
-		// Sunucu dosyayı değiştirmiş: eski parçalar başka bir sürüme ait.
-		// Durum silinmezse bir sonraki deneme aynı If-Range ile aynı 200'ü
-		// alır ve bütçe bitene kadar döner.
+		// The server changed the file: the old segments belong to another
+		// version. If the state isn't deleted the next attempt gets the same
+		// 200 with the same If-Range and spins until the budget runs out.
 		_ = os.Remove(part)
 		_ = os.Remove(statePath)
 		return Result{}, Retryable(gerr)
@@ -362,18 +542,35 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		return Result{}, gerr
 	}
 	if got := doneBytes(); got != total {
-		return Result{}, Retryable(fmt.Errorf("%w: %d/%d bayt (%s)", ErrIncomplete, got, total, filepath.Base(final)))
+		return Result{}, Retryable(fmt.Errorf("%w: %d/%d bytes (%s)", ErrIncomplete, got, total, filepath.Base(final)))
 	}
 
-	// Bütünlük: sha256 sıralı, dosya baştan okunuyor.
-	sum, err := hashFile(part)
+	// Integrity: sha256 is sequential, the file is read from the start. A
+	// decoder's integrity check (mega's meta-MAC) rides along in the same read.
+	var verifier site.Verifier
+	if d.NewVerifier != nil {
+		v, verr := d.NewVerifier(it)
+		if verr != nil {
+			return Result{}, verr
+		}
+		verifier = v
+	}
+	sum, err := hashFile(part, verifier)
 	if err != nil {
 		return Result{}, err
+	}
+	if verifier != nil {
+		if verr := verifier.Verify(); verr != nil {
+			_ = os.Remove(part)
+			_ = os.Remove(statePath)
+			return Result{}, fmt.Errorf("%w: %v (%s) — .part deleted, can be retried",
+				ErrIntegrity, verr, filepath.Base(final))
+		}
 	}
 	if it.SHA256 != "" && !strings.EqualFold(sum, it.SHA256) {
 		_ = os.Remove(part)
 		_ = os.Remove(statePath)
-		return Result{}, fmt.Errorf("%w: beklenen %s, hesaplanan %s (%s) — .part silindi, tekrar denenebilir",
+		return Result{}, fmt.Errorf("%w: expected %s, computed %s (%s) — .part deleted, can be retried",
 			ErrSHA256Mismatch, it.SHA256, sum, filepath.Base(final))
 	}
 	if err := os.Rename(part, final); err != nil {
@@ -383,23 +580,56 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 	return Result{Path: final, Size: total, SHA256: sum}, nil
 }
 
-// probe, ilk baytı isteyerek boyutu, doğrulayıcıyı ve Range desteğini öğrenir.
+// firstByte asks for the file's first byte: in the URL when the site takes
+// ranges there (RangeURL), otherwise with a Range header. It is the smallest
+// request that is still a real transfer: the segmented download's probe and
+// the queue's "has the quota opened" check both use it. The body (at most
+// 16 KB of it) comes back already read.
+func (d *Downloader) firstByte(ctx context.Context, target string, it site.Item) (*http.Response, []byte, error) {
+	reqURL := target
+	if d.RangeURL != nil {
+		reqURL = d.RangeURL(target, 0, 1)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	d.setHeaders(req, it)
+	if d.RangeURL == nil {
+		req.Header.Set("Range", "bytes=0-0")
+	}
+	resp, err := d.client().Do(req)
+	if err != nil {
+		return nil, nil, Retryable(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+	return resp, body, nil
+}
+
+// probe learns the size, validator and range support by asking for the first byte.
 func (d *Downloader) probe(ctx context.Context, target string, it site.Item) (size int64, validator, vtype string, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	resp, body, err := d.firstByte(ctx, target, it)
 	if err != nil {
 		return 0, "", "", err
 	}
-	d.setHeaders(req, it)
-	req.Header.Set("Range", "bytes=0-0")
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		return 0, "", "", Retryable(err)
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-
-	switch resp.StatusCode {
-	case http.StatusPartialContent:
+	switch {
+	case d.RangeURL != nil && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent):
+		// The range was in the URL: exactly one byte must come back. More
+		// means the server ignored it and sent the file from the start.
+		if len(body) != 1 {
+			return 0, "", "", errNoRangeSupport
+		}
+		if verr := d.validate(resp); verr != nil {
+			return 0, "", "", verr
+		}
+		size = it.Size
+		if _, total, perr := parseContentRange(resp.Header.Get("Content-Range")); perr == nil && total > 0 {
+			size = total
+		}
+		v, vt := pickValidator(resp)
+		return size, v, vt, nil
+	case resp.StatusCode == http.StatusPartialContent:
 		if verr := d.validate(resp); verr != nil {
 			return 0, "", "", verr
 		}
@@ -409,25 +639,59 @@ func (d *Downloader) probe(ctx context.Context, target string, it site.Item) (si
 		}
 		v, vt := pickValidator(resp)
 		return total, v, vt, nil
-	case http.StatusOK:
-		// Aralık yok sayıldı.
+	case resp.StatusCode == http.StatusOK:
+		// The range was ignored.
 		return 0, "", "", errNoRangeSupport
 	default:
-		return 0, "", "", d.classifyFailure(resp)
+		return 0, "", "", d.classifyStatus(resp, body)
 	}
 }
 
-// runSegment, bir parçayı bitene kadar sürer: geçici hatada bekleyip
-// yeniden dener, sunucu bağlantı sayısından şikâyet ederse (503/429)
-// paralelliği düşürür. Kalıcı hatalar (kaynak değişti, adres süresi doldu,
-// 4xx) hemen döner ve grubu düşürür.
-func (d *Downloader) runSegment(ctx context.Context, sem *shrinkSem, target string, it site.Item, st State, f *os.File, mu *sync.Mutex, seg *Segment, tick func(bool)) error {
-	for attempt := 0; ; attempt++ {
-		if err := sem.acquire(ctx); err != nil {
-			return err
+// CheckAccess reports whether the item can be transferred right now, using
+// the smallest request that is still a real transfer: its first byte. nil
+// means yes. Otherwise the error is classified like a download's: a quota
+// error (site.QuotaOf) means the quota is still exhausted, IsURLExpired means
+// the URL has to be resolved again (mega binds it to the IP that asked for
+// it, so a VPN switch expires it).
+//
+// The queue calls it every few seconds while a site's quota is exhausted, so
+// that a VPN switch is noticed right away without downloading a whole file
+// to find out.
+func (d *Downloader) CheckAccess(ctx context.Context, it site.Item) error {
+	target := it.URL
+	if d.PrepareURL != nil {
+		prepared, perr := d.PrepareURL(ctx, target)
+		if perr != nil {
+			return Retryable(perr)
 		}
-		err := d.fetchSegment(ctx, target, it, st, f, mu, seg, tick)
-		sem.release()
+		target = prepared
+	}
+	resp, body, err := d.firstByte(ctx, target, it)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+		return nil
+	}
+	return d.classifyStatus(resp, body)
+}
+
+// IsURLExpired reports whether err says the item's URL is no longer valid
+// and has to be resolved again (403/410 that the site didn't classify
+// otherwise).
+func IsURLExpired(err error) bool {
+	var e *urlExpiredError
+	return errors.As(err, &e)
+}
+
+// runChunk drives a chunk until it is done: on a transient error it waits
+// and retries. If the server complains about the number of connections
+// (503/429) the pool's limit drops and the chunk is handed back (errYield):
+// one connection fewer, the chunk is taken again. Permanent errors (source
+// changed, URL expired, 4xx) return right away and bring down the group.
+func (d *Downloader) runChunk(ctx context.Context, p *chunkPool, i int, target string, it site.Item, st State, f *os.File, tick func(bool)) error {
+	for attempt := 0; ; attempt++ {
+		err := d.fetchSegment(ctx, target, it, st, f, &p.mu, &p.segs[i], tick)
 		if err == nil {
 			return nil
 		}
@@ -439,9 +703,10 @@ func (d *Downloader) runSegment(ctx context.Context, sem *shrinkSem, target stri
 			return err
 		}
 		if isOverloaded(err) {
-			if sem.shrink() {
-				d.logf("%s: sunucu bağlantı sayısından şikâyetçi (%v); paralellik %d'e düşürüldü",
-					filepath.Base(it.Filename), firstLineOf(err), sem.capacity())
+			if n, ok := p.shrink(); ok {
+				d.logf("%s: server complains about the number of connections (%v); parallelism lowered to %d",
+					filepath.Base(it.Filename), firstLineOf(err), n)
+				return errYield
 			}
 		}
 		wait := segmentBackoffBase << uint(attempt)
@@ -458,7 +723,8 @@ func (d *Downloader) runSegment(ctx context.Context, sem *shrinkSem, target stri
 
 type retryableError interface{ Retryable() bool }
 
-// overloadedError, sunucunun "çok fazla bağlantı" dediği durumlar: 503 ve 429.
+// overloadedError covers the cases where the server says "too many
+// connections": 503 and 429.
 type overloadedError struct{ status int }
 
 func (e *overloadedError) Error() string   { return fmt.Sprintf("HTTP %d", e.status) }
@@ -466,7 +732,7 @@ func (e *overloadedError) Retryable() bool { return true }
 func isOverloaded(err error) bool          { var o *overloadedError; return errors.As(err, &o) }
 func firstLineOf(err error) string         { return firstLine(err.Error()) }
 
-// firstLine, çok satırlı hata mesajının ilk satırı (log satırı tek satır kalsın).
+// firstLine is the first line of a multi-line error message (so a log line stays one line).
 func firstLine(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		return strings.TrimSpace(s[:i])
@@ -474,7 +740,7 @@ func firstLine(s string) string {
 	return s
 }
 
-// fetchSegment, tek bir aralığı kaldığı yerden çeker ve dosyaya yazar.
+// fetchSegment fetches a single range from where it left off and writes it to the file.
 func (d *Downloader) fetchSegment(ctx context.Context, target string, it site.Item, st State, f *os.File, mu *sync.Mutex, seg *Segment, report func(bool)) error {
 	mu.Lock()
 	start := seg.Start + seg.Done
@@ -484,37 +750,61 @@ func (d *Downloader) fetchSegment(ctx context.Context, target string, it site.It
 		return nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	reqURL := target
+	if d.RangeURL != nil {
+		reqURL = d.RangeURL(target, start, end)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return err
 	}
 	d.setHeaders(req, it)
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end-1))
-	if st.Validator != "" {
-		// Parçalar aynı sürüme ait olmak ZORUNDA; sunucu dosyayı değiştirdiyse
-		// 200 döner ve aşağıda yakalanır.
-		req.Header.Set("If-Range", st.Validator)
+	if d.RangeURL == nil {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end-1))
+		if st.Validator != "" {
+			// The segments MUST belong to the same version; if the server
+			// changed the file it returns 200, caught below.
+			req.Header.Set("If-Range", st.Validator)
+		}
 	}
-	resp, err := d.Client.Do(req)
+	resp, err := d.client().Do(req)
 	if err != nil {
 		return Retryable(err)
 	}
 	defer resp.Body.Close()
 
-	switch resp.StatusCode {
-	case http.StatusPartialContent:
+	switch {
+	case d.RangeURL != nil && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent):
+		// The range was in the URL; the body must be exactly that range.
+		// Writing anything else at this position would corrupt the file.
+		if resp.ContentLength >= 0 && resp.ContentLength != end-start {
+			return fmt.Errorf("segment %d-%d: asked for %d bytes in the URL, the server sent %d",
+				start, end-1, end-start, resp.ContentLength)
+		}
+	case resp.StatusCode == http.StatusPartialContent:
 		gotStart, _, perr := parseContentRange(resp.Header.Get("Content-Range"))
 		if perr != nil || gotStart != start {
-			return fmt.Errorf("parça %d-%d: Content-Range %d'den başlıyor", start, end-1, gotStart)
+			return fmt.Errorf("segment %d-%d: Content-Range starts at %d", start, end-1, gotStart)
 		}
-	case http.StatusOK:
-		// Kaynak değişmiş ya da Range yok sayıldı: parçaları karıştırmak
-		// bozuk dosya üretir. Çağıran durumu silip baştan başlatır.
+	case resp.StatusCode == http.StatusOK:
+		// The source changed or Range was ignored: mixing segments produces a
+		// corrupt file. The caller deletes the state and starts over.
 		return errSourceChanged
-	case http.StatusRequestedRangeNotSatisfiable:
-		return fmt.Errorf("parça %d-%d: 416", start, end-1)
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		return fmt.Errorf("segment %d-%d: 416", start, end-1)
 	default:
 		return d.classifyFailure(resp)
+	}
+
+	// A decoded file (mega): every segment decodes its own range, starting
+	// at its own plaintext offset.
+	var body io.Reader = resp.Body
+	if d.DecodeRange != nil {
+		dec, derr := d.DecodeRange(it, start, resp.Body)
+		if derr != nil {
+			return derr
+		}
+		body = dec
 	}
 
 	buf := make([]byte, 256<<10)
@@ -525,7 +815,7 @@ func (d *Downloader) fetchSegment(ctx context.Context, target string, it site.It
 			want = int(rem)
 		}
 		want = d.Throttle.chunkFor(want)
-		n, rerr := resp.Body.Read(buf[:want])
+		n, rerr := body.Read(buf[:want])
 		if n > 0 {
 			if terr := d.Throttle.Wait(ctx, n); terr != nil {
 				return terr
@@ -552,16 +842,21 @@ func (d *Downloader) fetchSegment(ctx context.Context, target string, it site.It
 		}
 	}
 	if pos < end {
-		return Retryable(fmt.Errorf("%w: parça %d-%d %d baytta kesildi", ErrIncomplete, start, end-1, pos))
+		return Retryable(fmt.Errorf("%w: segment %d-%d cut off at byte %d", ErrIncomplete, start, end-1, pos))
 	}
 	return nil
 }
 
-// classifyFailure, parça isteklerindeki 2xx dışı durumları hataya çevirir.
-// attempt'teki kurallarla aynı: 403/410 sınıflandırıcıya sorulur, yoksa
-// "adres süresi dolmuş"; 5xx/429 geçici; diğer 4xx kalıcı.
+// classifyFailure turns non-2xx statuses of segment requests into errors.
 func (d *Downloader) classifyFailure(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+	return d.classifyStatus(resp, body)
+}
+
+// classifyStatus: same rules as in attempt: the site's classifier first;
+// 403/410 "URL expired"; 503/429 overloaded (transient, and a signal to lower
+// parallelism); other 5xx transient; other 4xx permanent.
+func (d *Downloader) classifyStatus(resp *http.Response, body []byte) error {
 	if d.Classify != nil {
 		if cerr := d.Classify(resp, body); cerr != nil {
 			return cerr
@@ -571,8 +866,6 @@ func (d *Downloader) classifyFailure(resp *http.Response) error {
 	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusGone:
 		return &urlExpiredError{status: resp.StatusCode}
 	case resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests:
-		// Sunucu yük/bağlantı sayısından şikâyetçi: geçici VE paralelliği
-		// düşürme sinyali.
 		return &overloadedError{status: resp.StatusCode}
 	case resp.StatusCode >= 500:
 		return Retryable(fmt.Errorf("HTTP %s", resp.Status))
@@ -581,7 +874,7 @@ func (d *Downloader) classifyFailure(resp *http.Response) error {
 	}
 }
 
-// setHeaders, item'ın başlıklarını ve User-Agent'ı isteğe uygular.
+// setHeaders applies the item's headers and the User-Agent to the request.
 func (d *Downloader) setHeaders(req *http.Request, it site.Item) {
 	if d.UserAgent != "" {
 		req.Header.Set("User-Agent", d.UserAgent)
@@ -591,21 +884,26 @@ func (d *Downloader) setHeaders(req *http.Request, it site.Item) {
 	}
 }
 
-// hashFile, dosyanın sha256'sını baştan okuyarak hesaplar.
-func hashFile(path string) (string, error) {
+// hashFile computes a file's sha256 by reading it from the start. If also is
+// non-nil it is fed the same bytes (a decoder's integrity check).
+func hashFile(path string, also io.Writer) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	var w io.Writer = h
+	if also != nil {
+		w = io.MultiWriter(h, also)
+	}
+	if _, err := io.Copy(w, f); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// humanSize, log için kaba boyut.
+// humanSize is a rough size for logs.
 func humanSize(n int64) string {
 	switch {
 	case n >= 1<<30:

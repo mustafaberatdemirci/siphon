@@ -1,9 +1,10 @@
-// Package doctor, katman teşhisini çalıştırır ve okunabilir bir rapor basar.
+// Package doctor runs the layer diagnosis and prints a readable report.
 //
-// Bu paket aracın var oluş gerekçesi. Scraper yazmanın gerçek maliyeti kod
-// yazma süresi değil, altı ay sonra "0 dosya indi" mesajını görüp nedenini
-// bilmemek. doctor o tahmini ortadan kaldırıyor: hangi katmanın koptuğunu
-// saniyeler içinde söylüyor ve kırılan yanıtı diske kaydediyor.
+// This package is the tool's reason to exist. The real cost of writing a
+// scraper isn't the time to write the code, it is seeing "0 files
+// downloaded" six months later and not knowing why. doctor removes that
+// guesswork: it tells within seconds which layer broke and saves the broken
+// response to disk.
 package doctor
 
 import (
@@ -20,21 +21,21 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// Named, bir resolver'ı adıyla eşler. site.Resolver adını taşımıyor.
+// Named pairs a resolver with its name. site.Resolver doesn't carry its name.
 type Named struct {
 	Name     string
 	Resolver site.Resolver
 }
 
-// Report, tek bir sitenin teşhis sonucu.
+// Report is the diagnosis result of a single site.
 type Report struct {
 	Site    string
 	Results []site.LayerResult
-	// Err, Diagnose'un kendisi çalışamadığında dolu olur (canary listesi boş gibi).
+	// Err is set when Diagnose itself couldn't run (e.g. an empty canary list).
 	Err error
 }
 
-// Worst, rapordaki en kötü durumu döndürür.
+// Worst returns the worst status in the report.
 func (r Report) Worst() site.LayerStatus {
 	if r.Err != nil {
 		return site.StatusFail
@@ -51,11 +52,11 @@ func (r Report) Worst() site.LayerStatus {
 	return worst
 }
 
-// Run, her site için teşhis çalıştırır.
+// Run runs the diagnosis for each site.
 //
-// Siteler SIRAYLA çalışıyor, paralel değil: doctor'ın çıktısı insan için ve
-// karışık sıralı satırlar teşhisi zorlaştırır. Ayrıca teşhis sırasında rate
-// limit'e çarpmak, teşhis edilen şeyi bozmak olurdu.
+// Sites run SEQUENTIALLY, not in parallel: doctor's output is for humans and
+// interleaved lines make diagnosis harder. Also, hitting a rate limit during
+// diagnosis would break the very thing being diagnosed.
 func Run(ctx context.Context, sites []Named) []Report {
 	out := make([]Report, 0, len(sites))
 	for _, s := range sites {
@@ -65,7 +66,7 @@ func Run(ctx context.Context, sites []Named) []Report {
 	return out
 }
 
-// Format, raporları yazar ve en kötü durumu döndürür.
+// Format writes the reports and returns the worst status.
 func Format(w io.Writer, reports []Report) site.LayerStatus {
 	worst := site.StatusOK
 	for i, r := range reports {
@@ -84,7 +85,7 @@ func Format(w io.Writer, reports []Report) site.LayerStatus {
 			continue
 		}
 		if len(r.Results) == 0 {
-			fmt.Fprintf(w, "  %-10s %-5s %s\n", "-", site.StatusWarn, "teşhis sonucu yok")
+			fmt.Fprintf(w, "  %-10s %-5s %s\n", "-", site.StatusWarn, "no diagnosis results")
 			continue
 		}
 		for _, res := range r.Results {
@@ -97,12 +98,12 @@ func Format(w io.Writer, reports []Report) site.LayerStatus {
 	return worst
 }
 
-// Recorder, --record ile etkinleşen yanıt kaydedicisi.
+// Recorder is the response recorder enabled by --record.
 //
-// Kaydedilen dosyalar testdata'ya OTOMATİK kopyalanmıyor. Bu bilinçli: kayıt
-// gerçek bir yanıt ve içinde dosya adları gibi içerik izleri olabilir. Neyin
-// fixture olacağına insan karar verir; dağıtılan binary de kaynak ağacının
-// içinde değildir.
+// Saved files are NOT copied into testdata AUTOMATICALLY. This is deliberate:
+// a recording is a real response and may contain traces of content such as
+// file names. A human decides what becomes a fixture; the distributed binary
+// isn't inside the source tree either.
 type Recorder struct {
 	Dir string
 
@@ -111,10 +112,10 @@ type Recorder struct {
 	errs  []error
 }
 
-// DefaultDir, --record-dir verilmediğinde kullanılır.
+// DefaultDir is used when --record-dir isn't given.
 const DefaultDir = "recordings"
 
-// For, belirli bir site için kayıt fonksiyonu üretir.
+// For produces a record function for a specific site.
 func (r *Recorder) For(siteName string) func(name string, data []byte) {
 	return func(name string, data []byte) {
 		r.save(siteName, name, data)
@@ -126,8 +127,8 @@ func (r *Recorder) save(siteName, name string, data []byte) {
 	if dir == "" {
 		dir = DefaultDir
 	}
-	// Zaman damgası ad çakışmasını önlüyor ve diff alırken hangi kaydın daha
-	// yeni olduğunu söylüyor.
+	// The timestamp prevents name collisions and tells which recording is
+	// newer when diffing.
 	stamp := time.Now().UTC().Format("20060102-150405")
 	fname := fmt.Sprintf("%s-%s-%s", stamp, safe(siteName), safe(name))
 	path := filepath.Join(dir, fname)
@@ -145,7 +146,7 @@ func (r *Recorder) save(siteName, name string, data []byte) {
 	r.saved = append(r.saved, path)
 }
 
-// Saved, kaydedilen dosya yollarını döndürür.
+// Saved returns the paths of the saved files.
 func (r *Recorder) Saved() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -155,8 +156,9 @@ func (r *Recorder) Saved() []string {
 	return out
 }
 
-// Errs, kayıt sırasında oluşan hataları döndürür.
-// Kayıt hatası teşhisi DÜŞÜRMEZ: asıl iş katman raporu, kayıt yardımcı.
+// Errs returns the errors that happened while recording.
+// A recording error does NOT fail the diagnosis: the real job is the layer
+// report, recording is a helper.
 func (r *Recorder) Errs() []error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -165,13 +167,13 @@ func (r *Recorder) Errs() []error {
 	return out
 }
 
-// safe, dosya adı için asgari temizlik. Tam Windows temizliği dl.Component'te
-// ama doctor oraya bağımlı olmasın: kayıt adları bizim ürettiğimiz kısa
-// etiketler, site adı ve dosya adı.
+// safe does minimal cleanup for a file name. The full Windows cleanup is in
+// dl.Component, but doctor shouldn't depend on it: recording names are short
+// labels we produce ourselves, the site name and the file name.
 func safe(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "kayit"
+		return "record"
 	}
 	var b strings.Builder
 	for _, r := range s {

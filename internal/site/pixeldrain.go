@@ -15,26 +15,26 @@ import (
 	"strings"
 )
 
-// PixeldrainName, registry kayıt anahtarı.
+// PixeldrainName is the registry key.
 const PixeldrainName = "pixeldrain"
 
-// NewPixeldrain, registry'ye verilecek fabrikadır.
-// ExtraPixeldrainAPIKey, sites.toml'daki [site.extra] api_key anahtarı.
+// ExtraPixeldrainAPIKey is the [site.extra] api_key key in sites.toml.
 //
-// pixeldrain'in kendi belgesi: "Hotlinking is only allowed when either the
-// uploader or the downloader has a premium subscription." Üçüncü parti bir
-// indirici, tanım gereği hotlink. Bir dosyanın indirme sayısı görüntülenme
-// sayısının üç katını aşınca captcha kapısı iniyor ve bu DOSYA BAŞINA bir
-// sayaç: IP değiştirmek (VPN) hiçbir şey değiştirmiyor.
+// pixeldrain's own documentation: "Hotlinking is only allowed when either the
+// uploader or the downloader has a premium subscription." A third-party
+// downloader is a hotlink by definition. Once a file's download count exceeds
+// three times its view count a captcha gate comes down, and it is a PER-FILE
+// counter: changing IP (VPN) changes nothing.
 //
-// Tasarlanmış çıkış yolu ücretli hesabın API anahtarı. HTTP Basic ile
-// gönderiliyor: kullanıcı adı boş, parola anahtar. Hem API çağrılarına hem
-// TRANSFER isteklerine ekleniyor; sınır asıl transferde biniyor.
+// The designed way out is a paid account's API key. It is sent with HTTP
+// Basic: empty username, key as password. It is added to both API calls and
+// TRANSFER requests; the limit applies on the actual transfer.
 //
-// Captcha'yı çözmeye veya görüntülenme sayısını şişirmeye ÇALIŞMIYORUZ:
-// birincisi kapsam dışı, ikincisi sitenin erişim kontrolünü kandırmak.
+// We DO NOT try to solve the captcha or inflate the view count: the first is
+// out of scope, the second is tricking the site's access control.
 const ExtraPixeldrainAPIKey = "api_key"
 
+// NewPixeldrain is the factory given to the registry.
 func NewPixeldrain(cfg SiteConfig) Resolver {
 	cfg = cfg.WithDefaults()
 	return &pixeldrain{
@@ -45,11 +45,11 @@ func NewPixeldrain(cfg SiteConfig) Resolver {
 
 type pixeldrain struct {
 	cfg    SiteConfig
-	apiKey string // boşsa anonim
+	apiKey string // anonymous if empty
 }
 
-// authHeader, API anahtarı varsa HTTP Basic başlığının değerini üretir.
-// Anahtar log'a, kayda veya hata kanıtına ASLA yazılmıyor; yalnızca başlık.
+// authHeader produces the HTTP Basic header value if there is an API key.
+// The key is NEVER written to logs, recordings or error evidence; only the header.
 func (p *pixeldrain) authHeader() string {
 	if p.apiKey == "" {
 		return ""
@@ -57,10 +57,10 @@ func (p *pixeldrain) authHeader() string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(":"+p.apiKey))
 }
 
-// APIError, pixeldrain'in hata zarfıdır. Value alanı kararların dayanağıdır;
-// message insan içindir ve değişebilir.
+// APIError is pixeldrain's error envelope. The Value field is what decisions
+// are based on; message is for humans and may change.
 //
-// Bilinen value kodları (hepsi 403, aksi belirtilmedikçe):
+// Known value codes (all 403 unless noted otherwise):
 // file_rate_limited_captcha_required, virus_detected_captcha_required,
 // hotlink_detected, ip_download_limited_captcha_required,
 // max_concurrent_downloads, transfer_limit_exceeded, download_limit_exceeded,
@@ -75,9 +75,9 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("pixeldrain %d %s: %s", e.Status, e.Value, e.Message)
 }
 
-// Retryable, hatanın bekleyip tekrar denemeye değer olup olmadığını söyler.
-// Adım 6'daki backoff katmanı bunu okur. Captcha isteyen kodlar retryable
-// DEĞİLDİR: beklemek çözmez, kullanıcıya söylemek gerekir.
+// Retryable reports whether the error is worth waiting and retrying.
+// The backoff layer from step 6 reads it. Codes asking for a captcha are NOT
+// retryable: waiting doesn't solve them, the user has to be told.
 func (e *APIError) Retryable() bool {
 	switch e.Value {
 	case "transfer_limit_exceeded", "download_limit_exceeded", "max_concurrent_downloads":
@@ -87,8 +87,8 @@ func (e *APIError) Retryable() bool {
 	}
 }
 
-// CaptchaRequired, aracın durup kullanıcıya haber vermesi gereken durumlar.
-// Kapsam sınırı: captcha çözmeye çalışmıyoruz.
+// CaptchaRequired covers the cases where the tool must stop and tell the user.
+// Scope boundary: we don't try to solve captchas.
 func (e *APIError) CaptchaRequired() bool {
 	return strings.HasSuffix(e.Value, "_captcha_required") || e.Value == "recpatcha_failed"
 }
@@ -103,12 +103,12 @@ const (
 type ref struct {
 	kind refKind
 	id   string
-	host string // isteklerin gideceği host; girdi URL'inin kendi host'u
+	host string // the host requests go to; the input URL's own host
 }
 
-// Match, URL'in bu resolver'a ait olup olmadığını söyler.
-// LegacyDomains da kabul edilir: ölü bir domain'den gelen linki TANIMAK gerekir,
-// o domain'e istek atmak gerekmez.
+// Match reports whether the URL belongs to this resolver.
+// LegacyDomains are accepted too: a link from a dead domain must be
+// RECOGNIZED, but no request should go to that domain.
 func (p *pixeldrain) Match(u string) bool {
 	_, err := p.parse(u)
 	return err == nil
@@ -117,67 +117,68 @@ func (p *pixeldrain) Match(u string) bool {
 func (p *pixeldrain) parse(raw string) (ref, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return ref{}, errors.New("boş URL")
+		return ref{}, errors.New("empty URL")
 	}
 	if !strings.Contains(raw, "//") {
 		raw = "https://" + raw
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return ref{}, fmt.Errorf("URL ayrıştırılamadı: %w", err)
+		return ref{}, fmt.Errorf("could not parse URL: %w", err)
 	}
 	host := normalizeHost(u.Host)
 	known := MatchHost(host, p.cfg.Domains) || MatchHost(host, p.cfg.LegacyDomains)
 	if !known {
-		return ref{}, fmt.Errorf("bilinmeyen host: %s", host)
+		return ref{}, fmt.Errorf("unknown host: %s", host)
 	}
 
 	seg := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(seg) == 0 || seg[0] == "" {
-		return ref{}, errors.New("yol boş")
+		return ref{}, errors.New("empty path")
 	}
 
 	switch seg[0] {
 	case "l":
 		if len(seg) < 2 || seg[1] == "" {
-			return ref{}, errors.New("albüm id yok")
+			return ref{}, errors.New("no album id")
 		}
 		return ref{kind: refAlbum, id: seg[1], host: host}, nil
 	case "u":
 		if len(seg) < 2 || seg[1] == "" {
-			return ref{}, errors.New("dosya id yok")
+			return ref{}, errors.New("no file id")
 		}
 		return ref{kind: refFile, id: seg[1], host: host}, nil
 	case "api":
-		// /api/file/{id} ve /api/file/{id}/info
+		// /api/file/{id} and /api/file/{id}/info
 		if len(seg) >= 3 && seg[1] == "file" && seg[2] != "" {
 			return ref{kind: refFile, id: seg[2], host: host}, nil
 		}
 		if len(seg) >= 3 && seg[1] == "list" && seg[2] != "" {
 			return ref{kind: refAlbum, id: seg[2], host: host}, nil
 		}
-		return ref{}, errors.New("desteklenmeyen api yolu")
+		return ref{}, errors.New("unsupported api path")
 	default:
-		// pixeldra.in/{id} biçimindeki kısa link. Sadece tek segmentte geçerli.
+		// Short link of the form pixeldra.in/{id}. Only valid as a single segment.
 		if len(seg) == 1 {
 			return ref{kind: refFile, id: seg[0], host: host}, nil
 		}
-		return ref{}, fmt.Errorf("desteklenmeyen yol: /%s", strings.Join(seg, "/"))
+		return ref{}, fmt.Errorf("unsupported path: /%s", strings.Join(seg, "/"))
 	}
 }
 
-// fetchHost, isteklerin gideceği host'u seçer. Girdi URL'i ölü bir domain'den
-// geliyorsa (LegacyDomains) o host'a istek atılmaz; aktif listenin ilki kullanılır.
+// fetchHost picks the host requests go to. If the input URL comes from a dead
+// domain (LegacyDomains) no request is sent to that host; the first entry of
+// the active list is used.
 func (p *pixeldrain) fetchHost(r ref) (string, error) {
 	if MatchHost(r.host, p.cfg.Domains) {
 		return r.host, nil
 	}
 	if len(p.cfg.Domains) == 0 {
-		return "", errors.New("aktif domain listesi boş")
+		return "", errors.New("active domain list is empty")
 	}
 	first := p.cfg.Domains[0]
 	if strings.ContainsRune(first, '*') {
-		return "", fmt.Errorf("aktif domain listesinin ilki joker: %q", first)
+		return "", fmt.Errorf("the first entry of the active domain list is a wildcard: %q", first)
 	}
 	return normalizeHost(first), nil
 }
@@ -189,13 +190,13 @@ func (p *pixeldrain) client() *http.Client {
 	return http.DefaultClient
 }
 
-// get, bir API çağrısı yapar. pageURL, politikanın "item_page" olduğu durumda
-// Referer olarak kullanılacak İNSAN sayfasıdır; istenen API adresi değil.
-// İkisini karıştırmak Referer'ı anlamsız kılar (ve bunkr'da doğrudan kırar).
+// get makes an API call. pageURL is the HUMAN page used as the Referer when
+// the policy is "item_page"; not the API URL being requested. Mixing the two
+// makes the Referer meaningless (and breaks bunkr outright).
 func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return Errorf(LayerFetch, rawURL, "istek kurulamadı: %v", err)
+		return Errorf(LayerFetch, rawURL, "could not build request: %v", err)
 	}
 	if p.cfg.UserAgent != "" {
 		req.Header.Set("User-Agent", p.cfg.UserAgent)
@@ -203,8 +204,9 @@ func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) e
 	if a := p.authHeader(); a != "" {
 		req.Header.Set("Authorization", a)
 	}
-	// RefererPolicy pixeldrain'de "none" olmalı: yanlış Referer tam olarak
-	// hotlink_detected tetikler. Politika açıkça origin/item_page ise uygulanır.
+	// On pixeldrain RefererPolicy must be "none": a wrong Referer triggers
+	// exactly hotlink_detected. If the policy is explicitly origin/item_page
+	// it is applied.
 	switch p.cfg.RefererPolicy {
 	case RefererOrigin:
 		req.Header.Set("Referer", "https://"+req.URL.Host+"/")
@@ -222,7 +224,7 @@ func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) e
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if readErr != nil {
-		return Errorf(LayerFetch, rawURL, "gövde okunamadı: %v", readErr)
+		return Errorf(LayerFetch, rawURL, "could not read body: %v", readErr)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -245,14 +247,14 @@ func (p *pixeldrain) get(ctx context.Context, rawURL, pageURL string, out any) e
 	}
 
 	if err := json.Unmarshal(body, out); err != nil {
-		return Errorf(LayerParse, rawURL, "JSON çözülemedi: %v", err)
+		return Errorf(LayerParse, rawURL, "could not decode JSON: %v", err)
 	}
 	return nil
 }
 
-// getRaw, get ile aynı yolu izler ama çözülmüş yapı yerine ham gövdeyi
-// döndürür. doctor'ın --record'u için gerekli: kaydedilecek şey çözülmüş yapı
-// değil, sunucunun gerçekten gönderdiği baytlar.
+// getRaw follows the same path as get but returns the raw body instead of a
+// decoded structure. Needed for doctor's --record: what gets recorded is the
+// bytes the server actually sent, not the decoded structure.
 func (p *pixeldrain) getRaw(ctx context.Context, rawURL string) ([]byte, error) {
 	var raw json.RawMessage
 	if err := p.get(ctx, rawURL, "", &raw); err != nil {
@@ -261,9 +263,9 @@ func (p *pixeldrain) getRaw(ctx context.Context, rawURL string) ([]byte, error) 
 	return raw, nil
 }
 
-// classifyTransportError, taşıma katmanı hatasını doğru Layer'a bağlar.
-// DNS ile TLS ayrımı kritik: ikisi de "site açılmıyor" gibi görünür ama
-// düzeltmeleri farklıdır.
+// classifyTransportError ties a transport-level error to the right Layer.
+// The DNS vs TLS distinction is critical: both look like "the site won't
+// open" but their fixes differ.
 func classifyTransportError(rawURL string, err error) error {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
@@ -275,7 +277,7 @@ func classifyTransportError(rawURL string, err error) error {
 	if errors.As(err, &certErr) || errors.As(err, &unknownAuth) || errors.As(err, &hostErr) {
 		return &LayerError{
 			Layer: LayerTLS, Err: err,
-			Evidence: rawURL + " (sertifika doğrulanamadı; operatör araya girmiş olabilir)",
+			Evidence: rawURL + " (certificate could not be verified; the ISP may be intercepting)",
 		}
 	}
 	var recordErr tls.RecordHeaderError
@@ -285,20 +287,21 @@ func classifyTransportError(rawURL string, err error) error {
 	return &LayerError{Layer: LayerFetch, Err: err, Evidence: rawURL}
 }
 
-// ClassifyStatus, indiricinin 403/410 yanıtlarını doğru yorumlamasını sağlar.
-// site.StatusClassifier arayüzünü karşılar.
+// ClassifyStatus lets the downloader interpret 403/410 responses correctly.
+// It satisfies site.StatusClassifier.
 //
-// Bu olmadan her 403 "imzalı URL süresi doldu" sayılır ve araç rate limitliyken
-// URL'i yeniden çözüp tekrar dener. pixeldrain ise transfer_limit_exceeded,
-// hotlink_detected ve *_captcha_required durumlarını da 403 ile bildiriyor.
+// Without it every 403 counts as "signed URL expired" and the tool would
+// re-resolve the URL and retry while rate limited. pixeldrain, however, also
+// reports transfer_limit_exceeded, hotlink_detected and *_captcha_required
+// with 403.
 func (p *pixeldrain) ClassifyStatus(resp *http.Response, body []byte) error {
 	var env struct {
 		Value   string `json:"value"`
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(body, &env) != nil || env.Value == "" {
-		// Tanınabilir bir API zarfı değil: CDN'in imzalı URL reddi olabilir.
-		// nil dönmek "varsayılanı uygula" demek.
+		// Not a recognizable API envelope: it may be the CDN rejecting a
+		// signed URL. Returning nil means "apply the default".
 		return nil
 	}
 	evidence := ""
@@ -316,7 +319,7 @@ func (p *pixeldrain) ClassifyStatus(resp *http.Response, body []byte) error {
 	}
 }
 
-// looksLikeChallenge, 403'ün Cloudflare challenge olup olmadığını söyler.
+// looksLikeChallenge reports whether a 403 is a Cloudflare challenge.
 func looksLikeChallenge(resp *http.Response, body []byte) bool {
 	if resp.Header.Get("CF-Mitigated") != "" {
 		return true
@@ -349,8 +352,8 @@ type listInfo struct {
 
 func (p *pixeldrain) apiBase(host string) string { return "https://" + host + "/api" }
 
-// downloadURL, dosyanın gerçek indirme adresidir. pixeldrain'de bu adres
-// süreli/imzalı DEĞİL, o yüzden ResolveOne yalnızca bütünlük içindir.
+// downloadURL is the file's real download URL. On pixeldrain this URL is NOT
+// time-limited or signed, so ResolveOne is only there for completeness.
 func (p *pixeldrain) downloadURL(host, id string) string {
 	return p.apiBase(host) + "/file/" + url.PathEscape(id) + "?download"
 }
@@ -363,12 +366,12 @@ func (p *pixeldrain) albumPage(host, id string) string {
 	return "https://" + host + "/l/" + url.PathEscape(id)
 }
 
-// itemHeaders, indirme isteğine eklenecek başlıkları politikadan türetir.
+// itemHeaders derives the headers to add to the download request from the policy.
 //
-// Bu olmadan referer_policy yalnızca API çağrılarını etkiler ve asıl transfer
-// isteğine hiç yansımaz. pixeldrain'de politika "none" olduğu için sonuç boş;
-// ama bunkr item sayfası Referer'ını transferde ZORUNLU kıldığı için mekanizma
-// şimdiden doğru yerde olmak zorunda.
+// Without this, referer_policy would only affect API calls and never reach
+// the actual transfer request. On pixeldrain the policy is "none" so the
+// result is empty; but bunkr makes the item page Referer MANDATORY on the
+// transfer, so the mechanism has to be in the right place already.
 func (p *pixeldrain) itemHeaders(itemPage string) map[string]string {
 	h := map[string]string{}
 	switch p.cfg.RefererPolicy {
@@ -381,8 +384,8 @@ func (p *pixeldrain) itemHeaders(itemPage string) map[string]string {
 			h["Referer"] = u.Scheme + "://" + u.Host + "/"
 		}
 	}
-	// Ücretli hesabın anahtarı transfer isteğine de gidiyor: hotlink ve
-	// captcha sınırı tam olarak bu istekte biniyor, API çağrısında değil.
+	// The paid account's key goes to the transfer request too: the hotlink
+	// and captcha limits apply exactly on this request, not on the API call.
 	if a := p.authHeader(); a != "" {
 		h["Authorization"] = a
 	}
@@ -392,15 +395,16 @@ func (p *pixeldrain) itemHeaders(itemPage string) map[string]string {
 	return h
 }
 
-// Resolve, albüm için TEK istek atar ve gömülü files[] dizisinden Item üretir.
+// Resolve sends a SINGLE request for an album and produces Items from the
+// embedded files[] array.
 //
-// Her dosya için ayrı /info çağrılmaz: 200 dosyalık albümde 201 istek eder ve
-// Premise 3'teki rate limit'i kendi elinle tetiklersin.
+// /info is not called for each file: a 200-file album would take 201
+// requests and trigger Premise 3's rate limit with our own hands.
 //
-// Bedeli yok: pixeldrain'in resmi API belgesi files[] şemasını eksik listeliyor
-// ama gerçek yanıt dolu hash_sha256 taşıyor (34 dosyalık bir albümde 34/34
-// doğrulandı). Yani albüm üyelerinde de sha256 doğrulaması çalışıyor ve toplu
-// /info çağrısına hiç gerek yok.
+// It costs nothing: pixeldrain's official API docs list the files[] schema
+// incompletely, but the real response carries a filled hash_sha256 (verified
+// 34/34 on a 34-file album). So sha256 verification works for album members
+// too and a bulk /info call is never needed.
 func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) error) ([]ItemError, error) {
 	r, err := p.parse(u)
 	if err != nil {
@@ -428,27 +432,28 @@ func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) err
 		return nil, err
 	}
 	if !list.Success {
-		return nil, Errorf(LayerParse, u, "liste success=false döndü")
+		return nil, Errorf(LayerParse, u, "list returned success=false")
 	}
 
 	dir := sanitizeDirLabel(list.Title, list.ID)
 	var itemErrs []ItemError
 
-	// file_count ile files[] uzunlugu ayrisiyorsa liste eksik geldi. Sessizce
-	// daha az dosya indirip cikis 0 vermek, "sessiz basarisizlik yok" ilkesinin
-	// dogrudan ihlali; albumu dusurmeden hata olarak bildiriyoruz.
+	// If file_count and the length of files[] diverge, the list arrived
+	// incomplete. Silently downloading fewer files and exiting 0 would directly
+	// violate the "no silent failure" principle; we report it as an error
+	// without failing the album.
 	if list.FileCount > 0 && list.FileCount != len(list.Files) {
 		itemErrs = append(itemErrs, ItemError{
 			URL: u,
 			Err: Errorf(LayerParse, fmt.Sprintf("file_count=%d, files[]=%d",
-				list.FileCount, len(list.Files)), "liste eksik geldi"),
+				list.FileCount, len(list.Files)), "list arrived incomplete"),
 		})
 	}
 	for i, f := range list.Files {
 		if f.ID == "" {
 			itemErrs = append(itemErrs, ItemError{
 				URL: u,
-				Err: Errorf(LayerParse, fmt.Sprintf("files[%d]", i), "id boş"),
+				Err: Errorf(LayerParse, fmt.Sprintf("files[%d]", i), "empty id"),
 			})
 			continue
 		}
@@ -459,7 +464,7 @@ func (p *pixeldrain) Resolve(ctx context.Context, u string, yield func(Item) err
 			Headers:    p.itemHeaders(sourcePage),
 			Dir:        dir,
 			Filename:   f.Name,
-			SHA256:     f.HashSHA256, // liste yanıtında dolu geliyor; indirici doğrular
+			SHA256:     f.HashSHA256, // filled in the list response; the downloader verifies it
 			Size:       f.Size,
 			Index:      i,
 		}
@@ -480,7 +485,7 @@ func (p *pixeldrain) resolveFile(ctx context.Context, host, id string) (Item, er
 		return Item{}, err
 	}
 	if !info.Success {
-		return Item{}, Errorf(LayerParse, id, "info success=false döndü")
+		return Item{}, Errorf(LayerParse, id, "info returned success=false")
 	}
 	size := info.Size
 	if size == 0 {
@@ -499,17 +504,17 @@ func (p *pixeldrain) resolveFile(ctx context.Context, host, id string) (Item, er
 	}, nil
 }
 
-// ResolveOne, item sayfasından tek bir Item'ı yeniden çözer.
-// pixeldrain'de indirme adresi imzalı olmadığı için pratikte gerekmez;
-// sözleşmenin bir parçası olduğu ve bunkr'da hayati olduğu için burada da doğru
-// çalışır.
+// ResolveOne re-resolves a single Item from its item page.
+// On pixeldrain the download URL isn't signed, so in practice it isn't
+// needed; it works correctly here because it is part of the contract and
+// vital on bunkr.
 func (p *pixeldrain) ResolveOne(ctx context.Context, sourcePage string) (Item, error) {
 	r, err := p.parse(sourcePage)
 	if err != nil {
 		return Item{}, Errorf(LayerParse, sourcePage, "%v", err)
 	}
 	if r.kind != refFile {
-		return Item{}, Errorf(LayerParse, sourcePage, "item sayfası bekleniyordu, albüm geldi")
+		return Item{}, Errorf(LayerParse, sourcePage, "expected an item page, got an album")
 	}
 	host, err := p.fetchHost(r)
 	if err != nil {
@@ -518,12 +523,12 @@ func (p *pixeldrain) ResolveOne(ctx context.Context, sourcePage string) (Item, e
 	return p.resolveFile(ctx, host, r.id)
 }
 
-// Diagnose, canary listesini sırayla dener ve ilk çalışanda durur.
-// Tek canary'ye bağlanmıyor: ölçüm, bir domain'in operatör tarafından
-// engellenebildiğini ve sitenin yine de çalışır durumda olabildiğini gösterdi.
+// Diagnose tries the canary list in order and stops at the first one that works.
+// It is not tied to a single canary: measurements showed a domain can be
+// blocked by the ISP while the site itself still works.
 func (p *pixeldrain) Diagnose(ctx context.Context) ([]LayerResult, error) {
 	if len(p.cfg.CanaryURLs) == 0 {
-		return nil, errors.New("canary URL listesi boş")
+		return nil, errors.New("canary URL list is empty")
 	}
 
 	var last []LayerResult
@@ -544,7 +549,7 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	if err != nil {
 		return append(out, LayerResult{
 			Layer: LayerDNS, Status: StatusFail,
-			Detail: "canary URL ayrıştırılamadı", Evidence: canary,
+			Detail: "could not parse the canary URL", Evidence: canary,
 		})
 	}
 	host := normalizeHost(u.Host)
@@ -553,7 +558,7 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	if dnsErr != nil {
 		return append(out, LayerResult{
 			Layer: LayerDNS, Status: StatusFail,
-			Detail: "çözümlenemedi", Evidence: host + ": " + dnsErr.Error(),
+			Detail: "did not resolve", Evidence: host + ": " + dnsErr.Error(),
 		})
 	}
 	ips := make([]string, 0, len(addrs))
@@ -562,7 +567,7 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	}
 	out = append(out, LayerResult{
 		Layer: LayerDNS, Status: StatusOK,
-		Detail: fmt.Sprintf("%d adres", len(ips)), Evidence: strings.Join(ips, ", "),
+		Detail: fmt.Sprintf("%d addresses", len(ips)), Evidence: strings.Join(ips, ", "),
 	})
 
 	var probe struct {
@@ -573,7 +578,7 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	err = rawErr
 	if err == nil {
 		if jerr := json.Unmarshal(raw, &probe); jerr != nil {
-			err = Errorf(LayerParse, canary, "JSON çözülemedi: %v", jerr)
+			err = Errorf(LayerParse, canary, "could not decode JSON: %v", jerr)
 		}
 	}
 
@@ -581,44 +586,44 @@ func (p *pixeldrain) diagnoseOne(ctx context.Context, canary string) []LayerResu
 	switch {
 	case err == nil:
 		out = append(out,
-			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
-			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "challenge yok"},
+			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "handshake OK"},
+			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "no challenge"},
 			LayerResult{Layer: LayerFetch, Status: StatusOK,
-				Detail: fmt.Sprintf("200, %d bayt", len(raw))},
-			LayerResult{Layer: LayerParse, Status: StatusOK, Detail: "JSON çözüldü"},
-			// pixeldrain'de ayrı bir item sayfası yok: liste yanıtı dosya
-			// id'lerini doğrudan taşıyor, zincir tek adım.
+				Detail: fmt.Sprintf("200, %d bytes", len(raw))},
+			LayerResult{Layer: LayerParse, Status: StatusOK, Detail: "JSON decoded"},
+			// pixeldrain has no separate item page: the list response carries
+			// file ids directly, the chain is a single step.
 			LayerResult{Layer: LayerItemPage, Status: StatusOK,
-				Detail: "pixeldrain'de ayrı item sayfası yok, zincir tek adım"},
-			// Ayrı bir CDN de yok: dosyalar sitenin kendi domaininden geliyor,
-			// yani izlenecek dönen bir host kümesi yok. Bu bir boşluk değil,
-			// sitenin mimarisi.
+				Detail: "pixeldrain has no separate item page, the chain is a single step"},
+			// No separate CDN either: files come from the site's own domain,
+			// so there is no rotating host set to watch. Not a gap, it is the
+			// site's architecture.
 			LayerResult{Layer: LayerCDN, Status: StatusOK,
-				Detail: "dosyalar site domaininden servis ediliyor, ayrı CDN yok"},
+				Detail: "files are served from the site domain, no separate CDN"},
 		)
 	case layer == LayerTLS:
 		out = append(out, LayerResult{
 			Layer: LayerTLS, Status: StatusFail,
-			Detail: "sertifika/el sıkışma başarısız", Evidence: err.Error(),
+			Detail: "certificate/handshake failed", Evidence: err.Error(),
 		})
 	case layer == LayerChallenge:
 		out = append(out,
-			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
+			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "handshake OK"},
 			LayerResult{Layer: LayerChallenge, Status: StatusFail,
 				Detail: "Cloudflare challenge", Evidence: err.Error()},
 		)
 	case layer == LayerParse:
 		out = append(out,
-			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
-			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "challenge yok"},
+			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "handshake OK"},
+			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "no challenge"},
 			LayerResult{Layer: LayerFetch, Status: StatusOK, Detail: "200"},
 			LayerResult{Layer: LayerParse, Status: StatusFail,
-				Detail: "yanıt JSON değil", Evidence: err.Error()},
+				Detail: "response is not JSON", Evidence: err.Error()},
 		)
 	default:
 		out = append(out, LayerResult{
 			Layer: layer, Status: StatusFail,
-			Detail: "istek başarısız", Evidence: err.Error(),
+			Detail: "request failed", Evidence: err.Error(),
 		})
 	}
 	return out
@@ -633,9 +638,9 @@ func hasFail(rs []LayerResult) bool {
 	return false
 }
 
-// sanitizeDirLabel, albüm klasörü için ham bir etiket üretir.
-// Tam Windows temizliği adım 5'te internal/dl/names.go'da yapılır; burada
-// yalnızca yol ayırıcıları etkisizleştirilir ki Dir tek bir bileşen kalsın.
+// sanitizeDirLabel produces a raw label for the album folder.
+// Full Windows sanitizing happens in step 5, in internal/dl/names.go; here
+// only path separators are neutralized so Dir stays a single component.
 func sanitizeDirLabel(title, id string) string {
 	t := strings.TrimSpace(title)
 	t = strings.NewReplacer("/", "-", "\\", "-", "\x00", "").Replace(t)

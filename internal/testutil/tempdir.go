@@ -1,7 +1,7 @@
-// Package testutil, testler arasında paylaşılan yardımcıları barındırır.
+// Package testutil holds helpers shared between tests.
 //
-// Yalnızca _test.go dosyalarından import ediliyor, bu yüzden üretim
-// binary'sine girmiyor.
+// It is only imported from _test.go files, so it never ends up in the
+// production binary.
 package testutil
 
 import (
@@ -10,23 +10,23 @@ import (
 	"time"
 )
 
-// TempDir, t.TempDir() yerine kullanılır.
+// TempDir is used instead of t.TempDir().
 //
-// Windows'ta antivirüs ve arama indeksleyicisi yeni yazılmış dosyalara kısa
-// süre tutunuyor; t.TempDir()'in kayıtlı RemoveAll'ı o anda "Dizin boş değil"
-// ile düşüyor ve test, gövdesindeki tüm iddialar geçmiş olmasına rağmen FAIL
-// görünüyor. İndirme testleri tam olarak sessiz veri bozulmasını kovaladığı
-// için ortam kaynaklı bir flake burada özellikle pahalı: kırmızı bir suite'te
-// gerçek bir regresyonu kimse fark etmez.
+// On Windows, antivirus and the search indexer briefly hold on to freshly
+// written files; t.TempDir()'s registered RemoveAll fails at that moment with
+// "directory not empty" and the test shows FAIL even though every assertion
+// in its body passed. The download tests chase exactly silent data
+// corruption, so an environment-induced flake is especially expensive here:
+// in a red suite nobody notices a real regression.
 //
-// Çözüm silmeyi tekrar denemek. Yine olmazsa test düşürülmüyor, yalnızca not
-// bırakılıyor: geçici klasörün silinememesi aracın davranışıyla ilgili bir şey
-// söylemiyor.
+// The fix is to retry the removal. If it still fails the test is not failed,
+// only a note is left: failing to delete a temp folder says nothing about the
+// tool's behavior.
 func TempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "siphon-test-")
 	if err != nil {
-		t.Fatalf("geçici klasör açılamadı: %v", err)
+		t.Fatalf("could not create temp folder: %v", err)
 	}
 	t.Cleanup(func() {
 		const attempts = 25
@@ -36,7 +36,7 @@ func TempDir(t *testing.T) string {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		t.Logf("geçici klasör silinemedi (Windows dosya kilidi), elle temizlenebilir: %s", dir)
+		t.Logf("temp folder could not be deleted (Windows file lock), can be cleaned up by hand: %s", dir)
 	})
 	return dir
 }

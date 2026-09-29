@@ -2,14 +2,15 @@ package config
 
 import _ "embed"
 
-// Embedded, gömülü varsayılan site tanımları.
+// Embedded holds the embedded default site definitions.
 //
-// Dosya internal/config altında duruyor, depo kökünde değil: go:embed yalnızca
-// kendi klasöründen ve altından dosya gömebiliyor, ve artık iki binary var
-// (siphon.exe ve siphon-gui.exe). Kökte tutulsaydı her binary için ayrı bir
-// kopya gerekirdi ve iki kopya zamanla ayrışırdı.
+// The file lives under internal/config, not at the repo root: go:embed can
+// only embed files from its own directory and below, and there are now two
+// binaries (siphon.exe and siphon-gui.exe). Kept at the root, each binary
+// would need its own copy and the two copies would drift apart over time.
 //
-// Dış override mekanizması değişmedi: -c bayrağı, exe'nin yanı, cwd.
+// The external override mechanism is unchanged: the -c flag, next to the
+// exe, the cwd.
 //
 //go:embed sites.toml
 var Embedded []byte

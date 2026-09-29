@@ -10,9 +10,9 @@ import (
 	"syscall"
 )
 
-// explorerPath, explorer.exe'yi TAM YOLLA döndürür: çıplak ad %PATH% üzerinden
-// çözülür ve yazılabilir bir PATH dizinine konan explorer.exe bu düğmeyle
-// çalışırdı.
+// explorerPath returns explorer.exe with its FULL PATH: a bare name is
+// resolved via %PATH%, and an explorer.exe dropped into a writable PATH
+// directory would run from this button.
 func explorerPath() string {
 	if root := os.Getenv("SystemRoot"); root != "" {
 		return filepath.Join(root, "explorer.exe")
@@ -20,13 +20,14 @@ func explorerPath() string {
 	return "explorer"
 }
 
-// openInExplorer, bir klasörü açar ya da bir dosyayı klasöründe SEÇİLİ açar.
+// openInExplorer opens a folder, or opens a file SELECTED in its folder.
 //
-// ÖLÇÜLDÜ (2026-09-11): Go'nun exec paketi boşluk içeren argümanı bütünüyle
-// tırnaklar ve komut satırı `explorer "/select,E:\Casting curvy\x.mp4"` olur.
-// explorer bunu tanımaz ve sessizce Belgeler'i açar. Çalışan biçim yalnızca
-// yolun tırnaklanması: `explorer /select,"E:\Casting curvy\x.mp4"`. Go bu
-// biçimi üretemediği için komut satırı burada elle kuruluyor.
+// MEASURED (2026-09-11): Go's exec package quotes an argument containing
+// spaces as a whole and the command line becomes
+// `explorer "/select,E:\My Album\x.mp4"`. explorer doesn't recognize that and
+// silently opens Documents. The only working form quotes just the path:
+// `explorer /select,"E:\My Album\x.mp4"`. Go can't produce that form, so the
+// command line is built by hand here.
 func openInExplorer(path string, selectFile bool) error {
 	exe := explorerPath()
 	cmd := exec.Command(exe)
@@ -37,7 +38,7 @@ func openInExplorer(path string, selectFile bool) error {
 	} else {
 		cmd.Args = []string{exe, path}
 	}
-	// explorer.exe BAŞARIDA BİLE 1 döndürüyor; çıkış kodu kontrol edilmiyor,
-	// yalnızca başlatma hatası anlamlı.
+	// explorer.exe returns 1 EVEN ON SUCCESS; the exit code isn't checked,
+	// only a start failure is meaningful.
 	return cmd.Start()
 }

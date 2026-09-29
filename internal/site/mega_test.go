@@ -18,14 +18,14 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/megacrypto"
 )
 
-// --- Sahte mega API'si ---
+// --- Fake mega API ---
 //
-// Gercek kriptoyu kullaniyor: oznitelikler gercekten sifreleniyor, dugum
-// anahtarlari gercekten klasor anahtariyla sariliyor. Boylece resolver'in
-// cozdugu sey, sahte sunucunun "dogru" dedigi sey degil, kriptonun sonucu.
+// It uses the real crypto: attributes really are encrypted, node keys really
+// are wrapped with the folder key. So what the resolver decodes is the result
+// of the crypto, not what the fake server says is "right".
 
 type megaFakeFile struct {
-	packed []byte // 32 bayt paketli anahtar
+	packed []byte // 32-byte packed key
 	name   string
 	size   int64
 }
@@ -33,20 +33,20 @@ type megaFakeFile struct {
 type megaFakeNode struct {
 	handle, parent, name string
 	isFolder             bool
-	packed               []byte // dosya: 32, klasor: 16
+	packed               []byte // file: 32, folder: 16
 	size                 int64
 }
 
 type megaFakeFolder struct {
 	key   []byte // 16
 	nodes []megaFakeNode
-	// root, kok klasorun DUGUM handle'i. Gercek API'de bu, linkteki
-	// (paylasim) handle'indan HER ZAMAN farkli; "k" etiketleri ve "p"
-	// zinciri bununla calisir. Bos birakilirsa ilk dugum kok sayilir.
+	// root is the root folder's NODE handle. In the real API it is ALWAYS
+	// different from the (share) handle in the link; the "k" labels and the
+	// "p" chain work with it. If left empty the first node counts as the root.
 	root string
-	// foreign, sahibinin ayni agaci daha ustten de paylastigi durumu
-	// canlandirir: her dugumun "k" alaninda ONCE bu paylasimin (bizde
-	// anahtari olmayan) girdisi, sonra bizimki gelir. Canli gozlem.
+	// foreign reproduces the case where the owner also shared the same tree
+	// from higher up: each node's "k" field first has this share's entry
+	// (whose key we don't have), then ours. A live observation.
 	foreign []byte
 }
 
@@ -65,10 +65,10 @@ type megaFakeAPI struct {
 
 	mu       sync.Mutex
 	calls    []string // "g:p=<h>", "g:n=<h>", "f", "uq"
-	bareErrs []int    // siradaki cagrilarda tum govde olarak donecek hata kodlari
+	bareErrs []int    // error codes to return as the whole body on the next calls
 	nodeErr  map[string]int
-	// quotaResetSec > 0 ise "uq" komutu {"bt": quotaResetSec, "tar": 0} doner
-	// (canli API'nin kota doluyken verdigi sekil); 0 ise -2.
+	// If quotaResetSec > 0 the "uq" command returns {"bt": quotaResetSec,
+	// "tar": 0} (the shape the live API gives with the quota full); if 0, -2.
 	quotaResetSec int64
 }
 
@@ -81,12 +81,12 @@ func newMegaFakeAPI(t *testing.T) *megaFakeAPI {
 
 func (f *megaFakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		f.t.Errorf("mega API metodu = %s", r.Method)
+		f.t.Errorf("mega API method = %s", r.Method)
 	}
 	body, _ := io.ReadAll(r.Body)
 	var cmds []map[string]any
 	if err := json.Unmarshal(body, &cmds); err != nil {
-		f.t.Errorf("API govdesi JSON dizi degil: %v", err)
+		f.t.Errorf("API body is not a JSON array: %v", err)
 		http.Error(w, "bad", 400)
 		return
 	}
@@ -147,8 +147,8 @@ func (f *megaFakeAPI) handler(w http.ResponseWriter, r *http.Request) {
 				if n.isFolder {
 					typ = 1
 				}
-				// Gercek API: etiket = kok DUGUM handle'i (link handle'i degil);
-				// kok dugum de kendi "k"sini tasir.
+				// Real API: label = the root NODE handle (not the link handle);
+				// the root node carries its own "k" too.
 				k := fo.rootHandle() + ":" + megacrypto.B64Encode(enc)
 				if fo.foreign != nil {
 					fenc, _ := megacrypto.EncryptNodeKey(fo.foreign, n.packed)
@@ -240,8 +240,8 @@ func randBytes(t *testing.T, n int) []byte {
 	return b
 }
 
-// packedKeyFor, duz metne uygun (dogru meta-MAC'li) paketli anahtar uretir:
-// linkte gelen 32 baytin birebir karsiligi.
+// packedKeyFor produces a packed key matching the plaintext (with the right
+// meta-MAC): the exact equivalent of the 32 bytes that arrive in a link.
 func packedKeyFor(t *testing.T, plain []byte) []byte {
 	t.Helper()
 	aesKey, nonce := randBytes(t, 16), randBytes(t, 8)
@@ -252,7 +252,7 @@ func packedKeyFor(t *testing.T, plain []byte) []byte {
 	return megacrypto.PackFileKey(aesKey, nonce, mac)
 }
 
-// --- Link tanima ---
+// --- Link recognition ---
 
 func TestMegaParseForms(t *testing.T) {
 	m := NewMega(megaCfg()).(*mega)
@@ -290,26 +290,26 @@ func TestMegaParseForms(t *testing.T) {
 	bad := []string{
 		"https://pixeldrain.com/l/abc",
 		"https://mega.nz/",
-		"https://mega.nz/file/AbCdEfGh",                             // anahtar yok
-		"https://mega.nz/file/AbCdEfGh#" + folderKey,                // dosya icin 16 bayt
-		"https://mega.nz/folder/FoLdErHa#" + fileKey,                // klasor icin 32 bayt
-		"https://mega.nz/file/AbCdEfGh#" + fileKey[:len(fileKey)-5], // kirpilmis
+		"https://mega.nz/file/AbCdEfGh",                             // no key
+		"https://mega.nz/file/AbCdEfGh#" + folderKey,                // 16 bytes for a file
+		"https://mega.nz/folder/FoLdErHa#" + fileKey,                // 32 bytes for a folder
+		"https://mega.nz/file/AbCdEfGh#" + fileKey[:len(fileKey)-5], // truncated
 		"https://mega.attacker.com/file/AbCdEfGh#" + fileKey,
 	}
 	for _, in := range bad {
 		if m.Match(in) {
-			t.Errorf("Match(%q) = true, false bekleniyordu", in)
+			t.Errorf("Match(%q) = true, want false", in)
 		}
 	}
 }
 
-// --- Tek dosya ---
+// --- Single file ---
 
 func TestMegaResolveFileAndDecode(t *testing.T) {
 	plain := randBytes(t, 200*1024+9)
 	packed := packedKeyFor(t, plain)
 	api := newMegaFakeAPI(t)
-	api.files["FiLeHaNd"] = megaFakeFile{packed: packed, name: "Tatil — Özgür.mp4", size: int64(len(plain))}
+	api.files["FiLeHaNd"] = megaFakeFile{packed: packed, name: "Holiday — Zoë.mp4", size: int64(len(plain))}
 	m := newMegaWith(t, api)
 
 	link := "https://mega.nz/file/FiLeHaNd#" + megacrypto.B64Encode(packed)
@@ -319,23 +319,23 @@ func TestMegaResolveFileAndDecode(t *testing.T) {
 		t.Fatalf("Resolve: %v / %v", err, itemErrs)
 	}
 	if len(items) != 1 {
-		t.Fatalf("%d item, 1 bekleniyordu", len(items))
+		t.Fatalf("%d items, want 1", len(items))
 	}
 	it := items[0]
-	if it.Filename != "Tatil — Özgür.mp4" || it.Size != int64(len(plain)) {
+	if it.Filename != "Holiday — Zoë.mp4" || it.Size != int64(len(plain)) {
 		t.Errorf("item = %+v", it)
 	}
 	if it.URL != "https://cdn.test/dl/FiLeHaNd" {
 		t.Errorf("URL = %q", it.URL)
 	}
 	if it.SourcePage != link {
-		t.Errorf("SourcePage = %q, kanonik link bekleniyordu", it.SourcePage)
+		t.Errorf("SourcePage = %q, expected the canonical link", it.SourcePage)
 	}
 	if !bytes.Equal(it.Secret, packed) {
-		t.Error("Secret paketli anahtari tasimiyor")
+		t.Error("Secret doesn't carry the packed key")
 	}
 
-	// Cozucu: sifreli govdeyi verince duz metin cikmali ve Verify gecmeli.
+	// Decoder: given the encrypted body, plaintext must come out and Verify must pass.
 	key, _ := megacrypto.UnpackFileKey(packed)
 	enc, _ := megacrypto.EncryptCTR(key.AES, key.Nonce, plain)
 	ds, err := m.DecodeStream(it, 0, nil, bytes.NewReader(enc))
@@ -344,7 +344,7 @@ func TestMegaResolveFileAndDecode(t *testing.T) {
 	}
 	got, _ := io.ReadAll(ds)
 	if !bytes.Equal(got, plain) {
-		t.Fatal("cozulen icerik duz metin degil")
+		t.Fatal("decoded content is not the plaintext")
 	}
 	if err := ds.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -354,25 +354,25 @@ func TestMegaResolveFileAndDecode(t *testing.T) {
 func TestMegaDecodeStreamRejectsMissingSecret(t *testing.T) {
 	m := NewMega(megaCfg()).(*mega)
 	if _, err := m.DecodeStream(Item{}, 0, nil, bytes.NewReader(nil)); err == nil {
-		t.Fatal("Secret'siz item icin cozucu kuruldu")
+		t.Fatal("a decoder was built for an item without a Secret")
 	}
 }
 
-// --- Klasor ---
+// --- Folder ---
 
 func setupFolder(t *testing.T, api *megaFakeAPI) (folderKey []byte, packedA, packedB, packedC []byte) {
 	t.Helper()
 	folderKey = randBytes(t, 16)
-	rootKey := randBytes(t, 16) // paylasim anahtari != kokun kendi anahtari (canli gozlem)
+	rootKey := randBytes(t, 16) // share key != the root's own key (live observation)
 	subKey := randBytes(t, 16)
 	packedA = packedKeyFor(t, []byte("a"))
 	packedB = packedKeyFor(t, []byte("b"))
 	packedC = packedKeyFor(t, []byte("c"))
-	// Link handle'i "FoLdErHa", kok DUGUM "RoOtNoDe", kokun ebeveyni
-	// "OwNeRdIr" (sahibinin hesabinda, listede yok) — canli API'nin sekli.
+	// Link handle "FoLdErHa", root NODE "RoOtNoDe", the root's parent
+	// "OwNeRdIr" (in the owner's account, not in the list) — the live API's shape.
 	api.folders["FoLdErHa"] = megaFakeFolder{key: folderKey, root: "RoOtNoDe", nodes: []megaFakeNode{
-		{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Kök Klasör", isFolder: true, packed: rootKey},
-		{handle: "SuBfOlDr", parent: "RoOtNoDe", name: "Alt", isFolder: true, packed: subKey},
+		{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Root Folder", isFolder: true, packed: rootKey},
+		{handle: "SuBfOlDr", parent: "RoOtNoDe", name: "Sub", isFolder: true, packed: subKey},
 		{handle: "NoDeAAAA", parent: "RoOtNoDe", name: "a.mp4", packed: packedA, size: 100},
 		{handle: "NoDeBBBB", parent: "RoOtNoDe", name: "b.mp4", packed: packedB, size: 200},
 		{handle: "NoDeCCCC", parent: "SuBfOlDr", name: "c.mp4", packed: packedC, size: 300},
@@ -380,11 +380,11 @@ func setupFolder(t *testing.T, api *megaFakeAPI) (folderKey []byte, packedA, pac
 	return
 }
 
-// ÖLÇÜLDÜ (mega.nz/folder/VVplxTBY): sahibi agaci daha ustten de
-// paylasmissa her dugumun "k" alaninda once o paylasimin girdisi gelir.
-// Eski kod "link handle'iyla eslesen, yoksa ILK" diyordu; link handle'i
-// hicbir zaman dugum handle'i olmadigi icin hep yabanci anahtari secti ve
-// 373 dosyanin tamami "ad cozulemedi" diye atlandi. Kuyruk bos kaldi.
+// MEASURED (mega.nz/folder/VVplxTBY): if the owner also shared the tree from
+// higher up, each node's "k" field starts with that share's entry. The old
+// code said "the one matching the link handle, otherwise the FIRST"; since the
+// link handle is never a node handle it always picked the foreign key and all
+// 373 files were skipped as "name could not be decrypted". The queue stayed empty.
 func TestMegaFolderPicksOwnShareKeyNotForeign(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	folderKey, _, _, _ := setupFolder(t, api)
@@ -400,21 +400,21 @@ func TestMegaFolderPicksOwnShareKeyNotForeign(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(itemErrs) != 0 {
-		t.Fatalf("item hatalari: %v", itemErrs)
+		t.Fatalf("item errors: %v", itemErrs)
 	}
 	if len(got) != 3 {
-		t.Fatalf("%d item cozuldu, 3 bekleniyordu", len(got))
+		t.Fatalf("%d items resolved, want 3", len(got))
 	}
 	byName := map[string]Item{}
 	for _, it := range got {
 		byName[it.Filename] = it
 	}
-	// Klasor adlari da dogru anahtarla cozulmeli; kok, link anahtariyla.
-	if d := byName["c.mp4"].Dir; d != "Kök Klasör/Alt" {
-		t.Errorf("c.mp4 dizini = %q", d)
+	// Folder names must be decrypted with the right key too; the root with the link key.
+	if d := byName["c.mp4"].Dir; d != "Root Folder/Sub" {
+		t.Errorf("c.mp4 directory = %q", d)
 	}
-	if d := byName["a.mp4"].Dir; d != "Kök Klasör" {
-		t.Errorf("a.mp4 dizini = %q", d)
+	if d := byName["a.mp4"].Dir; d != "Root Folder" {
+		t.Errorf("a.mp4 directory = %q", d)
 	}
 }
 
@@ -430,33 +430,33 @@ func TestMegaResolveFolder(t *testing.T) {
 		t.Fatalf("Resolve: %v / %v", err, itemErrs)
 	}
 	if len(items) != 3 {
-		t.Fatalf("%d item, 3 bekleniyordu", len(items))
+		t.Fatalf("%d items, want 3", len(items))
 	}
 	byName := map[string]Item{}
 	for _, it := range items {
 		byName[it.Filename] = it
 	}
-	if a := byName["a.mp4"]; a.Dir != "Kök Klasör" || a.Size != 100 || !bytes.Equal(a.Secret, packedA) {
+	if a := byName["a.mp4"]; a.Dir != "Root Folder" || a.Size != 100 || !bytes.Equal(a.Secret, packedA) {
 		t.Errorf("a = %+v", a)
 	}
-	// Alt klasordeki dosya: yol "Kok/Alt" (indirici "-" ile duzlestirecek).
-	if c := byName["c.mp4"]; c.Dir != "Kök Klasör/Alt" || !bytes.Equal(c.Secret, packedC) {
+	// A file in the subfolder: path "Root/Sub" (the downloader flattens it with "-").
+	if c := byName["c.mp4"]; c.Dir != "Root Folder/Sub" || !bytes.Equal(c.Secret, packedC) {
 		t.Errorf("c = %+v", c)
 	}
 	if byName["a.mp4"].SourcePage != link+"/file/NoDeAAAA" {
 		t.Errorf("SourcePage = %q", byName["a.mp4"].SourcePage)
 	}
-	// Indeksler sirali olmali (ad cakismasi haritasi buna bagli).
+	// Indices must be sequential (the name collision map depends on it).
 	seen := map[int]bool{}
 	for _, it := range items {
 		seen[it.Index] = true
 	}
 	if !seen[0] || !seen[1] || !seen[2] {
-		t.Errorf("indeksler 0,1,2 olmali: %v", seen)
+		t.Errorf("indices must be 0,1,2: %v", seen)
 	}
-	// Klasor listesi 1, indirme adresleri TOPLU 1 cagri olmali.
+	// The folder listing must be 1 call, the download URLs 1 BATCHED call.
 	if api.count("f") != 1 || api.count("g:n=") != 3 {
-		t.Errorf("cagrilar: %v", api.calls)
+		t.Errorf("calls: %v", api.calls)
 	}
 }
 
@@ -486,12 +486,12 @@ func TestMegaResolveFolderSelectedSubfolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(items) != 1 || items[0].Filename != "c.mp4" {
-		t.Fatalf("alt klasor secimi yanlis: %+v", items)
+		t.Fatalf("wrong subfolder selection: %+v", items)
 	}
 }
 
-// ResolveOne, onbellegi bos bir resolver'da bile calismali (surec yeniden
-// basladi): klasoru listeleyip dugumu bulur.
+// ResolveOne must work even on a resolver with an empty cache (the process
+// restarted): it lists the folder and finds the node.
 func TestMegaResolveOneFolderFileColdCache(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	folderKey, _, packedB, _ := setupFolder(t, api)
@@ -506,14 +506,14 @@ func TestMegaResolveOneFolderFileColdCache(t *testing.T) {
 		t.Fatalf("item = %+v", it)
 	}
 	if api.count("f") != 1 {
-		t.Errorf("soguk onbellekte klasor 1 kez listelenmeliydi: %v", api.calls)
+		t.Errorf("with a cold cache the folder should have been listed once: %v", api.calls)
 	}
-	// Ikinci cagri onbellekten: yeniden listeleme YOK.
+	// The second call comes from the cache: NO re-listing.
 	if _, err := m.ResolveOne(context.Background(), src); err != nil {
 		t.Fatal(err)
 	}
 	if api.count("f") != 1 {
-		t.Errorf("sicak onbellekte klasor tekrar listelendi: %v", api.calls)
+		t.Errorf("the folder was listed again with a warm cache: %v", api.calls)
 	}
 }
 
@@ -521,15 +521,15 @@ func TestMegaResolveOneRejectsBareFolder(t *testing.T) {
 	m := NewMega(megaCfg()).(*mega)
 	_, err := m.ResolveOne(context.Background(), "https://mega.nz/folder/FoLdErHa#"+megacrypto.B64Encode(make([]byte, 16)))
 	if err == nil {
-		t.Fatal("dugumsuz klasor linki tek item olarak cozuldu")
+		t.Fatal("a folder link without a node was resolved as a single item")
 	}
 }
 
-// 120 dosya: indirme adresleri 50'lik paketlerle 3 cagrida alinmali.
+// 120 files: download URLs must be fetched in batches of 50 in 3 calls.
 func TestMegaFolderBatchesGetCalls(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	folderKey := randBytes(t, 16)
-	nodes := []megaFakeNode{{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Kök", isFolder: true, packed: folderKey}}
+	nodes := []megaFakeNode{{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Root", isFolder: true, packed: folderKey}}
 	for i := 0; i < 120; i++ {
 		nodes = append(nodes, megaFakeNode{
 			handle: fmt.Sprintf("NoDe%04d", i), parent: "RoOtNoDe",
@@ -545,9 +545,9 @@ func TestMegaFolderBatchesGetCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 120 {
-		t.Fatalf("%d item, 120 bekleniyordu", n)
+		t.Fatalf("%d items, want 120", n)
 	}
-	// hostRouter.seen uzerinden POST sayisi: 1 listeleme + 3 toplu g.
+	// Number of POSTs via hostRouter.seen: 1 listing + 3 batched g.
 	posts := 0
 	rt := m.cfg.HTTPClient.Transport.(*hostRouter)
 	for _, s := range rt.seen {
@@ -556,11 +556,11 @@ func TestMegaFolderBatchesGetCalls(t *testing.T) {
 		}
 	}
 	if posts != 4 {
-		t.Errorf("%d API istegi, 4 bekleniyordu (1 liste + 3 toplu)", posts)
+		t.Errorf("%d API requests, want 4 (1 list + 3 batched)", posts)
 	}
 }
 
-// --- Hata haritasi ---
+// --- Error map ---
 
 func TestMegaAPIErrorMapping(t *testing.T) {
 	cases := []struct {
@@ -577,7 +577,7 @@ func TestMegaAPIErrorMapping(t *testing.T) {
 	for _, c := range cases {
 		l, ok := LayerOf(megaAPIError(c.code, "x"))
 		if !ok || l != c.layer {
-			t.Errorf("kod %d -> %v, %v bekleniyordu", c.code, l, c.layer)
+			t.Errorf("code %d -> %v, want %v", c.code, l, c.layer)
 		}
 	}
 }
@@ -585,16 +585,16 @@ func TestMegaAPIErrorMapping(t *testing.T) {
 func TestMegaFileNotFound(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	m := newMegaWith(t, api)
-	_, err := m.Resolve(context.Background(), "https://mega.nz/file/YoKdOsYa#"+megacrypto.B64Encode(make([]byte, 32)),
+	_, err := m.Resolve(context.Background(), "https://mega.nz/file/NoSuChFi#"+megacrypto.B64Encode(make([]byte, 32)),
 		func(Item) error { return nil })
 	if l, ok := LayerOf(err); !ok || l != LayerItemPage {
-		t.Fatalf("olmayan dosya icin %v, ItemPage bekleniyordu", err)
+		t.Fatalf("%v for a nonexistent file, expected ItemPage", err)
 	}
 }
 
-// Gecici hata (-3) birkac kez denenmeli; ikinci denemede basari.
+// A transient error (-3) must be retried a few times; success on the second attempt.
 func TestMegaTransientErrorIsRetried(t *testing.T) {
-	plain := []byte("veri")
+	plain := []byte("data")
 	packed := packedKeyFor(t, plain)
 	api := newMegaFakeAPI(t)
 	api.files["FiLeHaNd"] = megaFakeFile{packed: packed, name: "x.bin", size: 4}
@@ -605,11 +605,12 @@ func TestMegaTransientErrorIsRetried(t *testing.T) {
 	_, err := m.Resolve(context.Background(), "https://mega.nz/file/FiLeHaNd#"+megacrypto.B64Encode(packed),
 		func(Item) error { n++; return nil })
 	if err != nil || n != 1 {
-		t.Fatalf("gecici hata sonrasi basari bekleniyordu: %v (n=%d)", err, n)
+		t.Fatalf("expected success after a transient error: %v (n=%d)", err, n)
 	}
 }
 
-// Kota (-17) GECICI DEGIL: tekrar denenmemeli, aninda ve net bildirilmeli.
+// Quota (-17) is NOT TRANSIENT: it must not be retried; it must be reported
+// right away and clearly.
 func TestMegaQuotaIsNotRetried(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	api.bareErrs = []int{-17, -17, -17, -17}
@@ -618,58 +619,58 @@ func TestMegaQuotaIsNotRetried(t *testing.T) {
 	_, err := m.Resolve(context.Background(), "https://mega.nz/file/FiLeHaNd#"+megacrypto.B64Encode(make([]byte, 32)),
 		func(Item) error { return nil })
 	if l, ok := LayerOf(err); !ok || l != LayerCDN {
-		t.Fatalf("kota icin %v, CDN katmani bekleniyordu", err)
+		t.Fatalf("%v for quota, expected the CDN layer", err)
 	}
-	if !strings.Contains(err.Error(), "kota") {
-		t.Errorf("hata mesaji kotayi soylemiyor: %v", err)
+	if !strings.Contains(err.Error(), "quota") {
+		t.Errorf("the error message doesn't mention the quota: %v", err)
 	}
 	if _, ok := QuotaOf(err); !ok {
-		t.Errorf("kota hatasi QuotaError degil: %T %v", err, err)
+		t.Errorf("the quota error is not a QuotaError: %T %v", err, err)
 	}
-	// Iki cagri: "g" (-17) ve sifirlanma suresi icin "uq" (o da -17 aldi ve
-	// yeniden giris kilidi sayesinde ucuncu bir cagri dogurmadi).
+	// Two calls: "g" (-17) and "uq" for the reset time (which also got -17
+	// and, thanks to the re-entry guard, didn't spawn a third call).
 	if len(api.bareErrs) != 2 {
-		t.Errorf("kota hatasi tekrar denendi: kalan %d", len(api.bareErrs))
+		t.Errorf("the quota error was retried: %d left", len(api.bareErrs))
 	}
 }
 
-// Kota hatasi, API'nin bildirdigi sifirlanma suresini tasimali: kuyruk bu
-// sureye gore bekler, kullanici "birkac saat" yerine "5 sa 6 dk" gorur.
+// The quota error must carry the reset time reported by the API: the queue
+// waits accordingly and the user sees "5h 6m" instead of "a few hours".
 func TestMegaQuotaCarriesResetTime(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	api.bareErrs = []int{-17}
-	api.quotaResetSec = 18349 // canli olcum
+	api.quotaResetSec = 18349 // live measurement
 	m := newMegaWith(t, api)
 
 	_, err := m.Resolve(context.Background(), "https://mega.nz/file/FiLeHaNd#"+megacrypto.B64Encode(make([]byte, 32)),
 		func(Item) error { return nil })
 	q, ok := QuotaOf(err)
 	if !ok {
-		t.Fatalf("QuotaError bekleniyordu: %v", err)
+		t.Fatalf("expected QuotaError: %v", err)
 	}
 	if q.Wait != 18349*time.Second {
-		t.Errorf("Wait = %s, 18349s bekleniyordu", q.Wait)
+		t.Errorf("Wait = %s, want 18349s", q.Wait)
 	}
-	if !strings.Contains(err.Error(), "5 sa 6 dk") {
-		t.Errorf("mesajda sure yok: %v", err)
+	if !strings.Contains(err.Error(), "5h 6m") {
+		t.Errorf("no duration in the message: %v", err)
 	}
 	if api.count("uq") != 1 {
-		t.Errorf("uq %d kez soruldu, 1 bekleniyordu", api.count("uq"))
+		t.Errorf("uq asked %d times, want 1", api.count("uq"))
 	}
 
-	// 509 da ayni yoldan gecmeli ve bir dakika icinde API'ye yeniden sormamali.
+	// A 509 must go the same way and must not ask the API again within a minute.
 	resp := &http.Response{StatusCode: 509, Request: &http.Request{URL: mustURL("http://gfs1.userstorage.mega.co.nz/dl/x")}}
 	cerr := m.ClassifyStatus(resp, nil)
 	q2, ok := QuotaOf(cerr)
 	if !ok || q2.Wait != 18349*time.Second {
-		t.Errorf("509 icin QuotaError/Wait yanlis: %v", cerr)
+		t.Errorf("wrong QuotaError/Wait for 509: %v", cerr)
 	}
 	if api.count("uq") != 1 {
-		t.Errorf("509 sonrasi uq yeniden soruldu: %d", api.count("uq"))
+		t.Errorf("uq was asked again after the 509: %d", api.count("uq"))
 	}
 }
 
-// Klasorde tek bir dugum hata verirse album DUSMEMELI, ItemError toplanmali.
+// If a single node in a folder errors, the album must NOT fail; ItemErrors must be collected.
 func TestMegaFolderCollectsPerItemErrors(t *testing.T) {
 	api := newMegaFakeAPI(t)
 	folderKey, _, _, _ := setupFolder(t, api)
@@ -680,52 +681,52 @@ func TestMegaFolderCollectsPerItemErrors(t *testing.T) {
 	itemErrs, err := m.Resolve(context.Background(), "https://mega.nz/folder/FoLdErHa#"+megacrypto.B64Encode(folderKey),
 		func(Item) error { n++; return nil })
 	if err != nil {
-		t.Fatalf("klasor dusmemeliydi: %v", err)
+		t.Fatalf("the folder must not fail: %v", err)
 	}
 	if n != 2 || len(itemErrs) != 1 {
-		t.Fatalf("n=%d itemErrs=%d; 2 ve 1 bekleniyordu", n, len(itemErrs))
+		t.Fatalf("n=%d itemErrs=%d; want 2 and 1", n, len(itemErrs))
 	}
 	if l, _ := LayerOf(itemErrs[0].Err); l != LayerItemPage {
-		t.Errorf("engelli dosya katmani = %v", l)
+		t.Errorf("blocked file layer = %v", l)
 	}
 }
 
-// --- Kota (HTTP 509) ---
+// --- Quota (HTTP 509) ---
 
 func TestMegaClassifyStatus509(t *testing.T) {
 	m := NewMega(megaCfg()).(*mega)
 	resp := &http.Response{StatusCode: 509}
 	err := m.ClassifyStatus(resp, nil)
 	if l, ok := LayerOf(err); !ok || l != LayerCDN {
-		t.Fatalf("509 -> %v, CDN bekleniyordu", err)
+		t.Fatalf("509 -> %v, expected CDN", err)
 	}
 	var rt interface{ Retryable() bool }
 	if errors.As(err, &rt) && rt.Retryable() {
-		t.Error("kota hatasi yeniden denenebilir isaretlendi")
+		t.Error("the quota error was marked retryable")
 	}
-	// 403 nil donmeli: indirici onu "adres suresi doldu" sayip yeniler.
+	// 403 must return nil: the downloader treats it as "URL expired" and refreshes it.
 	if err := m.ClassifyStatus(&http.Response{StatusCode: 403}, nil); err != nil {
-		t.Errorf("403 icin nil bekleniyordu: %v", err)
+		t.Errorf("expected nil for 403: %v", err)
 	}
 }
 
-// --- Teshis ---
+// --- Diagnosis ---
 
 func TestMegaDiagnoseHealthy(t *testing.T) {
 	api := newMegaFakeAPI(t)
-	// Diagnose gercek DNS sorgusu yapiyor; cozulebilen tek sahte host localhost.
+	// Diagnose does a real DNS lookup; the only fake host that resolves is localhost.
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{"localhost": api.handler}}
 	cfg := megaCfg()
 	cfg.CanaryURLs = []string{"https://localhost/cs"}
 	cfg.HTTPClient = &http.Client{Transport: rt}
 	m := NewMega(cfg).(*mega)
-	// Gecersiz tanitici -> sahte API -9 dondurur; bu "API konusuyor" demek.
+	// Invalid handle -> the fake API returns -9; that means "the API is talking".
 	res, err := m.Diagnose(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hasFail(res) {
-		t.Fatalf("saglikli API'de FAIL: %+v", res)
+		t.Fatalf("FAIL on a healthy API: %+v", res)
 	}
 	got := map[Layer]bool{}
 	for _, r := range res {
@@ -733,20 +734,20 @@ func TestMegaDiagnoseHealthy(t *testing.T) {
 	}
 	for _, l := range []Layer{LayerDNS, LayerTLS, LayerFetch, LayerParse} {
 		if !got[l] {
-			t.Errorf("%s katmani raporda yok", l)
+			t.Errorf("the %s layer is missing from the report", l)
 		}
 	}
 }
 
 func TestMegaDiagnoseUnreachable(t *testing.T) {
-	rt := &hostRouter{failures: map[string]error{"localhost": errors.New("baglanti reddedildi")}}
+	rt := &hostRouter{failures: map[string]error{"localhost": errors.New("connection refused")}}
 	cfg := megaCfg()
 	cfg.CanaryURLs = []string{"https://localhost/cs"}
 	cfg.HTTPClient = &http.Client{Transport: rt}
 	m := NewMega(cfg).(*mega)
 	res, _ := m.Diagnose(context.Background())
 	if !hasFail(res) {
-		t.Fatalf("ulasilamayan API'de FAIL bekleniyordu: %+v", res)
+		t.Fatalf("expected FAIL on an unreachable API: %+v", res)
 	}
 }
 
@@ -756,4 +757,27 @@ func mustURL(s string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+// mega's storage servers take the range in the path, end inclusive, the way
+// MegaBasterd and go-mega ask for it.
+func TestMegaRangeURL(t *testing.T) {
+	m := NewMega(SiteConfig{Name: MegaName}.WithDefaults()).(RangeURLer)
+	base := "http://gfs270n172.userstorage.mega.co.nz/dl/AbC-dEf_123"
+	cases := []struct {
+		start, end int64
+		want       string
+	}{
+		{0, 1, base + "/0-0"},
+		{1 << 20, 2 << 20, base + "/1048576-2097151"},
+		{500, 0, base + "/500"}, // no end: to the end of the file
+	}
+	for _, c := range cases {
+		if got := m.RangeURL(base, c.start, c.end); got != c.want {
+			t.Errorf("RangeURL(%d, %d) = %q, want %q", c.start, c.end, got, c.want)
+		}
+	}
+	if got := m.RangeURL(base+"/", 0, 1); got != base+"/0-0" {
+		t.Errorf("a trailing slash doubled: %q", got)
+	}
 }

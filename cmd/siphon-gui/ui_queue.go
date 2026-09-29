@@ -17,20 +17,21 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 )
 
-// refreshEvery, listenin en sık ne kadar yeniden çizileceği. Olay başına
-// çizmek 20 paralel indirmede saniyede yüzlerce yenileme demekti; burada
-// değişiklik varsa çiziliyor, yoksa hiç.
+// refreshEvery is how often at most the list is redrawn. Drawing per event
+// meant hundreds of refreshes per second with 20 parallel downloads; here it
+// is drawn if something changed, otherwise not at all.
 const refreshEvery = 150 * time.Millisecond
 
 const (
 	prefOutDir     = "out_dir"
 	prefSpeedLimit = "speed_limit_mbps"
 	prefSegments   = "segments"
+	prefMaxActive  = "max_active"
 	prefQuotaCmd   = "quota_command"
 )
 
-// queueTab, "İndir" sekmesi: link ekleme, kuyruk listesi, satır başına
-// kontroller, genel düğmeler ve durum satırı.
+// queueTab is the "Download" tab: adding links, the queue list, per-row
+// controls, global buttons and the status line.
 type queueTab struct {
 	win   fyne.Window
 	prefs fyne.Preferences
@@ -47,24 +48,30 @@ type queueTab struct {
 	bannerText *widget.Label
 	addBtn     *widget.Button
 	pauseAll   *widget.Button
+	cancelAll  *widget.Button
 	list       *widget.List
 	status     *widget.Label
+
+	// onQuota is told, on the UI thread, whether downloads wait for quota
+	// (the notification-area icon changes). May be nil.
+	onQuota func(waiting bool)
 }
 
-func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm *viewModel) (*queueTab, fyne.CanvasObject) {
-	q := &queueTab{win: win, prefs: prefs, eng: eng, vm: vm}
+func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm *viewModel, onQuota func(bool)) (*queueTab, fyne.CanvasObject) {
+	q := &queueTab{win: win, prefs: prefs, eng: eng, vm: vm, onQuota: onQuota}
 
-	// --- Link girişi ---
+	// --- Link input ---
 	q.links = widget.NewMultiLineEntry()
-	q.links.SetPlaceHolder("Linkleri yapıştır — satır başına bir tane.\n" +
-		"pixeldrain.com/l/…   bunkr.ws/a/…   mega.nz/folder/…#…")
+	q.links.SetPlaceHolder("Paste links — one per line.\n" +
+		"pixeldrain.com/l/…   bunkr.ws/a/…   mega.nz/folder/…#…\n" +
+		"or any direct file link: https://…/file.zip")
 	q.links.Wrapping = fyne.TextWrapOff
-	q.addBtn = widget.NewButton("Ekle", q.add)
+	q.addBtn = widget.NewButton("Add", q.add)
 	q.addBtn.Importance = widget.HighImportance
 	linkBox := container.NewVScroll(q.links)
 	linkBox.SetMinSize(fyne.NewSize(0, 84))
 
-	// --- Klasör ---
+	// --- Folder ---
 	q.outDir = widget.NewEntry()
 	if saved := prefs.String(prefOutDir); saved != "" {
 		q.outDir.SetText(saved)
@@ -72,24 +79,34 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 		q.outDir.SetText(defaultOutDir())
 	}
 	q.outDir.OnChanged = func(s string) { prefs.SetString(prefOutDir, normalizeDir(s)) }
-	pick := widget.NewButton("Seç...", func() {
+	pick := widget.NewButton("Browse...", func() {
 		dialog.ShowFolderOpen(func(lu fyne.ListableURI, err error) {
 			if err != nil || lu == nil {
 				return
 			}
-			// Path() EĞİK ÇİZGİLİ geliyor; normalize edilmeden kutuya
-			// yazılırsa "Klasörü aç" Belgeler'i açar. Ayrıntı normalizeDir'de.
+			// Path() comes with FORWARD SLASHES; written into the box without
+			// normalizing, "Open folder" opens Documents. Details in normalizeDir.
 			q.outDir.SetText(normalizeDir(lu.Path()))
 		}, win)
 	})
 
-	// --- Araç çubuğu ---
-	q.pauseAll = widget.NewButton("⏸ Tümünü duraklat", q.togglePauseAll)
-	clearBtn := widget.NewButton("Bitenleri temizle", func() {
+	// --- Toolbar ---
+	q.pauseAll = widget.NewButton("⏸ Pause all", q.togglePauseAll)
+	// "Pause all" keeps the queue for later; this empties it of everything
+	// unfinished. It asks first and offers to delete the partial files.
+	q.cancelAll = widget.NewButton("✕ Cancel all", q.confirmCancelAll)
+	q.cancelAll.Disable()
+	clearBtn := widget.NewButton("Clear finished", func() {
 		eng.ClearFinished()
 		vm.Replace(eng.Jobs())
 	})
-	openBtn := widget.NewButton("Klasörü aç", q.openFolder)
+	// "Resume all" only covers paused jobs; the user shouldn't have to press
+	// ▶ one by one on dozens of jobs that failed because of the network or site.
+	retryFailedBtn := widget.NewButton("Retry failed", func() {
+		eng.RetryFailed()
+		vm.Replace(eng.Jobs())
+	})
+	openBtn := widget.NewButton("Open folder", q.openFolder)
 
 	q.speed = widget.NewEntry()
 	q.speed.SetPlaceHolder("0")
@@ -106,32 +123,56 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 		eng.SetSpeedLimit(bps)
 		prefs.SetFloat(prefSpeedLimit, float64(bps)/(1024*1024))
 	}
-	speedBox := container.NewHBox(widget.NewLabel("Hız sınırı"), container.NewGridWrap(fyne.NewSize(70, 36), q.speed), widget.NewLabel("MB/s"))
+	speedBox := container.NewHBox(widget.NewLabel("Speed limit"), container.NewGridWrap(fyne.NewSize(70, 36), q.speed), widget.NewLabel("MB/s"))
 
-	// Bağlantı/dosya: parçalı indirme. Site tavanı (max_segments) bunu kırpar;
-	// pixeldrain ve mega'da 1, bunkr'da 4. Kullanıcı seçimi "istek", tavan
-	// "izin". Etkin değer siteye göre değişir, bu yüzden etiket öyle diyor.
-	q.segments = widget.NewSelect([]string{"1", "2", "4", "6", "8"}, func(v string) {
+	// Downloads at once, across sites (MegaBasterd's default is 4 too). A
+	// site's own max_concurrent still caps its share. Changing it takes
+	// effect right away: raising starts more jobs, lowering lets running
+	// ones finish and starts no new ones until fewer run.
+	active := widget.NewSelect([]string{"1", "2", "3", "4", "5", "6", "8"}, nil)
+	active.SetSelected(fmt.Sprint(eng.MaxActive()))
+	active.OnChanged = func(v string) {
+		n := 1
+		fmt.Sscanf(v, "%d", &n)
+		eng.SetMaxActive(n)
+		prefs.SetInt(prefMaxActive, n)
+	}
+	activeBox := container.NewHBox(widget.NewLabel("Downloads at once"), active)
+
+	// Connections per file: segmented download. The site ceiling
+	// (max_segments) clips it: 1 on pixeldrain, 3 on bunkr, 8 on mega. The
+	// user choice is the "request", the ceiling the "permission"; picking a
+	// number says which sites cap it, and every running row shows the
+	// connections its download really got. It reaches running downloads too.
+	q.segments = widget.NewSelect([]string{"1", "2", "4", "6", "8"}, nil)
+	if n := prefs.IntWithFallback(prefSegments, queue.DefaultSegments); n > 0 {
+		q.segments.SetSelected(fmt.Sprint(n))
+		eng.SetSegments(n)
+	}
+	// Wired after the saved value is restored: restoring isn't a choice the
+	// user made, so it shouldn't produce a notice.
+	q.segments.OnChanged = func(v string) {
 		n := 1
 		fmt.Sscanf(v, "%d", &n)
 		eng.SetSegments(n)
 		prefs.SetInt(prefSegments, n)
-	})
-	if n := prefs.IntWithFallback(prefSegments, queue.DefaultSegments); n > 0 {
-		q.segments.SetSelected(fmt.Sprint(n))
+		q.vm.Notify(segmentsNotice(n, eng.SegmentCeilings()))
 	}
-	segBox := container.NewHBox(widget.NewLabel("Bağlantı/dosya"), q.segments)
+	segBox := container.NewHBox(widget.NewLabel("Connections/file"), q.segments)
 
-	toolbar := container.NewHBox(q.pauseAll, clearBtn, openBtn, widget.NewLabel("   "), speedBox, widget.NewLabel("  "), segBox)
+	toolbar := container.NewVBox(
+		container.NewHBox(q.pauseAll, q.cancelAll, retryFailedBtn, clearBtn, openBtn),
+		container.NewHBox(speedBox, widget.NewLabel("  "), activeBox, widget.NewLabel("  "), segBox),
+	)
 
-	// --- VPN değiştirme komutu (isteğe bağlı) ---
-	// mega'nın IP başına kotası dolunca çalıştırılır; VPN sunucusunu
-	// değiştiren bir komut (MegaBasterd'in "509'da komut çalıştır" özelliği).
-	// BOŞ OLMASI NORMAL: o zaman kota dolunca sistem bildirimi gelir,
-	// kullanıcı VPN'i kendi programından değiştirir, kuyruk 30 sn içinde
-	// fark edip sürer. Kutu yalnızca bu adımı otomatikleştirmek isteyene.
+	// --- VPN switch command (optional) ---
+	// Runs when mega's per-IP quota runs out; a command that switches VPN
+	// server (MegaBasterd's "run command on 509" feature). EMPTY IS NORMAL:
+	// then a system notification arrives when the quota runs out, the user
+	// switches the VPN from its own app, and the queue notices within ~10 s and
+	// goes on. The box is only for those who want to automate that step.
 	q.quotaCmd = widget.NewEntry()
-	q.quotaCmd.SetPlaceHolder("isteğe bağlı — boşsa kota dolunca bildirim gelir, VPN'i sen değiştirirsin")
+	q.quotaCmd.SetPlaceHolder("optional — if empty you get a notification when the quota runs out and switch the VPN yourself")
 	if saved := prefs.String(prefQuotaCmd); saved != "" {
 		q.quotaCmd.SetText(saved)
 		eng.SetQuotaCommand(saved)
@@ -140,20 +181,21 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 		eng.SetQuotaCommand(v)
 		prefs.SetString(prefQuotaCmd, strings.TrimSpace(v))
 	}
-	tryBtn := widget.NewButton("Dene", q.tryQuotaCommand)
-	quotaRow := container.NewBorder(nil, nil, widget.NewLabel("VPN değiştirme komutu"), tryBtn, q.quotaCmd)
-	// Ana ekranda değil: çoğu kullanıcının (komut satırı olmayan VPN'ler,
-	// ör. Kaspersky) işine yaramıyor ve kafa karıştırıyordu (ölçüldü).
-	advanced := widget.NewAccordion(widget.NewAccordionItem("Gelişmiş", quotaRow))
+	tryBtn := widget.NewButton("Test", q.tryQuotaCommand)
+	quotaRow := container.NewBorder(nil, nil, widget.NewLabel("VPN switch command"), tryBtn, q.quotaCmd)
+	// Not on the main screen: most users (VPNs without a command line) get
+	// no use from it and it was confusing (measured).
+	advanced := widget.NewAccordion(widget.NewAccordionItem("Advanced", quotaRow))
 
-	// --- Kota şeridi ---
-	// Kota bekleyen iş varken listenin üstünde durur; bildirim ayarından
-	// bağımsız, pencere açılınca ilk görülen şey. "Şimdi dene" VPN'i
-	// değiştirmiş kullanıcının 30 sn'lik yoklamayı beklememesi için.
+	// --- Quota banner ---
+	// Sits above the list while jobs wait for quota; independent of the
+	// notification settings, the first thing seen when the window opens.
+	// "Try now" is for the user who switched the VPN and doesn't want to wait
+	// for the next probe (~10 s).
 	q.bannerText = widget.NewLabel("")
 	q.bannerText.Wrapping = fyne.TextWrapWord
 	q.bannerText.TextStyle = fyne.TextStyle{Bold: true}
-	retryBtn := widget.NewButton("Şimdi dene", func() {
+	retryBtn := widget.NewButton("Try now", func() {
 		eng.RetryWaiting()
 		vm.Replace(eng.Jobs())
 	})
@@ -161,7 +203,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.banner = container.NewBorder(nil, nil, widget.NewIcon(theme.WarningIcon()), retryBtn, q.bannerText)
 	q.banner.Hide()
 
-	// --- Liste ---
+	// --- List ---
 	q.list = widget.NewList(
 		func() int { return vm.Len() },
 		func() fyne.CanvasObject { return newJobRow() },
@@ -178,8 +220,8 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.status.Wrapping = fyne.TextWrapWord
 
 	top := container.NewVBox(
-		container.NewBorder(nil, nil, widget.NewLabel("Linkler"), q.addBtn, linkBox),
-		container.NewBorder(nil, nil, widget.NewLabel("Klasör"), pick, q.outDir),
+		container.NewBorder(nil, nil, widget.NewLabel("Links"), q.addBtn, linkBox),
+		container.NewBorder(nil, nil, widget.NewLabel("Folder"), pick, q.outDir),
 		toolbar,
 		advanced,
 		q.banner,
@@ -190,7 +232,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	return q, root
 }
 
-// refreshLoop, model değiştiyse listeyi ve durum satırını yeniden çizer.
+// refreshLoop redraws the list and the status line if the model changed.
 func (q *queueTab) refreshLoop() {
 	t := time.NewTicker(refreshEvery)
 	defer t.Stop()
@@ -200,46 +242,57 @@ func (q *queueTab) refreshLoop() {
 		}
 		summary := q.vm.StatusLine()
 		paused := q.eng.Paused()
-		captcha := q.eng.PausedByCaptcha()
+		captcha := q.eng.CaptchaHeld()
 		banner := q.vm.QuotaBanner()
+		unfinished, _ := q.vm.Unfinished()
 		fyne.Do(func() {
 			q.list.Refresh()
 			q.status.SetText(summary)
+			if unfinished > 0 {
+				q.cancelAll.Enable()
+			} else {
+				q.cancelAll.Disable()
+			}
 			if banner == "" {
 				q.banner.Hide()
 			} else {
 				q.bannerText.SetText(banner)
 				q.banner.Show()
 			}
+			if q.onQuota != nil {
+				q.onQuota(banner != "")
+			}
 			switch {
-			case captcha:
-				// Sebep görünür olmalı: captcha kuyruğu durdurdu, kullanıcı
-				// bir işe ▶ deyince ya da buraya basınca devam eder.
-				q.pauseAll.SetText("▶ Captcha yüzünden duraklatıldı — sürdür")
 			case paused:
-				q.pauseAll.SetText("▶ Tümünü sürdür")
+				q.pauseAll.SetText("▶ Resume all")
+			case len(captcha) > 0:
+				// The reason must be visible: a captcha held that site's jobs
+				// (the other sites go on); it resumes when the user presses ▶
+				// on one of that site's jobs or presses here.
+				q.pauseAll.SetText("▶ Captcha: " + strings.Join(captcha, ", ") + " paused — resume")
 			default:
-				q.pauseAll.SetText("⏸ Tümünü duraklat")
+				q.pauseAll.SetText("⏸ Pause all")
 			}
 		})
 	}
 }
 
-// add, girilen linkleri arka planda çözüp kuyruğa ekler. Çözümleme ağ
-// gerektirir; arayüzü kilitlememek için goroutine'de.
+// add resolves the entered links in the background and adds them to the
+// queue. Resolution needs the network; it runs in a goroutine so it doesn't
+// lock the UI.
 func (q *queueTab) add() {
 	urls := parseLinks(q.links.Text)
 	if len(urls) == 0 {
-		dialog.ShowInformation("Link yok", "Önce en az bir link yapıştır. Satır başına bir link.", q.win)
+		dialog.ShowInformation("No links", "Paste at least one link first. One link per line.", q.win)
 		return
 	}
 	outDir := normalizeDir(q.outDir.Text)
 	if outDir == "" {
-		dialog.ShowInformation("Klasör yok", "Bir çıktı klasörü seç.", q.win)
+		dialog.ShowInformation("No folder", "Choose an output folder.", q.win)
 		return
 	}
 	q.addBtn.Disable()
-	q.vm.Notify(fmt.Sprintf("%d link çözümleniyor...", len(urls)))
+	q.vm.Notify(fmt.Sprintf("Resolving %d links...", len(urls)))
 
 	go func() {
 		var added int
@@ -252,9 +305,10 @@ func (q *queueTab) add() {
 				errs = append(errs, firstLine(err.Error()))
 				failed = append(failed, u)
 			case n == 0:
-				// Çözümleme hatasız bitti ama dosya çıkmadı: boş klasör ya da
-				// tüm dosyalar atlandı. "0 dosya eklendi" sebep söylemiyor.
-				errs = append(errs, "indirilecek dosya bulunamadı: "+u)
+				// Resolution finished without error but no files came out: an
+				// empty folder or every file was skipped. "0 files added"
+				// doesn't say why.
+				errs = append(errs, "no files to download found: "+u)
 				failed = append(failed, u)
 			}
 		}
@@ -262,48 +316,90 @@ func (q *queueTab) add() {
 		q.vm.Notify(addSummary(added, errs))
 		fyne.Do(func() {
 			q.addBtn.Enable()
-			// Eklenemeyen linkler kutuda kalır; kullanıcı düzeltip yeniden
-			// dener, kopyalamak zorunda kalmaz. Eklenenler temizlenir.
+			// Links that couldn't be added stay in the box; the user fixes and
+			// retries them without copying. Added ones are cleared.
 			q.links.SetText(strings.Join(failed, "\n"))
 		})
 	}()
 }
 
-// addSummary, Ekle sonucunun tek satırı.
+// addSummary is the one-line result of Add.
 func addSummary(added int, errs []string) string {
 	switch {
 	case len(errs) > 0 && added == 0:
-		return "Eklenemedi: " + strings.Join(errs, " | ")
+		return "Could not add: " + strings.Join(errs, " | ")
 	case len(errs) > 0:
-		return fmt.Sprintf("%d dosya eklendi; %d link eklenemedi: %s", added, len(errs), strings.Join(errs, " | "))
+		return fmt.Sprintf("%d files added; %d links could not be added: %s", added, len(errs), strings.Join(errs, " | "))
 	default:
-		return fmt.Sprintf("%d dosya kuyruğa eklendi.", added)
+		return fmt.Sprintf("%d files added to the queue.", added)
 	}
 }
 
 func (q *queueTab) togglePauseAll() {
-	if q.eng.Paused() {
+	// While a captcha hold is on the button says "resume"; pressing it must lift the hold.
+	if q.eng.Paused() || len(q.eng.CaptchaHeld()) > 0 {
 		q.eng.ResumeAll()
-		q.pauseAll.SetText("⏸ Tümünü duraklat")
+		q.pauseAll.SetText("⏸ Pause all")
 	} else {
 		q.eng.PauseAll()
-		q.pauseAll.SetText("▶ Tümünü sürdür")
+		q.pauseAll.SetText("▶ Resume all")
 	}
 	q.vm.Replace(q.eng.Jobs())
 }
 
-// tryQuotaCommand, kutudaki komutu şimdi çalıştırıp sonucunu gösterir:
-// kullanıcı kota dolmasını beklemeden komutun doğru olduğunu görsün.
+// confirmCancelAll asks before emptying the queue of every unfinished job.
+// Deleting the partial files is offered, checked: cancelling a download
+// normally means throwing away what it left behind. Unchecked, the files stay
+// and adding the same link later continues where it stopped.
+func (q *queueTab) confirmCancelAll() {
+	n, partial := q.vm.Unfinished()
+	if n == 0 {
+		q.vm.Notify("Nothing to cancel: every download in the list is finished.")
+		return
+	}
+	noun := "downloads"
+	if n == 1 {
+		noun = "download"
+	}
+	msg := widget.NewLabel(fmt.Sprintf("Stop and remove %d unfinished %s from the queue?\nFinished files are not touched.", n, noun))
+	msg.Wrapping = fyne.TextWrapWord
+	wipe := widget.NewCheck(fmt.Sprintf("Also delete the partially downloaded files (%s)", humanBytes(partial)), nil)
+	wipe.SetChecked(true)
+	content := container.NewVBox(msg)
+	if partial > 0 {
+		content.Add(wipe)
+	}
+	d := dialog.NewCustomConfirm("Cancel all", "Cancel all", "Back", content, func(ok bool) {
+		if !ok {
+			return
+		}
+		deleted := wipe.Checked
+		canceled := q.eng.CancelAll(deleted)
+		q.vm.Replace(q.eng.Jobs())
+		switch {
+		case partial > 0 && deleted:
+			q.vm.Notify(fmt.Sprintf("Canceled %d %s; partial files deleted.", canceled, noun))
+		case partial > 0:
+			q.vm.Notify(fmt.Sprintf("Canceled %d %s; partial files kept (add the same link to continue).", canceled, noun))
+		default:
+			q.vm.Notify(fmt.Sprintf("Canceled %d %s.", canceled, noun))
+		}
+	}, q.win)
+	d.Show()
+}
+
+// tryQuotaCommand runs the command in the box now and shows the result: the
+// user sees the command is right without waiting for the quota to run out.
 func (q *queueTab) tryQuotaCommand() {
 	line := strings.TrimSpace(q.quotaCmd.Text)
 	if line == "" {
-		dialog.ShowInformation("Komut yok",
-			"Bu kutu isteğe bağlı. Boş bırakırsan kota dolunca bir bildirim gelir; VPN'i kendi programından değiştirirsin, indirmeler kendiliğinden sürer.\n\n"+
-				"Doldurursan Siphon kota dolunca bu komutu senin yerine çalıştırır. Hangi VPN'i kullandığına göre değişir; ör. NordVPN: \"C:\\Program Files\\NordVPN\\NordVPN.exe\" -c",
+		dialog.ShowInformation("No command",
+			"This box is optional. If you leave it empty you get a notification when the quota runs out; you switch the VPN from its own app and downloads resume by themselves.\n\n"+
+				"If you fill it in, Siphon runs this command for you when the quota runs out. It depends on which VPN you use; e.g. NordVPN: \"C:\\Program Files\\NordVPN\\NordVPN.exe\" -c",
 			q.win)
 		return
 	}
-	q.vm.Notify("Komut deneniyor: " + line)
+	q.vm.Notify("Testing the command: " + line)
 	go func() {
 		start := time.Now()
 		out, err := hook.Run(context.Background(), line, 0)
@@ -311,24 +407,24 @@ func (q *queueTab) tryQuotaCommand() {
 		fyne.Do(func() {
 			switch {
 			case err != nil && out != "":
-				dialog.ShowError(fmt.Errorf("komut başarısız (%v):\n\n%s", err, out), q.win)
-				q.vm.Notify("Komut başarısız: " + firstLine(err.Error()))
+				dialog.ShowError(fmt.Errorf("command failed (%v):\n\n%s", err, out), q.win)
+				q.vm.Notify("Command failed: " + firstLine(err.Error()))
 			case err != nil:
-				dialog.ShowError(fmt.Errorf("komut başarısız: %v", err), q.win)
-				q.vm.Notify("Komut başarısız: " + firstLine(err.Error()))
+				dialog.ShowError(fmt.Errorf("command failed: %v", err), q.win)
+				q.vm.Notify("Command failed: " + firstLine(err.Error()))
 			default:
-				msg := fmt.Sprintf("Komut %s içinde bitti.", took)
+				msg := fmt.Sprintf("The command finished in %s.", took)
 				if out != "" {
-					msg += "\n\nÇıktı:\n" + out
+					msg += "\n\nOutput:\n" + out
 				}
-				dialog.ShowInformation("Komut çalıştı", msg, q.win)
-				q.vm.Notify(fmt.Sprintf("Komut çalıştı (%s).", took))
+				dialog.ShowInformation("Command ran", msg, q.win)
+				q.vm.Notify(fmt.Sprintf("Command ran (%s).", took))
 			}
 		})
 	}()
 }
 
-// openFolder, son inen dosyayı klasöründe seçili açar; yoksa çıktı kökünü.
+// openFolder opens the last downloaded file selected in its folder; otherwise the output root.
 func (q *queueTab) openFolder() {
 	var lastPath, lastDir string
 	for _, r := range q.vm.Rows() {
@@ -352,34 +448,33 @@ func (q *queueTab) openFolder() {
 		return
 	}
 	if err := openInExplorer(target, sel); err != nil {
-		q.vm.Notify("Klasör açılamadı: " + err.Error())
+		q.vm.Notify("Could not open the folder: " + err.Error())
 	}
 }
 
-// removeJob, satırdaki ✕: yarım dosya varsa ne yapılacağını sorar.
+// removeJob is the row's ✕: if there is a partial file it asks what to do.
 func (q *queueTab) removeJob(j queue.Job) {
 	if j.State.Finished() || j.Done == 0 {
 		q.eng.Remove(j.ID, !j.State.Finished())
 		q.vm.Replace(q.eng.Jobs())
 		return
 	}
-	d := dialog.NewConfirm("Kuyruktan kaldır",
-		fmt.Sprintf("%s\n\n%s inmiş durumda. Yarım dosya silinsin mi?\n(Hayır: dosya kalır, sonra aynı linkle devam edilebilir.)",
+	d := dialog.NewConfirm("Remove from queue",
+		fmt.Sprintf("%s\n\n%s downloaded so far. Delete the partial file?\n(No: the file stays and you can continue later with the same link.)",
 			shortName(j.Filename), humanBytes(j.Done)),
 		func(wipe bool) {
 			q.eng.Remove(j.ID, wipe)
 			q.vm.Replace(q.eng.Jobs())
 		}, q.win)
-	d.SetConfirmText("Sil")
-	d.SetDismissText("Sakla")
+	d.SetConfirmText("Delete")
+	d.SetDismissText("Keep")
 	d.Show()
 }
 
-// ---------- Satır widget'ı ----------
+// ---------- Row widget ----------
 
-// jobRow, listedeki tek satır: ad, bilgi, ilerleme çubuğu, iki düğme.
-// Fyne satırları geri dönüştürdüğü için set() her çağrıda düğmelerin
-// hedefini yeniden bağlıyor.
+// jobRow is a single row in the list: name, info, progress bar, two buttons.
+// Fyne recycles rows, so set() rebinds the buttons' targets on every call.
 type jobRow struct {
 	widget.BaseWidget
 	name   *widget.Label

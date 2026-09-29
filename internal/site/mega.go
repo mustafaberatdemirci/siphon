@@ -19,29 +19,30 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/megacrypto"
 )
 
-// MegaName, registry kayıt anahtarı.
+// MegaName is the registry key.
 const MegaName = "mega"
 
-// mega'nın diğer iki siteden temel farkı: dosyalar istemci tarafında şifreli.
-// Adres yeterli değil; anahtar linkteki #'ten sonra duruyor, sunucuya hiç
-// gitmiyor ve içerik indirilirken çözülmek zorunda. Bu yüzden bu resolver
-// StreamDecoder'ı da uyguluyor. Kripto tarafı internal/megacrypto'da.
+// mega's fundamental difference from the other two sites: files are
+// encrypted client-side. The URL isn't enough; the key sits after the # in
+// the link, never reaches the server, and the content must be decrypted
+// while downloading. That is why this resolver also implements StreamDecoder.
+// The crypto side lives in internal/megacrypto.
 //
-// API tek uç: https://g.api.mega.co.nz/cs. Komutlar JSON dizisi olarak POST
-// edilir, yanıt da dizi gelir; hata durumunda eleman (veya tüm gövde) negatif
-// bir tamsayıdır.
+// The API is a single endpoint: https://g.api.mega.co.nz/cs. Commands are
+// POSTed as a JSON array and the response is an array too; on error an
+// element (or the whole body) is a negative integer.
 
 const (
 	ExtraMegaAPI   = "api_endpoint"
 	defaultMegaAPI = "https://g.api.mega.co.nz/cs"
 
-	// megaBatch, tek API çağrısında istenecek indirme adresi sayısı. mega
-	// toplu komutu destekliyor; 200 dosyalık bir klasörü 200 ayrı istekle
-	// çözmek yerine 4 istekle çözüyoruz.
+	// megaBatch is the number of download URLs requested in a single API
+	// call. mega supports batched commands; a 200-file folder is resolved
+	// with 4 requests instead of 200.
 	megaBatch = 50
 )
 
-// NewMega, registry'ye verilecek fabrikadır.
+// NewMega is the factory given to the registry.
 func NewMega(cfg SiteConfig) Resolver {
 	cfg = cfg.WithDefaults()
 	return &mega{
@@ -56,19 +57,19 @@ type mega struct {
 	api string
 	seq atomic.Int64
 
-	// nodeKeys, klasör linklerindeki düğümlerin paketli anahtarları
-	// (düğüm -> 32 bayt). ResolveOne bir klasör dosyasını tek başına
-	// yenilemek zorunda kaldığında klasörü baştan listelememek için.
+	// nodeKeys holds the packed keys of nodes in folder links (node -> 32
+	// bytes). So ResolveOne doesn't have to list the folder from scratch when
+	// it must refresh a single folder file on its own.
 	mu       sync.Mutex
 	nodeKeys map[string][]byte
 
-	// Kota sorgusu önbelleği: bkz. quotaWait.
+	// Quota query cache: see quotaWait.
 	quotaMu     sync.Mutex
 	quotaAt     time.Time
 	quotaCached time.Duration
 }
 
-// ---------- Link tanıma ----------
+// ---------- Link recognition ----------
 
 type megaKind int
 
@@ -79,9 +80,9 @@ const (
 
 type megaRef struct {
 	kind   megaKind
-	handle string // dosya veya klasör tanıtıcısı
-	key    []byte // çözülmüş: dosya 32 bayt, klasör 16 bayt
-	node   string // klasör içinde seçili düğüm (opsiyonel)
+	handle string // file or folder handle
+	key    []byte // decoded: file 32 bytes, folder 16 bytes
+	node   string // selected node inside a folder (optional)
 }
 
 func (m *mega) Match(u string) bool {
@@ -89,34 +90,34 @@ func (m *mega) Match(u string) bool {
 	return err == nil
 }
 
-// parse, mega'nın dört link biçimini tanır:
+// parse recognizes mega's four link forms:
 //
 //	https://mega.nz/file/<h>#<k>
 //	https://mega.nz/folder/<h>#<k>[/file/<n>|/folder/<n>]
-//	https://mega.nz/#!<h>!<k>                  (eski)
-//	https://mega.nz/#F!<h>!<k>[!<n>|?<n>]       (eski klasör)
+//	https://mega.nz/#!<h>!<k>                  (old)
+//	https://mega.nz/#F!<h>!<k>[!<n>|?<n>]       (old folder)
 //
-// Anahtarın uzunluğu türü doğrular: dosya 32, klasör 16 bayt. Yanlış
-// uzunlukta bir anahtar linkin kırpılarak kopyalandığı anlamına gelir ve bunu
-// burada söylemek, indirme sonunda "meta-MAC uyuşmuyor" demekten iyidir.
+// The key length validates the type: file 32, folder 16 bytes. A key of the
+// wrong length means the link was copied truncated, and saying so here beats
+// saying "meta-MAC mismatch" at the end of the download.
 func (m *mega) parse(raw string) (megaRef, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return megaRef{}, errors.New("boş URL")
+		return megaRef{}, errors.New("empty URL")
 	}
 	if !strings.Contains(raw, "//") {
 		raw = "https://" + raw
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return megaRef{}, fmt.Errorf("URL ayrıştırılamadı: %w", err)
+		return megaRef{}, fmt.Errorf("could not parse URL: %w", err)
 	}
 	host := strings.TrimPrefix(normalizeHost(u.Host), "www.")
 	known := MatchHost(host, m.cfg.Domains) ||
 		MatchHost(host, m.cfg.LegacyDomains) ||
 		MatchHost(host, m.cfg.MatchPatterns)
 	if !known {
-		return megaRef{}, fmt.Errorf("bilinmeyen host: %s", host)
+		return megaRef{}, fmt.Errorf("unknown host: %s", host)
 	}
 
 	var ref megaRef
@@ -132,7 +133,7 @@ func (m *mega) parse(raw string) (megaRef, error) {
 			ref.kind = megaFile
 		} else {
 			ref.kind = megaFolder
-			// #<k>/file/<n> veya #<k>/folder/<n>
+			// #<k>/file/<n> or #<k>/folder/<n>
 			if len(parts) >= 3 && (parts[1] == "file" || parts[1] == "folder") {
 				ref.node = parts[2]
 			}
@@ -141,7 +142,7 @@ func (m *mega) parse(raw string) (megaRef, error) {
 	case strings.HasPrefix(frag, "F!"):
 		ref.kind = megaFolder
 		rest := strings.TrimPrefix(frag, "F!")
-		// !<n> veya ?<n> ile seçili düğüm
+		// selected node with !<n> or ?<n>
 		if i := strings.IndexAny(rest, "!?"); i >= 0 {
 			ref.handle = rest[:i]
 			rest = rest[i+1:]
@@ -160,26 +161,26 @@ func (m *mega) parse(raw string) (megaRef, error) {
 			ref.key, err = megacrypto.B64Decode(rest[i+1:])
 		}
 	default:
-		return megaRef{}, errors.New("mega linki değil: /file/, /folder/ veya #! bekleniyordu")
+		return megaRef{}, errors.New("not a mega link: expected /file/, /folder/ or #!")
 	}
 
 	if err != nil {
-		return megaRef{}, fmt.Errorf("anahtar base64 değil: %w", err)
+		return megaRef{}, fmt.Errorf("key is not base64: %w", err)
 	}
 	if ref.handle == "" {
-		return megaRef{}, errors.New("tanıtıcı eksik")
+		return megaRef{}, errors.New("missing handle")
 	}
 	want := 32
 	if ref.kind == megaFolder {
 		want = 16
 	}
 	if len(ref.key) != want {
-		return megaRef{}, fmt.Errorf("anahtar %d bayt, %d bekleniyordu: link kırpılmış olabilir", len(ref.key), want)
+		return megaRef{}, fmt.Errorf("key is %d bytes, expected %d: the link may be truncated", len(ref.key), want)
 	}
 	return ref, nil
 }
 
-// canonical, ResolveOne'ın yeniden ayrıştırabileceği tek biçimli adres üretir.
+// canonical produces a single-form URL that ResolveOne can parse again.
 func (ref megaRef) canonical(node string) string {
 	if ref.kind == megaFile {
 		return "https://mega.nz/file/" + ref.handle + "#" + megacrypto.B64Encode(ref.key)
@@ -200,42 +201,42 @@ func (m *mega) client() *http.Client {
 	return http.DefaultClient
 }
 
-// megaAPIError, API'nin negatif tamsayı hatalarını katmana çevirir.
+// megaAPIError turns the API's negative integer errors into layers.
 //
-// Kota (-17) ve engel (-16) diğerlerinden AYRI okunmalı: kota "birkaç saat
-// bekle" demek, engel "bu dosya hiç gelmeyecek" demek. İkisini de "API hatası"
-// diye geçmek kullanıcıyı config kurcalamaya gönderir.
+// Quota (-17) and block (-16) must be read SEPARATELY from the others: quota
+// means "wait a few hours", block means "this file will never come". Passing
+// both off as "API error" sends the user to fiddle with the config.
 func megaAPIError(code int, evidence string) error {
 	switch code {
 	case -3, -4, -18:
 		return &megaTransient{code: code}
 	case -2:
-		return Errorf(LayerParse, evidence, "API isteği reddedildi (%d): tanıtıcı geçersiz olabilir", code)
+		return Errorf(LayerParse, evidence, "API request rejected (%d): the handle may be invalid", code)
 	case -9:
-		return Errorf(LayerItemPage, evidence, "dosya yok veya kaldırılmış (%d)", code)
+		return Errorf(LayerItemPage, evidence, "file does not exist or was removed (%d)", code)
 	case -11:
-		return Errorf(LayerItemPage, evidence, "erişim reddedildi (%d)", code)
+		return Errorf(LayerItemPage, evidence, "access denied (%d)", code)
 	case -14:
-		return Errorf(LayerItemPage, evidence, "anahtar geçersiz (%d): link kırpılmış olabilir", code)
+		return Errorf(LayerItemPage, evidence, "invalid key (%d): the link may be truncated", code)
 	case -16:
-		return Errorf(LayerItemPage, evidence, "dosya engellenmiş (%d): telif veya kötüye kullanım bildirimi", code)
+		return Errorf(LayerItemPage, evidence, "file blocked (%d): copyright or abuse report", code)
 	case -17:
-		return &QuotaError{Err: Errorf(LayerCDN, evidence, "mega aktarım kotası doldu (%d): IP başına sınır", code)}
+		return &QuotaError{Err: Errorf(LayerCDN, evidence, "mega transfer quota exceeded (%d): per-IP limit", code)}
 	default:
-		return Errorf(LayerFetch, evidence, "API hatası %d", code)
+		return Errorf(LayerFetch, evidence, "API error %d", code)
 	}
 }
 
-// megaTransient, API'nin "birazdan tekrar dene" dediği durumlar.
+// megaTransient covers the cases where the API says "try again shortly".
 type megaTransient struct{ code int }
 
-func (e *megaTransient) Error() string { return fmt.Sprintf("mega API geçici hata %d", e.code) }
+func (e *megaTransient) Error() string { return fmt.Sprintf("mega API transient error %d", e.code) }
 
-// call, komutları tek istekte gönderir ve komut başına ham sonuçları döndürür.
+// call sends the commands in a single request and returns the raw result per command.
 //
-// Geçici hatalarda (-3 EAGAIN, -4 rate limit, -18, 5xx) kendi içinde birkaç
-// kez yeniden deniyor: resolver'ların çağrısı indirme politikasının dışında
-// kalıyor, yani burada denemezsek hiç denenmez.
+// On transient errors (-3 EAGAIN, -4 rate limit, -18, 5xx) it retries a few
+// times on its own: resolver calls fall outside the download policy, so if
+// we don't retry here they are never retried.
 func (m *mega) call(ctx context.Context, folder string, cmds []any) ([]json.RawMessage, error) {
 	payload, err := json.Marshal(cmds)
 	if err != nil {
@@ -262,19 +263,19 @@ func (m *mega) call(ctx context.Context, folder string, cmds []any) ([]json.RawM
 		if !errors.As(err, &tr) {
 			return nil, m.withQuotaWait(ctx, err)
 		}
-		m.cfg.Logln("mega: %v, tekrar deneniyor (%d/%d)", err, attempt+1, attempts)
+		m.cfg.Logln("mega: %v, retrying (%d/%d)", err, attempt+1, attempts)
 	}
-	return nil, Errorf(LayerFetch, m.api, "API art arda geçici hata verdi: %v", last)
+	return nil, Errorf(LayerFetch, m.api, "API returned transient errors in a row: %v", last)
 }
 
-// ---------- Kota ----------
+// ---------- Quota ----------
 
-// quotaProbeTTL: art arda gelen 509'lar için API bir kez sorulur.
+// quotaProbeTTL: for 509s arriving back to back the API is asked once.
 const quotaProbeTTL = time.Minute
 
-// withQuotaWait, kota hatasına sitenin bildirdiği sıfırlanma süresini ekler.
-// ctx nil olabilir (ClassifyStatus'ün bağlamı yok); o zaman kısa zaman
-// aşımlı bir arka plan bağlamı kullanılır.
+// withQuotaWait adds the reset time reported by the site to a quota error.
+// ctx may be nil (ClassifyStatus has no context); then a background context
+// with a short timeout is used.
 func (m *mega) withQuotaWait(ctx context.Context, err error) error {
 	q, ok := QuotaOf(err)
 	if !ok || q.Wait > 0 {
@@ -284,14 +285,15 @@ func (m *mega) withQuotaWait(ctx context.Context, err error) error {
 	return err
 }
 
-// quotaWait, "uq" (kullanıcı kotası) komutuyla sıfırlanma süresini sorar.
+// quotaWait asks for the reset time with the "uq" (user quota) command.
 //
-// ÖLÇÜLDÜ (2026-09-14, kota doluyken): anonim çağrı {"a":"uq","xfer":1}
-// şunu döndürdü: bt=18349 (sıfırlanmaya kalan saniye), tar=0 (kalan pay),
-// tah=[0,0,0,0,0,5368709120] (son 6 saatin kovaları; tam 5 GiB harcanmış).
-// Kota IP başına ve yaklaşık 6 saatlik kayan pencerede ~5 GiB.
+// MEASURED (2026-09-14, with the quota full): the anonymous call
+// {"a":"uq","xfer":1} returned: bt=18349 (seconds until reset), tar=0
+// (remaining allowance), tah=[0,0,0,0,0,5368709120] (buckets of the last 6
+// hours; exactly 5 GiB spent). The quota is per IP, ~5 GiB in a sliding
+// window of about 6 hours.
 //
-// Bilinemezse 0 döner; çağıran kendi varsayılanını kullanır.
+// Returns 0 if unknown; the caller uses its own default.
 func (m *mega) quotaWait(ctx context.Context) time.Duration {
 	m.quotaMu.Lock()
 	if time.Since(m.quotaAt) < quotaProbeTTL {
@@ -299,9 +301,9 @@ func (m *mega) quotaWait(ctx context.Context) time.Duration {
 		m.quotaMu.Unlock()
 		return d
 	}
-	// Zaman damgası ÇAĞRIDAN ÖNCE atılıyor: "uq" çağrısının kendisi kota
-	// hatası dönerse call() yine buraya gelir; damga onu önbellekten (0)
-	// çevirir, sonsuz döngü olmaz.
+	// The timestamp is set BEFORE the call: if the "uq" call itself returns a
+	// quota error, call() comes back here; the timestamp answers it from the
+	// cache (0), so there is no infinite loop.
 	m.quotaAt, m.quotaCached = time.Now(), 0
 	m.quotaMu.Unlock()
 
@@ -311,7 +313,7 @@ func (m *mega) quotaWait(ctx context.Context) time.Duration {
 	var wait time.Duration
 	if st, err := m.quotaStatus(ctx); err == nil && st.ResetIn > 0 {
 		wait = time.Duration(st.ResetIn) * time.Second
-		// Sınırlar: API'nin saçma bir değeri kuyruğu günlerce kilitlemesin.
+		// Bounds: a nonsense value from the API must not lock the queue for days.
 		if wait < time.Minute {
 			wait = time.Minute
 		}
@@ -325,19 +327,20 @@ func (m *mega) quotaWait(ctx context.Context) time.Duration {
 	return wait
 }
 
-// megaQuota, "uq" yanıtının işimize yarayan alanı.
+// megaQuota is the useful field of the "uq" response.
 //
-// ÖLÇÜLDÜ (2026-09-14): "tar" alanı "kalan pay" DEĞİL. Kota doluyken de
-// (tah son kovada 5 GiB) boşken de (tah sıfır, indirme başarılı) tar=0
-// geldi. Bu yüzden "pay var mı" sorusu API'ye SORULMUYOR; kuyruk bekleyen
-// bir dosyayı gerçekten deneyerek öğreniyor. Yalnızca bt kullanılıyor ve
-// o da bir üst sınır olarak: kotayı dolduran kova pencereden çıkınca
-// sıfırlanır, bt bununla tutarlı çıktı (5 sa 6 dk, sonra 5 sa 14 dk).
+// MEASURED (2026-09-14): the "tar" field is NOT the "remaining allowance".
+// It came back as tar=0 both with the quota full (5 GiB in the last bucket
+// of tah) and empty (tah all zero, download succeeding). So "is there
+// allowance" is NOT asked of the API; the queue learns it by actually trying
+// a waiting file. Only bt is used, and only as an upper bound: the quota
+// resets when the bucket that filled it leaves the window, and bt was
+// consistent with that (5h 6m, then 5h 14m).
 type megaQuota struct {
-	ResetIn int64 `json:"bt"` // pencerenin dönmesine kalan saniye
+	ResetIn int64 `json:"bt"` // seconds until the window turns over
 }
 
-// quotaStatus, kotayı API'ye sorar (10 sn zaman aşımı).
+// quotaStatus asks the API for the quota (10 s timeout).
 func (m *mega) quotaStatus(ctx context.Context) (megaQuota, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -346,7 +349,7 @@ func (m *mega) quotaStatus(ctx context.Context) (megaQuota, error) {
 		return megaQuota{}, err
 	}
 	if len(results) == 0 {
-		return megaQuota{}, Errorf(LayerParse, m.api, "uq boş dizi döndü")
+		return megaQuota{}, Errorf(LayerParse, m.api, "uq returned an empty array")
 	}
 	var st megaQuota
 	if err := m.decodeResult(results[0], &st, m.api); err != nil {
@@ -362,7 +365,7 @@ func (m *mega) callOnce(ctx context.Context, folder string, payload []byte) ([]j
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, Errorf(LayerFetch, endpoint, "istek kurulamadı: %v", err)
+		return nil, Errorf(LayerFetch, endpoint, "could not build request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if m.cfg.UserAgent != "" {
@@ -385,38 +388,39 @@ func (m *mega) callOnce(ctx context.Context, folder string, payload []byte) ([]j
 	}
 
 	trim := bytes.TrimSpace(body)
-	// Tüm gövde tek bir sayı olabilir: [{"a":"g"}] -> -3
+	// The whole body may be a single number: [{"a":"g"}] -> -3
 	if len(trim) > 0 && trim[0] != '[' {
 		code, cerr := strconv.Atoi(string(trim))
 		if cerr != nil {
-			return nil, Errorf(LayerParse, endpoint, "API yanıtı ne dizi ne sayı: %.60s", trim)
+			return nil, Errorf(LayerParse, endpoint, "API response is neither an array nor a number: %.60s", trim)
 		}
 		return nil, megaAPIError(code, endpoint)
 	}
 	var results []json.RawMessage
 	if err := json.Unmarshal(trim, &results); err != nil {
-		return nil, Errorf(LayerParse, endpoint, "API yanıtı JSON değil: %v", err)
+		return nil, Errorf(LayerParse, endpoint, "API response is not JSON: %v", err)
 	}
 	return results, nil
 }
 
-// decodeResult, tek bir komut sonucunu out'a açar; sayıysa hataya çevirir.
+// decodeResult unpacks a single command result into out; if it is a number
+// it turns it into an error.
 func (m *mega) decodeResult(raw json.RawMessage, out any, evidence string) error {
 	t := bytes.TrimSpace(raw)
 	if len(t) > 0 && (t[0] == '-' || (t[0] >= '0' && t[0] <= '9')) {
 		code, err := strconv.Atoi(string(t))
 		if err != nil {
-			return Errorf(LayerParse, evidence, "API sonucu anlaşılamadı: %.60s", t)
+			return Errorf(LayerParse, evidence, "could not understand the API result: %.60s", t)
 		}
 		return m.withQuotaWait(nil, megaAPIError(code, evidence))
 	}
 	if err := json.Unmarshal(t, out); err != nil {
-		return Errorf(LayerParse, evidence, "API sonucu JSON değil: %v", err)
+		return Errorf(LayerParse, evidence, "API result is not JSON: %v", err)
 	}
 	return nil
 }
 
-// megaGetResp, "g" komutunun yanıtı: boyut, şifreli öznitelik, indirme adresi.
+// megaGetResp is the "g" command's response: size, encrypted attributes, download URL.
 type megaGetResp struct {
 	Size  int64  `json:"s"`
 	Attrs string `json:"at"`
@@ -424,13 +428,13 @@ type megaGetResp struct {
 	Err   int    `json:"e"`
 }
 
-// megaNode, klasör listesindeki bir düğüm.
+// megaNode is a node in a folder listing.
 type megaNode struct {
 	Handle string `json:"h"`
 	Parent string `json:"p"`
-	Type   int    `json:"t"` // 0 dosya, 1 klasör
+	Type   int    `json:"t"` // 0 file, 1 folder
 	Attrs  string `json:"a"`
-	Key    string `json:"k"` // "<paylaşım>:<base64 şifreli anahtar>"
+	Key    string `json:"k"` // "<share>:<base64 encrypted key>"
 	Size   int64  `json:"s"`
 }
 
@@ -451,7 +455,7 @@ func (m *mega) Resolve(ctx context.Context, u string, yield func(Item) error) ([
 	return m.resolveFolder(ctx, ref, yield)
 }
 
-// resolveFile, tek dosya linkini çözer.
+// resolveFile resolves a single file link.
 func (m *mega) resolveFile(ctx context.Context, ref megaRef) (Item, error) {
 	src := ref.canonical("")
 	results, err := m.call(ctx, "", []any{map[string]any{"a": "g", "g": 1, "p": ref.handle}})
@@ -459,7 +463,7 @@ func (m *mega) resolveFile(ctx context.Context, ref megaRef) (Item, error) {
 		return Item{}, err
 	}
 	if len(results) == 0 {
-		return Item{}, Errorf(LayerParse, src, "API boş dizi döndü")
+		return Item{}, Errorf(LayerParse, src, "API returned an empty array")
 	}
 	var g megaGetResp
 	if err := m.decodeResult(results[0], &g, src); err != nil {
@@ -468,13 +472,13 @@ func (m *mega) resolveFile(ctx context.Context, ref megaRef) (Item, error) {
 	return m.itemFromGet(g, ref.key, src, "", 0)
 }
 
-// itemFromGet, "g" yanıtı ve paketli anahtardan Item kurar.
+// itemFromGet builds an Item from a "g" response and a packed key.
 func (m *mega) itemFromGet(g megaGetResp, packed []byte, src, dir string, index int) (Item, error) {
 	if g.Err != 0 {
 		return Item{}, megaAPIError(g.Err, src)
 	}
 	if g.URL == "" {
-		return Item{}, Errorf(LayerItemPage, src, "API indirme adresi vermedi")
+		return Item{}, Errorf(LayerItemPage, src, "API gave no download URL")
 	}
 	key, err := megacrypto.UnpackFileKey(packed)
 	if err != nil {
@@ -485,7 +489,7 @@ func (m *mega) itemFromGet(g megaGetResp, packed []byte, src, dir string, index 
 		return Item{}, Errorf(LayerParse, src, "%v", err)
 	}
 	if attrs.Name == "" {
-		return Item{}, Errorf(LayerParse, src, "öznitelikte dosya adı yok")
+		return Item{}, Errorf(LayerParse, src, "no file name in the attributes")
 	}
 	return Item{
 		URL:        g.URL,
@@ -498,7 +502,7 @@ func (m *mega) itemFromGet(g megaGetResp, packed []byte, src, dir string, index 
 	}, nil
 }
 
-// megaEntry, klasör listesinden çıkan, indirilecek tek dosya.
+// megaEntry is a single file to download that came out of a folder listing.
 type megaEntry struct {
 	node   string
 	packed []byte
@@ -507,9 +511,9 @@ type megaEntry struct {
 	dir    string
 }
 
-// listFolder, klasör linkinin düğümlerini çözer ve indirilecek dosyaları
-// klasör yolu ile birlikte döndürür. ref.node doluysa yalnızca o düğüm (dosya)
-// veya o alt klasörün altındakiler.
+// listFolder decodes a folder link's nodes and returns the files to download
+// together with their folder path. If ref.node is set, only that node (a
+// file) or what is under that subfolder.
 func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error) {
 	src := ref.canonical("")
 	results, err := m.call(ctx, ref.handle, []any{map[string]any{"a": "f", "c": 1, "r": 1}})
@@ -517,7 +521,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		return nil, err
 	}
 	if len(results) == 0 {
-		return nil, Errorf(LayerParse, src, "API boş dizi döndü")
+		return nil, Errorf(LayerParse, src, "API returned an empty array")
 	}
 	var tree struct {
 		Nodes []megaNode `json:"f"`
@@ -526,7 +530,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		return nil, err
 	}
 	if len(tree.Nodes) == 0 {
-		return nil, Errorf(LayerParse, src, "klasör boş veya listelenemedi")
+		return nil, Errorf(LayerParse, src, "folder is empty or could not be listed")
 	}
 
 	byHandle := map[string]megaNode{}
@@ -535,11 +539,11 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 	}
 	root := megaRootOf(tree.Nodes, byHandle)
 
-	// Klasör adları: her klasör düğümünün özniteliği klasör anahtarıyla
-	// (dosyalarda olduğu gibi türetilmiş anahtarla DEĞİL, doğrudan 16 baytla)
-	// çözülüyor. ÖLÇÜLDÜ: kök de dahil — paylaşım anahtarı (linkteki) kökün
-	// kendi anahtarı DEĞİL, kökün anahtarı da "k" alanında sarılı geliyor.
-	// Link anahtarı yalnızca son çare adayı (kökte "k" yoksa).
+	// Folder names: each folder node's attributes are decrypted with a folder
+	// key (directly with the 16 bytes, NOT with a derived key as for files).
+	// MEASURED: the root included — the share key (the one in the link) is NOT
+	// the root's own key; the root's key also arrives wrapped in its "k" field.
+	// The link key is only a last-resort candidate (if the root has no "k").
 	folderName := map[string]string{}
 	for _, n := range tree.Nodes {
 		if n.Type != 1 {
@@ -558,9 +562,9 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		}
 	}
 
-	// Alt klasör yolu "Kök/Alt" olarak kuruluyor; indirici "/" karakterini
-	// "-" yapıp tek klasöre indiriyor ("Kök-Alt"). Yapı bilgisi korunuyor,
-	// iç içe klasör açılmıyor. v1 için yeterli.
+	// The subfolder path is built as "Root/Sub"; the downloader turns "/"
+	// into "-" and downloads into a single folder ("Root-Sub"). The structure
+	// information is kept, nested folders are not created. Enough for v1.
 	pathOf := func(h string) string {
 		var parts []string
 		for cur := h; cur != ""; {
@@ -577,7 +581,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		return strings.Join(parts, "/")
 	}
 	under := func(h string) bool {
-		// h, ref.node'un altında mı (ref.node bir alt klasörse)?
+		// Is h under ref.node (when ref.node is a subfolder)?
 		if ref.node == "" {
 			return true
 		}
@@ -604,7 +608,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		}
 		packed, name, err := m.fileKeyOf(ref, root, n)
 		if err != nil {
-			m.cfg.Logln("mega: %s düğümü: %v", n.Handle, err)
+			m.cfg.Logln("mega: node %s: %v", n.Handle, err)
 			continue
 		}
 		out = append(out, megaEntry{
@@ -620,13 +624,13 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 	return out, nil
 }
 
-// megaRootOf, klasör linkinin kök düğümünü bulur.
+// megaRootOf finds the root node of a folder link.
 //
-// ÖLÇÜLDÜ: linkteki handle (mega.nz/folder/<handle>) PAYLAŞIMIN handle'ı,
-// kök klasörün düğüm handle'ı DEĞİL; ikisi hiçbir zaman eşit değil.
-// "k" alanındaki etiketler ve "p" zinciri düğüm handle'ıyla çalıştığı için
-// kök ağaçtan çıkarılıyor: ebeveyni listede olmayan klasör. API kökü ilk
-// sırada döndürüyor; belirsizlikte o alınıyor.
+// MEASURED: the handle in the link (mega.nz/folder/<handle>) is the SHARE's
+// handle, NOT the root folder's node handle; the two are never equal. The
+// labels in the "k" field and the "p" chain work with node handles, so the
+// root is derived from the tree: the folder whose parent isn't in the list.
+// The API returns the root first; on ambiguity that one is taken.
 func megaRootOf(nodes []megaNode, byHandle map[string]megaNode) string {
 	for _, n := range nodes {
 		if n.Type == 1 {
@@ -638,15 +642,16 @@ func megaRootOf(nodes []megaNode, byHandle map[string]megaNode) string {
 	return nodes[0].Handle
 }
 
-// nodeKeyCandidates, düğümün "k" alanındaki anahtarları klasör anahtarıyla
-// açıp tercih sırasıyla döndürür.
+// nodeKeyCandidates opens the keys in the node's "k" field with the folder
+// key and returns them in order of preference.
 //
-// Alan "<paylaşım>:<anahtar>" biçiminde, birden fazlaysa "/" ile ayrılmış.
-// ÖLÇÜLDÜ: sahibi klasörü daha üstten de paylaşmışsa ilk etiket o üst
-// paylaşıma ait olur ve anahtarı bizde yoktur; onunla "açılan" anahtar
-// sessizce çöp çıkar. Bu yüzden kök etiketli aday öne alınıyor ve çağıran,
-// adayları özniteliği çözerek doğruluyor — hangisi "MEGA" önekini veriyorsa
-// doğru anahtar o.
+// The field has the form "<share>:<key>", "/"-separated if there are several.
+// MEASURED: if the owner also shared the folder from higher up, the first
+// label belongs to that upper share and we don't have its key; a key
+// "opened" with it silently comes out as garbage. That is why the candidate
+// labeled with the root is moved to the front, and the caller verifies the
+// candidates by decrypting the attributes — whichever yields the "MEGA"
+// prefix is the right key.
 func (m *mega) nodeKeyCandidates(ref megaRef, root string, n megaNode) [][]byte {
 	var preferred, others [][]byte
 	for _, part := range strings.Split(n.Key, "/") {
@@ -671,15 +676,15 @@ func (m *mega) nodeKeyCandidates(ref megaRef, root string, n megaNode) [][]byte 
 	return append(preferred, others...)
 }
 
-// fileKeyOf, dosya düğümünün paketli anahtarını ve adını verir; adaylar
-// arasından özniteliği çözebileni seçer.
+// fileKeyOf returns a file node's packed key and name; it picks the candidate
+// that can decrypt the attributes.
 func (m *mega) fileKeyOf(ref megaRef, root string, n megaNode) (packed []byte, name string, err error) {
 	if n.Key == "" {
-		return nil, "", errors.New("k alanı boş")
+		return nil, "", errors.New("k field is empty")
 	}
 	cands := m.nodeKeyCandidates(ref, root, n)
 	if len(cands) == 0 {
-		return nil, "", errors.New("k alanında anahtar yok")
+		return nil, "", errors.New("no key in the k field")
 	}
 	var last error
 	for _, c := range cands {
@@ -694,22 +699,22 @@ func (m *mega) fileKeyOf(ref megaRef, root string, n megaNode) (packed []byte, n
 			continue
 		}
 		if attrs.Name == "" {
-			last = errors.New("öznitelikte dosya adı yok")
+			last = errors.New("no file name in the attributes")
 			continue
 		}
 		return c, attrs.Name, nil
 	}
-	return nil, "", fmt.Errorf("%d anahtar adayının hiçbiri özniteliği çözmedi: %v", len(cands), last)
+	return nil, "", fmt.Errorf("none of the %d key candidates decrypted the attributes: %v", len(cands), last)
 }
 
-// resolveFolder, klasördeki dosyaları toplu "g" çağrılarıyla çözer ve yield eder.
+// resolveFolder resolves the folder's files with batched "g" calls and yields them.
 func (m *mega) resolveFolder(ctx context.Context, ref megaRef, yield func(Item) error) ([]ItemError, error) {
 	entries, err := m.listFolder(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
 	if ref.node != "" && len(entries) == 0 {
-		return nil, Errorf(LayerItemPage, ref.canonical(ref.node), "seçili düğüm klasörde bulunamadı")
+		return nil, Errorf(LayerItemPage, ref.canonical(ref.node), "the selected node was not found in the folder")
 	}
 
 	var itemErrs []ItemError
@@ -730,7 +735,7 @@ func (m *mega) resolveFolder(ctx context.Context, ref megaRef, yield func(Item) 
 		}
 		if len(results) != len(batch) {
 			return itemErrs, Errorf(LayerParse, ref.canonical(""),
-				"API %d sonuç döndü, %d bekleniyordu", len(results), len(batch))
+				"API returned %d results, expected %d", len(results), len(batch))
 		}
 		for i, e := range batch {
 			src := ref.canonical(e.node)
@@ -744,8 +749,8 @@ func (m *mega) resolveFolder(ctx context.Context, ref megaRef, yield func(Item) 
 				itemErrs = append(itemErrs, ItemError{URL: src, Err: ierr})
 				continue
 			}
-			// Listeden gelen ad ve boyut daha güvenilir: "g" bazen öznitelik
-			// taşımıyor.
+			// The name and size from the listing are more reliable: "g"
+			// sometimes carries no attributes.
 			if it.Filename == "" {
 				it.Filename = e.name
 			}
@@ -761,7 +766,7 @@ func (m *mega) resolveFolder(ctx context.Context, ref megaRef, yield func(Item) 
 	return itemErrs, nil
 }
 
-// ResolveOne, süresi dolan indirme adresini tazeler.
+// ResolveOne refreshes an expired download URL.
 func (m *mega) ResolveOne(ctx context.Context, sourcePage string) (Item, error) {
 	ref, err := m.parse(sourcePage)
 	if err != nil {
@@ -771,14 +776,14 @@ func (m *mega) ResolveOne(ctx context.Context, sourcePage string) (Item, error) 
 		return m.resolveFile(ctx, ref)
 	}
 	if ref.node == "" {
-		return Item{}, Errorf(LayerParse, sourcePage, "klasör linki tek item olarak çözülemez; /file/<düğüm> gerekli")
+		return Item{}, Errorf(LayerParse, sourcePage, "a folder link can't be resolved as a single item; /file/<node> is required")
 	}
 
 	m.mu.Lock()
 	packed, ok := m.nodeKeys[ref.node]
 	m.mu.Unlock()
 	if !ok {
-		// Önbellekte yok (örn. süreç yeniden başladı): klasörü baştan listele.
+		// Not in the cache (e.g. the process restarted): list the folder from scratch.
 		if _, lerr := m.listFolder(ctx, megaRef{kind: megaFolder, handle: ref.handle, key: ref.key}); lerr != nil {
 			return Item{}, lerr
 		}
@@ -786,7 +791,7 @@ func (m *mega) ResolveOne(ctx context.Context, sourcePage string) (Item, error) 
 		packed, ok = m.nodeKeys[ref.node]
 		m.mu.Unlock()
 		if !ok {
-			return Item{}, Errorf(LayerItemPage, sourcePage, "düğüm klasörde bulunamadı")
+			return Item{}, Errorf(LayerItemPage, sourcePage, "node not found in the folder")
 		}
 	}
 
@@ -795,7 +800,7 @@ func (m *mega) ResolveOne(ctx context.Context, sourcePage string) (Item, error) 
 		return Item{}, err
 	}
 	if len(results) == 0 {
-		return Item{}, Errorf(LayerParse, sourcePage, "API boş dizi döndü")
+		return Item{}, Errorf(LayerParse, sourcePage, "API returned an empty array")
 	}
 	var g megaGetResp
 	if err := m.decodeResult(results[0], &g, sourcePage); err != nil {
@@ -804,28 +809,65 @@ func (m *mega) ResolveOne(ctx context.Context, sourcePage string) (Item, error) 
 	return m.itemFromGet(g, packed, sourcePage, "", 0)
 }
 
-// ---------- İndirici kancaları ----------
+// ---------- Downloader hooks ----------
 
-// DecodeStream, site.StreamDecoder. Anahtar Item.Secret'ta taşınıyor.
+// DecodeStream implements site.StreamDecoder. The key travels in Item.Secret.
 func (m *mega) DecodeStream(it Item, offset int64, saved []byte, r io.Reader) (DecodedStream, error) {
 	key, err := megacrypto.UnpackFileKey(it.Secret)
 	if err != nil {
-		return nil, fmt.Errorf("mega: item anahtarı yok veya bozuk: %w", err)
+		return nil, fmt.Errorf("mega: item key missing or corrupt: %w", err)
 	}
 	return megacrypto.NewStream(key, offset, saved, r)
 }
 
-// ClassifyStatus, site.StatusClassifier.
+// DecodeRange implements site.RangeDecoder: AES-CTR decrypts any range on its
+// own, so a file can be fetched over several connections.
+func (m *mega) DecodeRange(it Item, offset int64, r io.Reader) (io.Reader, error) {
+	key, err := megacrypto.UnpackFileKey(it.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("mega: item key missing or corrupt: %w", err)
+	}
+	return megacrypto.NewRangeReader(key, offset, r)
+}
+
+// RangeURL implements site.RangeURLer: mega's storage servers take the range
+// in the path, ".../<start>-<end>" with an inclusive end, the form mega's own
+// clients, MegaBasterd (ChunkWriterManager.genChunkUrl) and go-mega use.
+func (m *mega) RangeURL(rawURL string, start, end int64) string {
+	suffix := "/" + strconv.FormatInt(start, 10)
+	if end > start {
+		suffix += "-" + strconv.FormatInt(end-1, 10)
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL + suffix
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + suffix
+	u.RawPath = ""
+	return u.String()
+}
+
+// NewVerifier implements site.RangeDecoder: the meta-MAC over the finished file.
+func (m *mega) NewVerifier(it Item) (Verifier, error) {
+	key, err := megacrypto.UnpackFileKey(it.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("mega: item key missing or corrupt: %w", err)
+	}
+	return megacrypto.NewVerifier(key)
+}
+
+// ClassifyStatus implements site.StatusClassifier.
 //
-// 509, mega'nın IP başına aktarım kotası. Genel kurala göre "5xx, geçici"
-// sayılıp dakikalar içinde tekrar tekrar denenirdi; oysa kota saatlerce
-// dolu kalır. QuotaError olarak bildiriliyor: yeniden deneme politikası
-// durur, kuyruk işi "kota bekliyor"a alır ve sıfırlanma zamanında (ya da
-// kullanıcı IP değiştirip ▶ deyince) yeniden çözümleyip dener.
+// 509 is mega's per-IP transfer quota. By the generic rule it would count as
+// "5xx, transient" and be retried over and over within minutes; but the quota
+// stays full for hours. It is reported as a QuotaError: the retry policy
+// stops, the queue moves the job to "waiting for quota" and at the reset time
+// (or when the user changes IP and presses ▶) resolves and tries again.
 //
-// 403 ise nil dönüyor: indirici onu "adres süresi dolmuş" sayıp ResolveOne
-// ile tazeliyor. ÖLÇÜLDÜ: "g" yanıtındaki "ip" alanı indirme adresini
-// isteyen IP'ye BAĞLAR; VPN değişince eski adres 403 verir, taze "g" gerekir.
+// 403 returns nil: the downloader treats it as "URL expired" and refreshes it
+// with ResolveOne. MEASURED: the "ip" field in the "g" response BINDS the
+// download URL to the requesting IP; when the VPN changes, the old URL gives
+// 403 and a fresh "g" is needed.
 func (m *mega) ClassifyStatus(resp *http.Response, body []byte) error {
 	if resp.StatusCode == 509 {
 		evidence := ""
@@ -833,16 +875,16 @@ func (m *mega) ClassifyStatus(resp *http.Response, body []byte) error {
 			evidence = resp.Request.URL.Host
 		}
 		return m.withQuotaWait(nil, &QuotaError{Err: Errorf(LayerCDN, evidence,
-			"mega aktarım kotası doldu (HTTP 509): IP başına sınır")})
+			"mega transfer quota exceeded (HTTP 509): per-IP limit")})
 	}
 	return nil
 }
 
-// ---------- Teşhis ----------
+// ---------- Diagnosis ----------
 
-// Diagnose, API'ye kasıtlı olarak geçersiz bir komut gönderir. Beklenen yanıt
-// negatif bir sayıdır: bu, "API'ye ulaştım, JSON konuşuyor ve bana cevap
-// verdi" demektir. Gerçek bir dosya tanıtıcısına ihtiyaç yok.
+// Diagnose deliberately sends an invalid command to the API. The expected
+// answer is a negative number: it means "I reached the API, it speaks JSON
+// and answered me". No real file handle is needed.
 func (m *mega) Diagnose(ctx context.Context) ([]LayerResult, error) {
 	canaries := m.cfg.CanaryURLs
 	if len(canaries) == 0 {
@@ -864,46 +906,46 @@ func (m *mega) diagnoseOne(ctx context.Context, canary string) []LayerResult {
 	u, err := url.Parse(canary)
 	if err != nil {
 		return append(out, LayerResult{Layer: LayerDNS, Status: StatusFail,
-			Detail: "canary URL ayrıştırılamadı", Evidence: canary})
+			Detail: "could not parse the canary URL", Evidence: canary})
 	}
 	host := normalizeHost(u.Host)
 	addrs, dnsErr := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if dnsErr != nil {
 		return append(out, LayerResult{Layer: LayerDNS, Status: StatusFail,
-			Detail: "çözümlenemedi", Evidence: host + ": " + dnsErr.Error()})
+			Detail: "did not resolve", Evidence: host + ": " + dnsErr.Error()})
 	}
 	ips := make([]string, 0, len(addrs))
 	for _, a := range addrs {
 		ips = append(ips, a.IP.String())
 	}
 	out = append(out, LayerResult{Layer: LayerDNS, Status: StatusOK,
-		Detail: fmt.Sprintf("%d adres", len(ips)), Evidence: strings.Join(ips, ", ")})
+		Detail: fmt.Sprintf("%d addresses", len(ips)), Evidence: strings.Join(ips, ", ")})
 
 	probe := &mega{cfg: m.cfg, api: canary, nodeKeys: map[string][]byte{}}
 	_, perr := probe.callOnce(ctx, "", []byte(`[{"a":"g","p":"AAAAAAAA"}]`))
 	layer, _ := LayerOf(perr)
 	switch {
 	case perr == nil:
-		// Geçersiz tanıtıcıya bile sonuç dizisi döndü; API konuşuyor.
+		// Even an invalid handle got a result array back; the API is talking.
 		fallthrough
 	case layer == LayerParse || layer == LayerItemPage:
-		// Negatif sayı geldi (-2/-9): tam beklediğimiz şey.
+		// A negative number came back (-2/-9): exactly what we expect.
 		out = append(out,
-			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
-			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "challenge yok"},
-			LayerResult{Layer: LayerFetch, Status: StatusOK, Detail: "API yanıt verdi"},
-			LayerResult{Layer: LayerParse, Status: StatusOK, Detail: "JSON çözüldü, hata kodu beklenen biçimde"},
-			LayerResult{Layer: LayerItemPage, Status: StatusOK, Detail: "mega'da ayrı item sayfası yok, zincir API'den ibaret"},
-			LayerResult{Layer: LayerCDN, Status: StatusOK, Detail: "indirme adresleri API'den geliyor; kota ancak indirirken görülür"},
+			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "handshake OK"},
+			LayerResult{Layer: LayerChallenge, Status: StatusOK, Detail: "no challenge"},
+			LayerResult{Layer: LayerFetch, Status: StatusOK, Detail: "API answered"},
+			LayerResult{Layer: LayerParse, Status: StatusOK, Detail: "JSON decoded, error code in the expected form"},
+			LayerResult{Layer: LayerItemPage, Status: StatusOK, Detail: "mega has no separate item page, the chain is just the API"},
+			LayerResult{Layer: LayerCDN, Status: StatusOK, Detail: "download URLs come from the API; the quota only shows while downloading"},
 		)
 	case layer == LayerTLS:
 		out = append(out, LayerResult{Layer: LayerTLS, Status: StatusFail,
-			Detail: "el sıkışma başarısız", Evidence: collapseSpace(perr.Error())})
+			Detail: "handshake failed", Evidence: collapseSpace(perr.Error())})
 	default:
 		out = append(out,
-			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "el sıkışma tamam"},
+			LayerResult{Layer: LayerTLS, Status: StatusOK, Detail: "handshake OK"},
 			LayerResult{Layer: LayerFetch, Status: StatusFail,
-				Detail: "API'ye ulaşılamadı", Evidence: collapseSpace(perr.Error())})
+				Detail: "could not reach the API", Evidence: collapseSpace(perr.Error())})
 	}
 	return out
 }

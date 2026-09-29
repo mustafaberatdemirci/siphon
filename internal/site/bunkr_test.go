@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func bunkrCfg() SiteConfig {
@@ -30,9 +31,9 @@ func bunkrCfg() SiteConfig {
 	}.WithDefaults()
 }
 
-// hostRouter, host adına göre yanıt üreten bir RoundTripper.
-// Domain rotasyonunu tamamen çevrimdışı test etmeyi sağlıyor: hangi domainin
-// 403 döndüğünü, hangisinin TLS hatası verdiğini elle kuruyoruz.
+// hostRouter is a RoundTripper that produces responses by host name.
+// It makes it possible to test domain rotation fully offline: we set up by
+// hand which domain returns 403 and which one gives a TLS error.
 type hostRouter struct {
 	handlers map[string]http.HandlerFunc
 	failures map[string]error
@@ -47,7 +48,7 @@ func (h *hostRouter) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	fn, ok := h.handlers[host]
 	if !ok {
-		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("bilinmeyen host")}
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("unknown host")}
 	}
 	rec := httptest.NewRecorder()
 	fn(rec, req)
@@ -69,7 +70,7 @@ func forbidden(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("<title>Just a moment...</title>"))
 }
 
-// --- URL tanima ---
+// --- URL recognition ---
 
 func TestBunkrMatch(t *testing.T) {
 	b := NewBunkr(bunkrCfg())
@@ -81,21 +82,21 @@ func TestBunkrMatch(t *testing.T) {
 		"https://bunkr.ws/v/slug-here",
 		"https://bunkr.ws/i/slug-here",
 		"https://bunkr.ws/d/slug-here",
-		// LegacyDomains TANINIR (fetch icin kullanilmaz, ayri test).
+		// LegacyDomains are RECOGNIZED (not used for fetching, separate test).
 		"https://bunkr.la/a/ABC123",
-		// Joker: listede olmayan yeni bir TLD tanınmali.
+		// Wildcard: a new TLD missing from the list must be recognized.
 		"https://bunkr.xyz/a/ABC123",
 		"https://bunkrr.pk/a/ABC123",
 		"bunkr.ws/a/ABC123",
 	}
 	for _, u := range ok {
 		if !b.Match(u) {
-			t.Errorf("Match(%q) = false, true bekleniyordu", u)
+			t.Errorf("Match(%q) = false, want true", u)
 		}
 	}
 	bad := []string{
 		"https://pixeldrain.com/l/abc",
-		// GUVENLIK: joker tek etiket karsilar, dusmanca alt alan adi eslesmez.
+		// SECURITY: a wildcard matches a single label; a hostile subdomain doesn't match.
 		"https://bunkr.attacker.com/a/ABC",
 		"https://bunkr.ws/",
 		"https://bunkr.ws/a/",
@@ -104,22 +105,23 @@ func TestBunkrMatch(t *testing.T) {
 	}
 	for _, u := range bad {
 		if b.Match(u) {
-			t.Errorf("Match(%q) = true, false bekleniyordu", u)
+			t.Errorf("Match(%q) = true, want false", u)
 		}
 	}
 }
 
-// --- XOR cozumu ---
+// --- XOR decryption ---
 
-// Anahtar turetimi, sifre cozumunun tek sabit olmayan parcasi: anahtar
-// timestamp/3600'den uretiliyor, yani saatlik bir pencereye bagli.
+// Key derivation is the only non-fixed part of the decryption: the key is
+// derived from timestamp/3600, i.e. tied to an hourly window.
 //
-// Bu test CANLI DOGRULAMAYA dayaniyor ama canli veriyi GOMMUYOR. 2026-09-09'da
-// gercek bir API yaniti uzerinde hem bu uygulama hem bagimsiz bir Python
-// uygulamasi ayni URL'i uretti (timestamp 1788991464 -> SECRET_KEY_496942,
-// cozulen adres "https://<host>.cdn.cr/<uuid>.mp4" bicimindeydi). Gercek
-// base64 ve UUID repoya yazilmiyor: birincisi her cagrida degisiyor, ikincisi
-// baskasinin icerigine isaret ediyor. Burada sabitlenen sey FORMUL.
+// This test RELIES ON LIVE VERIFICATION but does NOT EMBED live data. On
+// 2026-09-09, on a real API response, both this implementation and an
+// independent Python implementation produced the same URL (timestamp
+// 1788991464 -> SECRET_KEY_496942, the decrypted URL had the form
+// "https://<host>.cdn.cr/<uuid>.mp4"). The real base64 and UUID aren't
+// written to the repo: the first changes on every call, the second points to
+// someone else's content. What is pinned here is the FORMULA.
 func TestXORKeyDerivation(t *testing.T) {
 	cases := []struct {
 		timestamp int64
@@ -133,12 +135,12 @@ func TestXORKeyDerivation(t *testing.T) {
 	for _, c := range cases {
 		got := "SECRET_KEY_" + fmt.Sprint(c.timestamp/3600)
 		if got != c.want {
-			t.Errorf("timestamp %d -> %q, beklenen %q", c.timestamp, got, c.want)
+			t.Errorf("timestamp %d -> %q, want %q", c.timestamp, got, c.want)
 		}
 	}
 
-	// Formulun gercek adresi urettigi, gercek anahtarla sentetik bir adres
-	// uzerinden dogrulaniyor.
+	// That the formula produces the real URL is verified with the real key
+	// over a synthetic URL.
 	const timestamp = 1788991464
 	key := []byte("SECRET_KEY_" + fmt.Sprint(timestamp/3600))
 	plain := "https://c3bc-b.cdn.cr/419b02f6-8abe-46aa-bc4a-9fc5b24095cd.mp4"
@@ -174,20 +176,20 @@ func TestDecryptXORRoundTrip(t *testing.T) {
 
 func TestDecryptXORErrors(t *testing.T) {
 	if _, err := decryptXOR("Zm9v", nil); err == nil {
-		t.Error("bos anahtar hata vermeli")
+		t.Error("an empty key must fail")
 	}
-	if _, err := decryptXOR("bu base64 degil!!!", []byte("k")); err == nil {
-		t.Error("gecersiz base64 hata vermeli")
+	if _, err := decryptXOR("this is not base64!!!", []byte("k")); err == nil {
+		t.Error("invalid base64 must fail")
 	}
 }
 
-// --- Album ayristirma ---
+// --- Album parsing ---
 
-// Alan adlari ve sira, 2026-09-09'da canli bunkr.ws albüm sayfasindan
-// dogrulandi: id, name, original, slug, type, extension, size, timestamp,
+// Field names and order were verified on 2026-09-09 against a live bunkr.ws
+// album page: id, name, original, slug, type, extension, size, timestamp,
 // thumbnail, cdnEndpoint.
 const albumFixture = `<html><head>
-<meta property="og:title" content="Tatil Albümü 2026" />
+<meta property="og:title" content="Holiday Album 2026" />
 </head><body>
 <span class="font-semibold">(3 files)</span>
 <script>
@@ -195,34 +197,34 @@ window.albumFiles = [
 {
   id: 51537490,
   name: "419b02f6-8abe-46aa-bc4a-9fc5b24095cd.mp4",
-  original: "Birinci Video - Özgür & Aslı.mp4",
-  slug: "birinci-video-abc",
+  original: "First Video - Zoë & Chloé.mp4",
+  slug: "first-video-abc",
   type: "video/mp4",
   extension: ".mp4",
   size:  1946234880 ,
   timestamp: "12:34:56 20/07/2026",
-  thumbnail: "https://i.bunkr.ru/thumbs/birinci.png",
+  thumbnail: "https://i.bunkr.ru/thumbs/first.png",
   cdnEndpoint: "https://c3bc-b.cdn.cr"
 },
 {
   id: 51537491,
   name: "aaa.mp4",
-  original: "İkinci { süslü } parantezli.mp4",
-  slug: "ikinci-video-def",
+  original: "Second { curly } braces.mp4",
+  slug: "second-video-def",
   type: "video/mp4",
   extension: ".mp4",
   size:  100 ,
   timestamp: "01:02:03 21/07/2026",
-  thumbnail: "https://i.bunkr.ru/thumbs/ikinci.png",
+  thumbnail: "https://i.bunkr.ru/thumbs/second.png",
   cdnEndpoint: "https://c3su-b.cdn.cr"
 },
 {
   id: 51537492,
   name: "bbb.png",
-  slug: "ucuncu-resim-ghi",
+  slug: "third-image-ghi",
   type: "image/png",
   extension: ".png",
-  size:  bozuk ,
+  size:  broken ,
   timestamp: "",
   thumbnail: "",
   cdnEndpoint: ""
@@ -236,69 +238,69 @@ func TestParseAlbumFiles(t *testing.T) {
 		t.Fatalf("parseAlbumFiles: %v", err)
 	}
 	if len(files) != 3 {
-		t.Fatalf("%d item, 3 bekleniyordu", len(files))
+		t.Fatalf("%d items, want 3", len(files))
 	}
 
 	if files[0].ID != "51537490" {
 		t.Errorf("id = %q", files[0].ID)
 	}
-	if files[0].Name != "Birinci Video - Özgür & Aslı.mp4" {
-		t.Errorf("original adi = %q", files[0].Name)
+	if files[0].Name != "First Video - Zoë & Chloé.mp4" {
+		t.Errorf("original name = %q", files[0].Name)
 	}
-	if files[0].Slug != "birinci-video-abc" {
+	if files[0].Slug != "first-video-abc" {
 		t.Errorf("slug = %q", files[0].Slug)
 	}
 	if files[0].Size != 1946234880 {
-		t.Errorf("size = %d (kaynakta cift bosluk ve virgulden once bosluk var)", files[0].Size)
+		t.Errorf("size = %d (the source has a double space and a space before the comma)", files[0].Size)
 	}
 
-	// Deger icinde susluk parantez: blok ayirma bozulmamali.
-	if files[1].Name != "İkinci { süslü } parantezli.mp4" {
-		t.Errorf("susluk parantezli ad bozuldu: %q", files[1].Name)
+	// Curly braces inside a value: block splitting must not break.
+	if files[1].Name != "Second { curly } braces.mp4" {
+		t.Errorf("name with curly braces broke: %q", files[1].Name)
 	}
 
-	// Bozuk size -> -1, item atlanmiyor.
+	// Broken size -> -1, the item isn't skipped.
 	if files[2].Size != -1 {
-		t.Errorf("bozuk size = %d, -1 bekleniyordu", files[2].Size)
+		t.Errorf("broken size = %d, want -1", files[2].Size)
 	}
-	// original yok -> slug + uzanti yedegi.
-	if files[2].Name != "ucuncu-resim-ghi.png" {
-		t.Errorf("yedek ad = %q", files[2].Name)
+	// No original -> slug + extension fallback.
+	if files[2].Name != "third-image-ghi.png" {
+		t.Errorf("fallback name = %q", files[2].Name)
 	}
 }
 
 func TestParseAlbumFilesMissingMarker(t *testing.T) {
-	if _, err := parseAlbumFiles("<html>bos sayfa</html>"); err == nil {
-		t.Fatal("window.albumFiles yoksa hata bekleniyordu")
+	if _, err := parseAlbumFiles("<html>empty page</html>"); err == nil {
+		t.Fatal("expected an error without window.albumFiles")
 	}
 }
 
-// Blok ayirma susluk parantez DENGESI uzerinden yapiliyor, satir sonu
-// kalibina ("\n},\n") gore degil: bicimlendirme degisirse o kalip sessizce
-// tek bir dev item uretir ve album bir dosyaya duser.
+// Blocks are split by curly brace BALANCE, not by a line-ending pattern
+// ("\n},\n"): if formatting changes, that pattern silently produces one giant
+// item and the album collapses into a single file.
 func TestSplitJSObjectsHandlesBracesInStrings(t *testing.T) {
-	body := `{ a: "i{c}i", b: 1 }, { c: 'x}y', d: 2 }`
+	body := `{ a: "i{n}side", b: 1 }, { c: 'x}y', d: 2 }`
 	got := splitJSObjects(body)
 	if len(got) != 2 {
-		t.Fatalf("%d blok, 2 bekleniyordu: %q", len(got), got)
+		t.Fatalf("%d blocks, want 2: %q", len(got), got)
 	}
 }
 
 func TestSplitJSObjectsSingleLine(t *testing.T) {
-	// Tek satira sikistirilmis cikti da calismali.
+	// Output squeezed onto a single line must work too.
 	body := `{id: 1, original: "a.mp4"},{id: 2, original: "b.mp4"}`
 	if got := splitJSObjects(body); len(got) != 2 {
-		t.Fatalf("%d blok, 2 bekleniyordu", len(got))
+		t.Fatalf("%d blocks, want 2", len(got))
 	}
 }
 
-// --- Domain rotasyonu ---
+// --- Domain rotation ---
 
 func albumHandler(w http.ResponseWriter, r *http.Request) {
 	if !strings.Contains(r.URL.RawQuery, "advanced=1") {
-		// advanced=1 olmadan albumFiles gelmiyor; bunu sabitliyoruz.
+		// Without advanced=1 no albumFiles arrive; we pin that here.
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("<html>advanced yok</html>"))
+		_, _ = w.Write([]byte("<html>no advanced</html>"))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -309,30 +311,31 @@ func TestBunkrRotatesPastChallengedDomain(t *testing.T) {
 	rt := &hostRouter{
 		handlers: map[string]http.HandlerFunc{
 			"bunkr.ws":    forbidden,    // Cloudflare challenge
-			"bunkr.ac":    albumHandler, // calisan
+			"bunkr.ac":    albumHandler, // working
 			"bunkr.black": forbidden,
 		},
 	}
 	b := newBunkr(t, rt)
 	body, root, err := b.fetchWithRotation(context.Background(), "/a/X?advanced=1", "")
 	if err != nil {
-		t.Fatalf("rotasyon basarisiz: %v", err)
+		t.Fatalf("rotation failed: %v", err)
 	}
 	if root != "https://bunkr.ac" {
-		t.Errorf("root = %q, bunkr.ac bekleniyordu", root)
+		t.Errorf("root = %q, want bunkr.ac", root)
 	}
 	if !strings.Contains(string(body), "window.albumFiles") {
-		t.Error("albüm sayfasi gelmedi")
+		t.Error("the album page did not arrive")
 	}
 	burned := b.Burned()
 	if why, ok := burned["bunkr.ws"]; !ok || !strings.Contains(why, "Cloudflare") {
-		t.Errorf("bunkr.ws elenmedi veya neden yanlis: %q", why)
+		t.Errorf("bunkr.ws not eliminated or wrong reason: %q", why)
 	}
 }
 
-// ASIL BULGU: gallery-dl yalnizca 403'te domain eliyor. Olcum, Turkiye agindan
-// engelin sertifika hatasi ve baglanti zaman asimi olarak geldigini gosterdi.
-// Rotasyon bunlari da kapsamak zorunda, yoksa engelli bir domainde takilir.
+// THE REAL FINDING: gallery-dl eliminates domains only on 403. A measurement
+// showed that from a network in Turkey the block arrives as a certificate
+// error and a connection timeout. Rotation must cover those too, otherwise it
+// gets stuck on a blocked domain.
 func TestBunkrRotatesPastConnectionFailure(t *testing.T) {
 	rt := &hostRouter{
 		handlers: map[string]http.HandlerFunc{"bunkr.black": albumHandler},
@@ -344,18 +347,18 @@ func TestBunkrRotatesPastConnectionFailure(t *testing.T) {
 	b := newBunkr(t, rt)
 	_, root, err := b.fetchWithRotation(context.Background(), "/a/X?advanced=1", "")
 	if err != nil {
-		t.Fatalf("baglanti hatasinda rotasyon yapilmadi: %v", err)
+		t.Fatalf("no rotation on a connection error: %v", err)
 	}
 	if root != "https://bunkr.black" {
 		t.Errorf("root = %q", root)
 	}
 	burned := b.Burned()
 	if len(burned) != 2 {
-		t.Fatalf("%d domain elendi, 2 bekleniyordu: %v", len(burned), burned)
+		t.Fatalf("%d domains eliminated, want 2: %v", len(burned), burned)
 	}
 	for _, d := range []string{"bunkr.ws", "bunkr.ac"} {
-		if !strings.Contains(burned[d], "bağlantı kurulamadı") {
-			t.Errorf("%s neden = %q", d, burned[d])
+		if !strings.Contains(burned[d], "could not connect") {
+			t.Errorf("%s reason = %q", d, burned[d])
 		}
 	}
 }
@@ -367,16 +370,16 @@ func TestBunkrAllDomainsBurned(t *testing.T) {
 	b := newBunkr(t, rt)
 	_, _, err := b.fetchWithRotation(context.Background(), "/a/X", "")
 	if !errors.Is(err, ErrAllDomainsBurned) {
-		t.Fatalf("ErrAllDomainsBurned bekleniyordu: %v", err)
+		t.Fatalf("expected ErrAllDomainsBurned: %v", err)
 	}
-	// Teshis icin neden kaydedilmis olmali.
+	// The reasons must be recorded for diagnosis.
 	if l, ok := LayerOf(err); !ok || l != LayerChallenge {
-		t.Errorf("Layer = %v, %v bekleniyordu", l, LayerChallenge)
+		t.Errorf("Layer = %v, want %v", l, LayerChallenge)
 	}
 }
 
-// Kalici hata rotasyonu TETIKLEMEMELI: 404 domainin saglam oldugunu ama
-// icerigin olmadigini soyler. Her domaini denemek 14 bos istek demek.
+// A permanent error must NOT TRIGGER rotation: a 404 says the domain is fine
+// but the content isn't there. Trying every domain means 14 empty requests.
 func TestBunkrPermanentErrorDoesNotRotate(t *testing.T) {
 	notFound := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
@@ -384,50 +387,159 @@ func TestBunkrPermanentErrorDoesNotRotate(t *testing.T) {
 	}}
 	b := newBunkr(t, rt)
 	if _, _, err := b.fetchWithRotation(context.Background(), "/a/X", ""); err == nil {
-		t.Fatal("404 hata vermeliydi")
+		t.Fatal("a 404 should have failed")
 	}
 	if len(b.Burned()) != 0 {
-		t.Errorf("404'te domain elendi: %v", b.Burned())
+		t.Errorf("a domain was eliminated on 404: %v", b.Burned())
 	}
 	if len(rt.seen) != 1 {
-		t.Errorf("%d istek atildi, 1 bekleniyordu: %v", len(rt.seen), rt.seen)
+		t.Errorf("%d requests sent, want 1: %v", len(rt.seen), rt.seen)
 	}
 }
 
-// Joker girdi rotasyon havuzuna GIRMEMELI: "bunkr.*" adresine istek atilamaz.
+// fakeClock tests elimination durations without waiting in real time.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func withClock(b *bunkr) *fakeClock {
+	c := &fakeClock{t: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)}
+	b.now = c.now
+	return c
+}
+
+// A local network outage (DNS dropping for a few seconds while the VPN
+// switches) eliminates every domain. If elimination is PERMANENT, bunkr stayed
+// dead until the app was restarted. A network-caused elimination must expire
+// soon, and the domains must return in config ORDER (order: the working
+// domain first).
+func TestBunkrNetworkBurnExpires(t *testing.T) {
+	down := &net.DNSError{Err: "no such host", Name: "x", IsNotFound: true}
+	rt := &hostRouter{failures: map[string]error{
+		"bunkr.ws": down, "bunkr.ac": down, "bunkr.black": down,
+	}}
+	b := newBunkr(t, rt)
+	clock := withClock(b)
+
+	if _, _, err := b.fetchWithRotation(context.Background(), "/a/X?advanced=1", ""); !errors.Is(err, ErrAllDomainsBurned) {
+		t.Fatalf("expected ErrAllDomainsBurned without a network: %v", err)
+	}
+
+	// The network is back but the duration hasn't passed: still eliminated.
+	rt.failures = nil
+	rt.handlers = map[string]http.HandlerFunc{"bunkr.ws": albumHandler, "bunkr.ac": albumHandler, "bunkr.black": albumHandler}
+	clock.advance(30 * time.Second)
+	if got := b.roots(); len(got) != 0 {
+		t.Fatalf("%v came back after 30 s; a network elimination should last 2 min", got)
+	}
+
+	clock.advance(2 * time.Minute)
+	_, root, err := b.fetchWithRotation(context.Background(), "/a/X?advanced=1", "")
+	if err != nil {
+		t.Fatalf("bunkr still dead after the duration passed: %v", err)
+	}
+	if root != "https://bunkr.ws" {
+		t.Errorf("root = %q; domains should have come back in config order", root)
+	}
+	if len(b.Burned()) != 0 {
+		t.Errorf("expired eliminations were not cleared: %v", b.Burned())
+	}
+}
+
+// A Cloudflare challenge and a certificate error are not network outages but
+// a real BLOCK: they must last longer than a network elimination, otherwise
+// the blocked domain is retried for nothing every two minutes.
+func TestBunkrChallengeBurnOutlastsNetworkBurn(t *testing.T) {
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"bunkr.ws": forbidden, "bunkr.ac": albumHandler, "bunkr.black": albumHandler,
+	}}
+	b := newBunkr(t, rt)
+	clock := withClock(b)
+	if _, _, err := b.fetchWithRotation(context.Background(), "/a/X?advanced=1", ""); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(5 * time.Minute)
+	for _, d := range b.roots() {
+		if d == "bunkr.ws" {
+			t.Fatal("the challenge elimination expired within 5 min")
+		}
+	}
+	clock.advance(30 * time.Minute)
+	if got := b.roots(); len(got) != 3 || got[0] != "bunkr.ws" {
+		t.Errorf("pool after 30 min is %v; bunkr.ws should be back at the front", got)
+	}
+}
+
+// Switching to the fallback endpoint must not be permanent: the primary may
+// have been temporarily unreachable (VPN, network). After a while the primary
+// is tried again.
+func TestBunkrPrimaryRetriedAfterCooldown(t *testing.T) {
+	rt := &hostRouter{
+		failures: map[string]error{"api.test": errors.New("timeout")},
+		handlers: map[string]http.HandlerFunc{
+			"oldapi.test": func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(legacyBody("https://c9.test/a.m4v")))
+			},
+		},
+	}
+	b := newBunkrFallback(t, rt)
+	clock := withClock(b)
+	if _, _, err := b.resolveFileURL(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The primary recovered.
+	rt.failures = nil
+	rt.handlers["api.test"] = apiHandler(t, "https://get.test/file/")
+	clock.advance(2 * time.Minute)
+	if got, _, _ := b.resolveFileURL(context.Background(), "1"); !strings.Contains(got, "c9.test") {
+		t.Fatalf("went back to the primary before the cooldown passed: %q", got)
+	}
+	clock.advance(10 * time.Minute)
+	got, _, err := b.resolveFileURL(context.Background(), "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://cdn.test/file.mp4" {
+		t.Errorf("URL after the cooldown = %q; the primary should have been retried", got)
+	}
+}
+
+// A wildcard entry must NOT ENTER the rotation pool: no request can go to "bunkr.*".
 func TestBunkrWildcardNotInRotationPool(t *testing.T) {
 	cfg := bunkrCfg()
 	cfg.Domains = append(cfg.Domains, "bunkr.*")
 	b := NewBunkr(cfg).(*bunkr)
 	for _, d := range b.roots() {
 		if strings.ContainsRune(d, '*') {
-			t.Fatalf("joker rotasyon havuzunda: %q", d)
+			t.Fatalf("wildcard in the rotation pool: %q", d)
 		}
 	}
 }
 
-// --- Uctan uca cozumleme ---
+// --- End-to-end resolution ---
 
 func apiHandler(t *testing.T, wantReferer string) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			t.Errorf("API metodu = %s, POST bekleniyordu", r.Method)
+			t.Errorf("API method = %s, want POST", r.Method)
 		}
-		// Referer ve Origin ZORUNLU: endpoint bunlari kontrol ediyor.
+		// Referer and Origin are MANDATORY: the endpoint checks them.
 		if got := r.Header.Get("Referer"); !strings.HasPrefix(got, wantReferer) {
-			t.Errorf("API Referer = %q, %q ile baslamaliydi", got, wantReferer)
+			t.Errorf("API Referer = %q, should start with %q", got, wantReferer)
 		}
 		if got := r.Header.Get("Origin"); got != "https://get.test" {
 			t.Errorf("API Origin = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"url":"https://cdn.test/dosya.mp4","encrypted":false,"timestamp":0}`))
+		_, _ = w.Write([]byte(`{"url":"https://cdn.test/file.mp4","encrypted":false,"timestamp":0}`))
 	}
 }
 
-// signHandler, imza servisini taklit eder. Gercek servis gibi yalnizca yola
-// bakip token uretiyor.
+// signHandler imitates the signing service. Like the real service it only
+// looks at the path and produces a token.
 func signHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	w.Header().Set("Content-Type", "application/json")
@@ -449,44 +561,43 @@ func TestBunkrResolveAlbum(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if len(itemErrs) != 0 {
-		t.Fatalf("beklenmeyen item hatalari: %v", itemErrs)
+		t.Fatalf("unexpected item errors: %v", itemErrs)
 	}
 	if len(items) != 3 {
-		t.Fatalf("%d item, 3 bekleniyordu", len(items))
+		t.Fatalf("%d items, want 3", len(items))
 	}
 
-	if items[0].Dir != "Tatil Albümü 2026" {
+	if items[0].Dir != "Holiday Album 2026" {
 		t.Errorf("Dir = %q", items[0].Dir)
 	}
-	if items[0].Filename != "Birinci Video - Özgür & Aslı.mp4" {
+	if items[0].Filename != "First Video - Zoë & Chloé.mp4" {
 		t.Errorf("Filename = %q", items[0].Filename)
 	}
-	// URL artik HAM donuyor: imza indirme baslarken PrepareURL ile atiliyor.
-	if items[0].URL != "https://cdn.test/dosya.mp4" {
+	// The URL now comes back RAW: the signature is taken with PrepareURL when the download starts.
+	if items[0].URL != "https://cdn.test/file.mp4" {
 		t.Errorf("URL = %q", items[0].URL)
 	}
-	// SourcePage slug uzerinden kurulmali: ResolveOne buna bagli.
-	if items[0].SourcePage != "https://bunkr.ws/f/birinci-video-abc" {
+	// SourcePage must be built from the slug: ResolveOne depends on it.
+	if items[0].SourcePage != "https://bunkr.ws/f/first-video-abc" {
 		t.Errorf("SourcePage = %q", items[0].SourcePage)
 	}
-	// Indirme Referer'i POLITIKADAN degil PROTOKOLDEN geliyor; referer_policy
-	// "none" olmasina ragmen dolu olmak zorunda.
+	// The download Referer comes from the PROTOCOL, not the POLICY; it must be
+	// set even though referer_policy is "none".
 	if ref := items[0].Headers["Referer"]; ref != "https://get.test/file/51537490" {
-		t.Errorf("indirme Referer = %q", ref)
+		t.Errorf("download Referer = %q", ref)
 	}
 	if items[0].Size != 1946234880 {
 		t.Errorf("Size = %d", items[0].Size)
 	}
-	// bunkr sha256 vermiyor.
+	// bunkr doesn't give sha256.
 	if items[0].SHA256 != "" {
-		t.Errorf("SHA256 dolu geldi: %q", items[0].SHA256)
+		t.Errorf("SHA256 came back set: %q", items[0].SHA256)
 	}
 }
 
-// Tek item'in API cagrisi duserse album DUSMEMELI, ItemError toplanmali.
-// TEMBEL IMZA: cozumleme sirasinda imza servisine hic gidilmemeli. Aksi
-// halde atlanan ve yalnizca listelenen dosyalar icin de bosuna imza istenir,
-// ve kuyrugun sonundaki dosyanin tokeni sirasi gelmeden olur.
+// LAZY SIGNING: the signing service must never be called during resolution.
+// Otherwise files that are skipped or only listed get signed for nothing, and
+// the token of the file at the end of the queue dies before its turn.
 func TestBunkrResolveDoesNotSign(t *testing.T) {
 	signCalls := 0
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
@@ -503,10 +614,11 @@ func TestBunkrResolveDoesNotSign(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if signCalls != 0 {
-		t.Fatalf("cozumleme sirasinda %d imza istegi gitti, 0 bekleniyordu", signCalls)
+		t.Fatalf("%d signing requests went out during resolution, want 0", signCalls)
 	}
 }
 
+// If a single item's API call fails, the album must NOT fail; ItemErrors must be collected.
 func TestBunkrResolveCollectsPerItemErrors(t *testing.T) {
 	calls := 0
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
@@ -527,21 +639,21 @@ func TestBunkrResolveCollectsPerItemErrors(t *testing.T) {
 	itemErrs, err := b.Resolve(context.Background(), "https://bunkr.ws/a/ABC",
 		func(Item) error { n++; return nil })
 	if err != nil {
-		t.Fatalf("album dusmemeliydi: %v", err)
+		t.Fatalf("the album should not have failed: %v", err)
 	}
 	if n != 2 {
-		t.Errorf("%d item yield edildi, 2 bekleniyordu", n)
+		t.Errorf("%d items yielded, want 2", n)
 	}
 	if len(itemErrs) != 1 {
-		t.Fatalf("%d item hatasi, 1 bekleniyordu", len(itemErrs))
+		t.Fatalf("%d item errors, want 1", len(itemErrs))
 	}
 	if l, ok := LayerOf(itemErrs[0].Err); !ok || l != LayerItemPage {
-		t.Errorf("Layer = %v, %v bekleniyordu", l, LayerItemPage)
+		t.Errorf("Layer = %v, want %v", l, LayerItemPage)
 	}
 }
 
 func TestBunkrResolveMediaAndResolveOne(t *testing.T) {
-	mediaPage := `<html><head><meta property="og:title" content="Tek Dosya.mp4" /></head>
+	mediaPage := `<html><head><meta property="og:title" content="Single File.mp4" /></head>
 <body><div data-file-id="99887766"></div></body></html>`
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"bunkr.ws": func(w http.ResponseWriter, r *http.Request) {
@@ -552,11 +664,11 @@ func TestBunkrResolveMediaAndResolveOne(t *testing.T) {
 	}}
 	b := newBunkr(t, rt)
 
-	got, err := b.ResolveOne(context.Background(), "https://bunkr.ws/f/tek-dosya")
+	got, err := b.ResolveOne(context.Background(), "https://bunkr.ws/f/single-file")
 	if err != nil {
 		t.Fatalf("ResolveOne: %v", err)
 	}
-	if got.Filename != "Tek Dosya.mp4" {
+	if got.Filename != "Single File.mp4" {
 		t.Errorf("Filename = %q", got.Filename)
 	}
 	if got.Headers["Referer"] != "https://get.test/file/99887766" {
@@ -564,18 +676,55 @@ func TestBunkrResolveMediaAndResolveOne(t *testing.T) {
 	}
 }
 
-func TestBunkrResolveOneRejectsAlbum(t *testing.T) {
-	b := NewBunkr(bunkrCfg())
-	if _, err := b.ResolveOne(context.Background(), "https://bunkr.ws/a/ABC"); err == nil {
-		t.Fatal("albüm URL'i icin hata bekleniyordu")
+// og:title is an HTML attribute: characters like "&" arrive as entities.
+// Without decoding, "&amp;" showed up in folder and file names.
+func TestBunkrTitleEntitiesAreDecoded(t *testing.T) {
+	mediaPage := `<html><head><meta property="og:title" content="Tom &amp; Jerry&#39;s.mp4" /></head>
+<body><div data-file-id="99887766"></div></body></html>`
+	album := strings.Replace(albumFixture, "Holiday Album 2026", "Tom &amp; Jerry&#39;s", 1)
+	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
+		"bunkr.ws": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/a/") {
+				_, _ = w.Write([]byte(album))
+				return
+			}
+			_, _ = w.Write([]byte(mediaPage))
+		},
+		"api.test":  apiHandler(t, "https://get.test/file/"),
+		"sign.test": signHandler,
+	}}
+	b := newBunkr(t, rt)
+
+	got, err := b.ResolveOne(context.Background(), "https://bunkr.ws/f/single-file")
+	if err != nil {
+		t.Fatalf("ResolveOne: %v", err)
+	}
+	if got.Filename != "Tom & Jerry's.mp4" {
+		t.Errorf("Filename = %q", got.Filename)
+	}
+
+	var items []Item
+	if _, err := b.Resolve(context.Background(), "https://bunkr.ws/a/ABC123",
+		func(it Item) error { items = append(items, it); return nil }); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(items) == 0 || items[0].Dir != "Tom & Jerry's" {
+		t.Errorf("Dir = %q", items[0].Dir)
 	}
 }
 
-// --- Bakim placeholder'i ---
+func TestBunkrResolveOneRejectsAlbum(t *testing.T) {
+	b := NewBunkr(bunkrCfg())
+	if _, err := b.ResolveOne(context.Background(), "https://bunkr.ws/a/ABC"); err == nil {
+		t.Fatal("expected an error for an album URL")
+	}
+}
 
-// bunkr silinen/bakimdaki dosyalar icin 404 DEGIL, 200 ile placeholder video
-// donduruyor. Durum kodu temiz, icerik cop. Bu kontrol olmadan arac copu
-// "basariyla indirdim" sayar.
+// --- Maintenance placeholder ---
+
+// For deleted/maintenance files bunkr returns a placeholder video with 200,
+// NOT 404. The status is clean, the content is garbage. Without this check
+// the tool counts the garbage as "downloaded successfully".
 func TestBunkrValidateResponseCatchesMaintenance(t *testing.T) {
 	b := NewBunkr(bunkrCfg()).(*bunkr)
 
@@ -584,24 +733,24 @@ func TestBunkrValidateResponseCatchesMaintenance(t *testing.T) {
 		resp := &http.Response{StatusCode: 200, Request: req, Header: http.Header{}}
 		err := b.ValidateResponse(resp)
 		if err == nil {
-			t.Fatalf("%s bakim placeholder'i yakalanmadi", name)
+			t.Fatalf("the %s maintenance placeholder was not caught", name)
 		}
 		if l, ok := LayerOf(err); !ok || l != LayerCDN {
-			t.Errorf("Layer = %v, %v bekleniyordu", l, LayerCDN)
+			t.Errorf("Layer = %v, want %v", l, LayerCDN)
 		}
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, "https://cdn.test/gercek-dosya.mp4", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://cdn.test/real-file.mp4", nil)
 	resp := &http.Response{StatusCode: 200, Request: req, Header: http.Header{}}
 	if err := b.ValidateResponse(resp); err != nil {
-		t.Errorf("gercek dosya reddedildi: %v", err)
+		t.Errorf("a real file was rejected: %v", err)
 	}
 }
 
 func TestBunkrClassifyStatus(t *testing.T) {
 	b := NewBunkr(bunkrCfg()).(*bunkr)
 
-	// Challenge kendi katmanina gitmeli.
+	// A challenge must go to its own layer.
 	cf := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
 	cf.Header.Set("CF-Mitigated", "challenge")
 	err := b.ClassifyStatus(cf, nil)
@@ -609,24 +758,24 @@ func TestBunkrClassifyStatus(t *testing.T) {
 		t.Errorf("challenge Layer = %v", l)
 	}
 
-	// Challenge olmayan 403: imzali URL suresi dolmus olabilir, indirici
-	// ResolveOne ile yeniden cozsun -> nil donmeli.
+	// A 403 that isn't a challenge: the signed URL may have expired; let the
+	// downloader re-resolve with ResolveOne -> must return nil.
 	plain := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
 	if err := b.ClassifyStatus(plain, []byte("<h1>403 Forbidden</h1>")); err != nil {
-		t.Errorf("duz 403 nil donmeliydi: %v", err)
+		t.Errorf("a plain 403 should have returned nil: %v", err)
 	}
 
-	// 403 disi dokunulmamali.
+	// Anything other than 403 must be left alone.
 	other := &http.Response{StatusCode: http.StatusInternalServerError, Header: http.Header{}}
 	if err := b.ClassifyStatus(other, nil); err != nil {
-		t.Errorf("500 nil donmeliydi: %v", err)
+		t.Errorf("a 500 should have returned nil: %v", err)
 	}
 }
 
-// --- Yonlendirme ---
+// --- Redirects ---
 
-// Otomatik yonlendirme takibi KAPALI olmak zorunda: Cloudflare challenge'i bir
-// yonlendirme olarak da gelebiliyor ve otomatik takip o sinyali yutar.
+// Automatic redirect following MUST be off: a Cloudflare challenge can also
+// arrive as a redirect and automatic following swallows that signal.
 func TestBunkrFollowsRedirectsManually(t *testing.T) {
 	hops := 0
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
@@ -643,20 +792,20 @@ func TestBunkrFollowsRedirectsManually(t *testing.T) {
 	b := newBunkr(t, rt)
 	body, _, err := b.fetchWithRotation(context.Background(), "/a/X", "")
 	if err != nil {
-		t.Fatalf("yonlendirme izlenemedi: %v", err)
+		t.Fatalf("the redirect could not be followed: %v", err)
 	}
 	if hops != 2 {
-		t.Errorf("%d istek, 2 bekleniyordu", hops)
+		t.Errorf("%d requests, want 2", hops)
 	}
 	if !strings.Contains(string(body), "window.albumFiles") {
-		t.Error("hedef sayfa gelmedi")
+		t.Error("the target page did not arrive")
 	}
 }
 
 func TestBunkrRedirectLoopIsBounded(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"bunkr.ws": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Location", "/dongu")
+			w.Header().Set("Location", "/loop")
 			w.WriteHeader(http.StatusFound)
 		},
 	}}
@@ -664,23 +813,23 @@ func TestBunkrRedirectLoopIsBounded(t *testing.T) {
 	cfg.Domains = []string{"bunkr.ws"}
 	cfg.HTTPClient = &http.Client{Transport: rt}
 	b := NewBunkr(cfg).(*bunkr)
-	if _, _, err := b.fetchWithRotation(context.Background(), "/dongu", ""); err == nil {
-		t.Fatal("sonsuz yonlendirme durdurulmali")
+	if _, _, err := b.fetchWithRotation(context.Background(), "/loop", ""); err == nil {
+		t.Fatal("an endless redirect must be stopped")
 	}
 }
 
-// --- Imzali indirme akisi (2026-09-10) ---
+// --- Signed download flow (2026-09-10) ---
 
-// OLCULDU: CDN imzasiz GET'i dosyaya HIC BAKMADAN reddediyor. Var olan dosya
-// ile uydurma bir ad icin yanit bayt bayt ayni (403, ayni govde, ayni
-// basliklar). Bu yuzden imza zorunlu ve 403'e bakip "dosya silinmis" demek
-// yanlis olurdu.
+// MEASURED: the CDN rejects an unsigned GET WITHOUT LOOKING at the file. For
+// an existing file and a made-up name the response is byte-for-byte
+// identical (403, same body, same headers). That is why signing is mandatory
+// and looking at a 403 to say "the file was deleted" would be wrong.
 func TestBunkrSignsCurrentAPIShape(t *testing.T) {
 	var signedPath string
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"api.test": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"mediafiles":"https://c1.test","path":"/storage/media/video-abc.mp4","original":"Gerçek Ad.mp4"}`))
+			_, _ = w.Write([]byte(`{"mediafiles":"https://c1.test","path":"/storage/media/video-abc.mp4","original":"Real Name é.mp4"}`))
 		},
 		"sign.test": func(w http.ResponseWriter, r *http.Request) {
 			signedPath = r.URL.Query().Get("path")
@@ -699,17 +848,17 @@ func TestBunkrSignsCurrentAPIShape(t *testing.T) {
 		t.Fatalf("PrepareURL: %v", err)
 	}
 
-	// Imza servisine yolun COZULMUS hali gitmeli.
+	// The DECODED form of the path must go to the signing service.
 	if signedPath != "/storage/media/video-abc.mp4" {
-		t.Errorf("imzalanan yol = %q", signedPath)
+		t.Errorf("signed path = %q", signedPath)
 	}
 
 	u, err := url.Parse(got)
 	if err != nil {
-		t.Fatalf("uretilen URL ayristirilamadi: %v", err)
+		t.Fatalf("could not parse the produced URL: %v", err)
 	}
 	if u.Host != "c1.test" || u.Path != "/storage/media/video-abc.mp4" {
-		t.Errorf("adres yanlis kuruldu: %q", got)
+		t.Errorf("URL built wrong: %q", got)
 	}
 	q := u.Query()
 	if q.Get("token") != "abc123" {
@@ -718,15 +867,15 @@ func TestBunkrSignsCurrentAPIShape(t *testing.T) {
 	if q.Get("ex") != "1789054914" {
 		t.Errorf("ex = %q", q.Get("ex"))
 	}
-	// n, CDN'in Content-Disposition'da kullandigi ozgun ad.
-	if q.Get("n") != "Gerçek Ad.mp4" {
+	// n is the original name the CDN uses in Content-Disposition.
+	if q.Get("n") != "Real Name é.mp4" {
 		t.Errorf("n = %q", q.Get("n"))
 	}
 }
 
-// Eski bicim (XOR ile sifreli tam adres) hala calismali; o da imzalanmali.
+// The old shape (full URL encrypted with XOR) must still work; it must be signed too.
 func TestBunkrSignsLegacyAPIShape(t *testing.T) {
-	plain := "https://c9.test/eski/dosya.mp4"
+	plain := "https://c9.test/old/file.mp4"
 	key := []byte("SECRET_KEY_0")
 	enc := make([]byte, len(plain))
 	for i := 0; i < len(plain); i++ {
@@ -752,15 +901,16 @@ func TestBunkrSignsLegacyAPIShape(t *testing.T) {
 		t.Fatalf("PrepareURL: %v", err)
 	}
 	if !strings.HasPrefix(got, plain+"?") {
-		t.Errorf("eski bicim adresi bozuldu: %q", got)
+		t.Errorf("old-shape URL was corrupted: %q", got)
 	}
 	if !strings.Contains(got, "token=") {
-		t.Errorf("eski bicim imzalanmadi: %q", got)
+		t.Errorf("old-shape URL was not signed: %q", got)
 	}
 }
 
-// Imza servisi dusrse indirme adresi UYDURULMAMALI: imzasiz adres nasilsa
-// 403 alir ve hata "403" olarak gorunup teshisi saptirir.
+// If the signing service is down the download URL must NOT BE MADE UP: an
+// unsigned URL gets 403 anyway and the error shows up as "403", misleading
+// the diagnosis.
 func TestBunkrSignFailureIsAnError(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"api.test": func(w http.ResponseWriter, r *http.Request) {
@@ -778,9 +928,9 @@ func TestBunkrSignFailureIsAnError(t *testing.T) {
 		t.Fatalf("resolveFileURL: %v", err)
 	}
 	if _, err := b.PrepareURL(context.Background(), raw); err == nil {
-		t.Fatal("imza servisi 500 dondugunde hata bekleniyordu")
+		t.Fatal("expected an error when the signing service returns 500")
 	} else if l, ok := LayerOf(err); !ok || l != LayerCDN {
-		t.Errorf("katman = %v, %v bekleniyordu", l, LayerCDN)
+		t.Errorf("layer = %v, want %v", l, LayerCDN)
 	}
 }
 
@@ -802,11 +952,11 @@ func TestBunkrSignRejectsTokenlessResponse(t *testing.T) {
 		t.Fatalf("resolveFileURL: %v", err)
 	}
 	if _, err := b.PrepareURL(context.Background(), raw); err == nil {
-		t.Fatal("token'siz imza yaniti hata vermeliydi")
+		t.Fatal("a signing response without a token should have failed")
 	}
 }
 
-// API ne yeni ne eski bicimde adres vermezse net hata.
+// If the API gives a URL in neither the new nor the old shape: a clear error.
 func TestBunkrEmptyAPIResponse(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"api.test": func(w http.ResponseWriter, r *http.Request) {
@@ -818,11 +968,11 @@ func TestBunkrEmptyAPIResponse(t *testing.T) {
 	b := newBunkr(t, rt)
 
 	if _, _, err := b.resolveFileURL(context.Background(), "7"); err == nil {
-		t.Fatal("bos yanit icin hata bekleniyordu")
+		t.Fatal("expected an error for an empty response")
 	}
 }
 
-// mediafiles sonunda "/" olsa bile yol ikiye katlanmamali.
+// Even if mediafiles ends with "/", the path must not be doubled.
 func TestBunkrRawURLJoinsCleanly(t *testing.T) {
 	b := NewBunkr(bunkrCfg()).(*bunkr)
 	got, err := b.rawFileURL(bunkrAPIResponse{
@@ -833,14 +983,15 @@ func TestBunkrRawURLJoinsCleanly(t *testing.T) {
 		t.Fatalf("rawFileURL: %v", err)
 	}
 	if got != "https://c1.test/storage/media/a.mp4" {
-		t.Errorf("adres = %q", got)
+		t.Errorf("URL = %q", got)
 	}
 }
 
-// OLCULDU: dosya adinda '#' varsa url.Parse onu fragment sanip yolu KESER.
-// Birlestirip ayristirmak yerine yol ALAN olarak atandigi icin ad korunuyor.
-// Bu bozulsaydi imza yanlis yola atilir ve CDN 403 donerdi -- "imza suresi
-// doldu" gibi gorunen, teshisi en zor hata sinifi.
+// MEASURED: if the file name contains '#', url.Parse takes it for a fragment
+// and CUTS the path. Because the path is assigned as a FIELD instead of being
+// concatenated and parsed, the name is preserved. If this broke, the signature
+// would be taken for the wrong path and the CDN would return 403 — the
+// hardest error class to diagnose, looking like "the signature expired".
 func TestBunkrRawURLKeepsSpecialCharsInPath(t *testing.T) {
 	b := NewBunkr(bunkrCfg()).(*bunkr)
 	for _, name := range []string{"/storage/media/track #3.mp4", "/storage/media/a?b.mp4"} {
@@ -850,19 +1001,19 @@ func TestBunkrRawURLKeepsSpecialCharsInPath(t *testing.T) {
 		}
 		u, perr := url.Parse(got)
 		if perr != nil {
-			t.Fatalf("uretilen adres ayristirilamadi: %v", perr)
+			t.Fatalf("could not parse the produced URL: %v", perr)
 		}
 		if u.Fragment != "" {
-			t.Errorf("%q: dosya adinin kuyrugu fragment'e kacti (%q): %q", name, u.Fragment, got)
+			t.Errorf("%q: the tail of the file name escaped into the fragment (%q): %q", name, u.Fragment, got)
 		}
 		if u.Path != name {
-			t.Errorf("%q: imzalanacak yol bozuldu: %q", name, u.Path)
+			t.Errorf("%q: the path to be signed was corrupted: %q", name, u.Path)
 		}
 	}
 }
 
-// Yol basinda "/" yoksa eklenmeli; aksi halde "@evil.tld/x" gibi bir deger
-// birlestirmede host'u degistirebilirdi.
+// If the path doesn't start with "/", one must be added; otherwise a value
+// like "@evil.tld/x" could change the host during concatenation.
 func TestBunkrRawURLForcesLeadingSlash(t *testing.T) {
 	b := NewBunkr(bunkrCfg()).(*bunkr)
 	got, err := b.rawFileURL(bunkrAPIResponse{MediaFiles: "https://c1.test", Path: "@evil.tld/x.mp4"}, "1")
@@ -871,22 +1022,23 @@ func TestBunkrRawURLForcesLeadingSlash(t *testing.T) {
 	}
 	u, _ := url.Parse(got)
 	if u.Host != "c1.test" {
-		t.Fatalf("host degisti: %q (%q)", u.Host, got)
+		t.Fatalf("host changed: %q (%q)", u.Host, got)
 	}
 }
 
-// API https disinda bir taban verirse indirme sessizce duz metne dusmemeli.
+// If the API gives a non-https base, the download must not silently drop to plaintext.
 func TestBunkrRawURLRejectsNonHTTPSBase(t *testing.T) {
 	b := NewBunkr(bunkrCfg()).(*bunkr)
-	for _, base := range []string{"http://c1.test", "ftp://c1.test", "/yolsuz"} {
+	for _, base := range []string{"http://c1.test", "ftp://c1.test", "/no-scheme"} {
 		if got, err := b.rawFileURL(bunkrAPIResponse{MediaFiles: base, Path: "/x.mp4"}, "1"); err == nil {
-			t.Errorf("taban %q kabul edildi: %q", base, got)
+			t.Errorf("base %q accepted: %q", base, got)
 		}
 	}
 }
 
-// ex eksikse 0 yazilirdi; CDN duz 403 doner ve ClassifyStatus onu "imza
-// suresi doldu" sayardi. Yani kullanici yanlis hatayi gorurdu.
+// If ex were missing, 0 would be written; the CDN returns a plain 403 and
+// ClassifyStatus would count it as "signature expired". So the user would see
+// the wrong error.
 func TestBunkrSignRejectsMissingExpiry(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"api.test": func(w http.ResponseWriter, r *http.Request) {
@@ -902,32 +1054,33 @@ func TestBunkrSignRejectsMissingExpiry(t *testing.T) {
 		t.Fatalf("resolveFileURL: %v", err)
 	}
 	if got, err := b.PrepareURL(context.Background(), raw); err == nil {
-		t.Fatalf("ex'siz imza yaniti kabul edildi: %q", got)
+		t.Fatalf("a signing response without ex was accepted: %q", got)
 	}
 }
 
-// --record ile diske yazilan imza kaydinda token DEGERI bulunmamali:
-// dosyaya erisim veren sureli bir yetki ve kayitlar 0644 yaziliyor.
+// The signing record written to disk with --record must not contain the
+// token VALUE: it is a time-limited credential granting access to the file,
+// and recordings are written with 0644.
 func TestRedactTokenRemovesTheToken(t *testing.T) {
-	out := redactToken([]byte(`{"token":"gizli-deger-123","ex":1789054914}`))
-	if strings.Contains(string(out), "gizli-deger-123") {
-		t.Fatalf("token kayda yazildi: %s", out)
+	out := redactToken([]byte(`{"token":"secret-value-123","ex":1789054914}`))
+	if strings.Contains(string(out), "secret-value-123") {
+		t.Fatalf("the token was written to the record: %s", out)
 	}
 	if !strings.Contains(string(out), "1789054914") {
-		t.Errorf("ex kaybedildi, teshis degeri dusuyor: %s", out)
+		t.Errorf("ex was lost, the diagnostic value drops: %s", out)
 	}
-	// Ayristirilamayan govde (HTML hata sayfasi) oldugu gibi kalmali.
+	// An unparseable body (HTML error page) must stay as is.
 	raw := []byte("<html>503</html>")
 	if string(redactToken(raw)) != string(raw) {
-		t.Errorf("hata govdesi bozuldu: %s", redactToken(raw))
+		t.Errorf("the error body was corrupted: %s", redactToken(raw))
 	}
 }
 
-// --- Yedek API ucu ---
+// --- Fallback API endpoint ---
 
 func fallbackCfg() SiteConfig {
 	cfg := bunkrCfg()
-	cfg.Extra[ExtraFallbackAPI] = "https://eskiapi.test/api/v"
+	cfg.Extra[ExtraFallbackAPI] = "https://oldapi.test/api/v"
 	cfg.Extra[ExtraLegacyPrefix] = "/storage/media"
 	return cfg
 }
@@ -939,7 +1092,7 @@ func newBunkrFallback(t *testing.T, rt *hostRouter) *bunkr {
 	return NewBunkr(cfg).(*bunkr)
 }
 
-// legacyBody, eski ucun bicimini (XOR'lu tam adres) uretir.
+// legacyBody produces the old endpoint's shape (full URL XORed).
 func legacyBody(plain string) string {
 	key := []byte("SECRET_KEY_0")
 	enc := make([]byte, len(plain))
@@ -949,14 +1102,15 @@ func legacyBody(plain string) string {
 	return `{"url":"` + base64.StdEncoding.EncodeToString(enc) + `","encrypted":true,"timestamp":0}`
 }
 
-// OLCULDU: bu agda dl.bunkr.cr DNS seviyesinde ele geciriliyor. Birincil uca
-// ULASILAMIYORSA yedek uca dusulmeli, yoksa bunkr yalnizca VPN ile calisir.
+// MEASURED: on this network dl.bunkr.cr is hijacked at the DNS level. If the
+// primary endpoint is UNREACHABLE it must fall back to the fallback endpoint,
+// otherwise bunkr only works over a VPN.
 func TestBunkrFallsBackWhenPrimaryUnreachable(t *testing.T) {
 	rt := &hostRouter{
-		failures: map[string]error{"api.test": errors.New("baglanti zaman asimi")},
+		failures: map[string]error{"api.test": errors.New("connection timeout")},
 		handlers: map[string]http.HandlerFunc{
-			"eskiapi.test": func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(legacyBody("https://c9.test/dosya.m4v")))
+			"oldapi.test": func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(legacyBody("https://c9.test/file.m4v")))
 			},
 		},
 	}
@@ -964,33 +1118,33 @@ func TestBunkrFallsBackWhenPrimaryUnreachable(t *testing.T) {
 
 	got, _, err := b.resolveFileURL(context.Background(), "1")
 	if err != nil {
-		t.Fatalf("yedek uca dusulmedi: %v", err)
+		t.Fatalf("did not fall back to the fallback endpoint: %v", err)
 	}
-	// Eski uc depo on ekini vermiyor; eklenmis olmali.
-	if got != "https://c9.test/storage/media/dosya.m4v" {
-		t.Fatalf("adres = %q", got)
+	// The old endpoint doesn't give the storage prefix; it must have been added.
+	if got != "https://c9.test/storage/media/file.m4v" {
+		t.Fatalf("URL = %q", got)
 	}
 }
 
-// Yedege dusme karari YAPISKAN olmali: aksi halde 40 dosyalik bir albumde
-// 40 kez zaman asimi beklenir ve arayuz dakikalarca donar.
+// The decision to fall back must be STICKY: otherwise a 40-file album waits
+// for 40 timeouts and the UI freezes for minutes.
 func TestBunkrFallbackDecisionIsSticky(t *testing.T) {
 	primaryTries := 0
 	rt := &hostRouter{
 		handlers: map[string]http.HandlerFunc{
-			"eskiapi.test": func(w http.ResponseWriter, r *http.Request) {
+			"oldapi.test": func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(legacyBody("https://c9.test/a.m4v")))
 			},
 		},
 	}
 	rt.failures = map[string]error{}
-	// api.test'e her dokunusu say: hostRouter.seen uzerinden.
+	// Count every touch of api.test via hostRouter.seen.
 	b := newBunkrFallback(t, rt)
-	rt.failures["api.test"] = errors.New("zaman asimi")
+	rt.failures["api.test"] = errors.New("timeout")
 
 	for i := 0; i < 4; i++ {
 		if _, _, err := b.resolveFileURL(context.Background(), "1"); err != nil {
-			t.Fatalf("%d. cagri: %v", i, err)
+			t.Fatalf("call %d: %v", i, err)
 		}
 	}
 	for _, h := range rt.seen {
@@ -999,29 +1153,29 @@ func TestBunkrFallbackDecisionIsSticky(t *testing.T) {
 		}
 	}
 	if primaryTries != 1 {
-		t.Fatalf("birincil uc %d kez denendi, 1 bekleniyordu (karar yapiskan degil)", primaryTries)
+		t.Fatalf("the primary endpoint was tried %d times, want 1 (the decision is not sticky)", primaryTries)
 	}
 }
 
-// Sunucunun VERDIGI bir yanit yedegi tetiklememeli: "dosya silinmis" (400)
-// yedek ucta da silinmis olacak, tekrar denemek yalnizca gecikme uretir.
+// An answer the server GAVE must not trigger the fallback: "file deleted"
+// (400) will be deleted on the fallback endpoint too; retrying only adds delay.
 func TestBunkrDoesNotFallBackOnRealAPIError(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"api.test": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 		},
-		"eskiapi.test": func(w http.ResponseWriter, r *http.Request) {
-			t.Error("400 alindiginda yedek uca gidilmemeliydi")
+		"oldapi.test": func(w http.ResponseWriter, r *http.Request) {
+			t.Error("the fallback endpoint should not have been used after a 400")
 			_, _ = w.Write([]byte(legacyBody("https://c9.test/a.m4v")))
 		},
 	}}
 	b := newBunkrFallback(t, rt)
 	if _, _, err := b.resolveFileURL(context.Background(), "1"); err == nil {
-		t.Fatal("400 icin hata bekleniyordu")
+		t.Fatal("expected an error for a 400")
 	}
 }
 
-// On ek zaten varsa iki kez eklenmemeli.
+// If the prefix is already there it must not be added twice.
 func TestBunkrLegacyPrefixNotDoubled(t *testing.T) {
 	b := NewBunkr(fallbackCfg()).(*bunkr)
 	got, err := b.applyLegacyPrefix("https://c9.test/storage/media/a.m4v", "1")
@@ -1029,12 +1183,12 @@ func TestBunkrLegacyPrefixNotDoubled(t *testing.T) {
 		t.Fatalf("applyLegacyPrefix: %v", err)
 	}
 	if got != "https://c9.test/storage/media/a.m4v" {
-		t.Fatalf("on ek ikilendi: %q", got)
+		t.Fatalf("the prefix was doubled: %q", got)
 	}
 }
 
-// Imza servisi Cloudflare challenge donerse bu CDN hatasi degil CHALLENGE
-// olarak siniflanmali; yoksa kullanici config'e bakmaya gonderilir.
+// If the signing service returns a Cloudflare challenge it must be classified
+// as a CHALLENGE, not a CDN error; otherwise the user is sent to look at the config.
 func TestBunkrSignChallengeIsClassified(t *testing.T) {
 	rt := &hostRouter{handlers: map[string]http.HandlerFunc{
 		"sign.test": forbidden,
@@ -1042,9 +1196,9 @@ func TestBunkrSignChallengeIsClassified(t *testing.T) {
 	b := newBunkr(t, rt)
 	_, err := b.PrepareURL(context.Background(), "https://c1.test/storage/media/x.mp4")
 	if err == nil {
-		t.Fatal("challenge icin hata bekleniyordu")
+		t.Fatal("expected an error for a challenge")
 	}
 	if l, ok := LayerOf(err); !ok || l != LayerChallenge {
-		t.Errorf("katman = %v, %v bekleniyordu", l, LayerChallenge)
+		t.Errorf("layer = %v, want %v", l, LayerChallenge)
 	}
 }

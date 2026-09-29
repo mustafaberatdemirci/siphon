@@ -1,22 +1,23 @@
-# Siphon gömülü site tanımları.
+# Siphon's embedded site definitions.
 #
-# Bu dosya go:embed ile binary'ye gömülür. Dış bir kopya bulunursa (arama sırası:
-# -c bayrağı, exe'nin yanı, cwd) üzerine BİNDİRİLİR, tamamen değiştirmez:
-#   - skaler alanlar ezilir
-#   - dizi alanları BİRLEŞİR (union, sıra korunur)
-#   - silme yalnızca domains_remove / cdn_patterns_remove ile açıkça yapılır
+# This file is embedded into the binary with go:embed. If an external copy is
+# found (search order: -c flag, next to the exe, cwd) it is OVERLAID on top,
+# not substituted:
+#   - scalar fields are overwritten
+#   - array fields are MERGED (union, order preserved)
+#   - removal only happens explicitly via domains_remove / cdn_patterns_remove
 #
-# Yani yeni bir TLD çıktığında tüm listeyi yeniden yazman gerekmez, tek satır
-# eklersin. Premise 2'nin satış argümanı bu.
+# So when a new TLD appears you don't rewrite the whole list, you add one
+# line. That is Premise 2's selling point.
 
 schema_version = 1
 
 [[site]]
 name = "pixeldrain"
 
-# 2026-09-09'da yedisi de canlı ölçüldü: hepsi 200 + temiz JSON döndü ve
-# hiçbiri operatör engelinde değil. Kaynak: cyberdrop-dl supported-websites.md,
-# ardından /api/misc/rate_limits ile teker teker doğrulama.
+# All seven were measured live on 2026-09-09: every one returned 200 + clean
+# JSON and none was ISP-blocked. Source: cyberdrop-dl supported-websites.md,
+# then checked one by one via /api/misc/rate_limits.
 domains = [
   "pixeldrain.com",
   "pixeldra.in",
@@ -29,28 +30,31 @@ domains = [
 
 legacy_domains = []
 
-# pixeldrain kendi dosyalarını kendi domaininden veriyor, ayrı bir CDN host'u yok.
+# pixeldrain serves its files from its own domain; there is no separate CDN host.
 cdn_patterns = []
 
-# Referer YOK. pixeldrain'de yanlış Referer tam olarak hotlink_detected tetikler;
-# ücretsiz hesapta hotlinking yasak. Bu alan site başına politikadır.
+# NO Referer. On pixeldrain a wrong Referer triggers exactly hotlink_detected;
+# hotlinking is forbidden on the free tier. This field is a per-site policy.
 referer_policy = "none"
 
 user_agent = "siphon/0.1 (+https://github.com/mustafaberatdemirci/siphon)"
 
-# Ücretsiz hesapta eşzamanlı bağlantı sınırı var; max_concurrent_downloads
-# hatasını kendi elinle tetiklememek için düşük tutuluyor.
+# The free tier limits concurrent connections; kept low so we don't trigger
+# max_concurrent_downloads ourselves.
 max_concurrent = 3
 
-# Parçalı indirme KAPALI: pixeldrain'in belgesi ücretsiz indirmede "IP başına
-# eşzamanlı bağlantı sayısı" sınırı olduğunu söylüyor; tek dosyayı 4 bağlantıyla
-# çekmek o sınırı kendi elinle tetiklemek. Ücretli hesap + api_key ile dış
-# sites.toml'dan yükseltilebilir (örn. 4).
+# Segmented download OFF: pixeldrain's docs say free downloads are limited by
+# "concurrent connections per IP"; pulling one file over 4 connections is
+# triggering that limit ourselves. With a paid account + api_key it can be
+# raised from an external sites.toml (e.g. 4).
 max_segments = 1
 
-# Canary bir LİSTEDİR. Tek canary'ye bağlanan doctor, o domain engellenirse
-# çalışır durumdaki siteyi "ölü" raporlar. Ölçüm bunun bunkr'da gerçekten
-# olduğunu gösterdi.
+# max_connections (connections to one host at once, files included) is left
+# unset: 3 files x 1 connection = 3, the free tier's per-IP limit.
+
+# Canary is a LIST. A doctor tied to a single canary reports a working site as
+# "dead" when that one domain is blocked. Measurements showed this really
+# happens on bunkr.
 canary_urls = [
   "https://pixeldrain.com/api/misc/rate_limits",
   "https://pixeldra.in/api/misc/rate_limits",
@@ -62,47 +66,51 @@ base_delay = "1s"
 max_delay = "60s"
 max_elapsed = "10m"
 
-# ÜCRETLİ HESAP ANAHTARI (isteğe bağlı).
+# PAID ACCOUNT KEY (optional).
 #
-# pixeldrain'in belgesi: "Hotlinking is only allowed when either the uploader
-# or the downloader has a premium subscription." Üçüncü parti bir indirici
-# tanım gereği hotlink. Bir dosyanın indirme sayısı görüntülenme sayısının
-# ÜÇ KATINI aşınca captcha kapısı iniyor (file_rate_limited_captcha_required)
-# ve bu dosya başına bir sayaç: VPN ile IP değiştirmek hiçbir şey değiştirmez.
+# pixeldrain's documentation: "Hotlinking is only allowed when either the
+# uploader or the downloader has a premium subscription." A third-party
+# downloader is a hotlink by definition. Once a file's download count exceeds
+# THREE TIMES its view count a captcha gate comes down
+# (file_rate_limited_captcha_required), and that is a per-file counter:
+# changing IP with a VPN changes nothing.
 #
-# Anahtar BU DOSYAYA YAZILMAZ (binary'ye gömülü ve repoda). exe'nin yanına
-# ya da çalışma dizinine ayrı bir sites.toml koyun; yalnızca değiştirmek
-# istediğiniz anahtarı yazmanız yeterli, gerisi gömülü kopyayla birleşir:
+# The key is NOT WRITTEN INTO THIS FILE (it is embedded in the binary and in
+# the repo). Put a separate sites.toml next to the exe or in the working
+# directory; writing only the key you want to change is enough, the rest is
+# merged with the embedded copy:
 #
 #   schema_version = 1
 #   [[site]]
 #   name = "pixeldrain"
 #   [site.extra]
-#   api_key = "buraya-anahtar"
+#   api_key = "your-key-here"
 #
-# Anahtar pixeldrain.com > hesap > API keys sayfasından alınır. HTTP Basic ile
-# gönderilir (kullanıcı adı boş, parola anahtar); log'a ve kayda yazılmaz.
+# Get the key from pixeldrain.com > account > API keys. It is sent with HTTP
+# Basic (empty username, key as password); it is never logged or recorded.
 #
-# Captcha'yı çözmek veya görüntülenme sayısını şişirmek KAPSAM DIŞI: birincisi
-# projenin ilk günkü sınırı, ikincisi sitenin erişim kontrolünü kandırmak.
+# Solving the captcha or inflating the view count is OUT OF SCOPE: the first
+# is a boundary set on day one, the second is tricking the site's access
+# control.
 
 [[site]]
 name = "bunkr"
 
-# SIRA ÖNEMLİ: rotasyon listenin başından başlıyor. 2026-09-09 ölçümüne göre
-# bunkr.ws bu ağdan temiz 200 dönen tek domain, o yüzden başta.
+# ORDER MATTERS: rotation starts at the head of the list. According to the
+# 2026-09-09 measurement bunkr.ws was the only domain returning a clean 200
+# from this network, so it goes first.
 #
-# Ölçüm sonuçları:
-#   bunkr.ws     -> 200, challenge yok          (çalışıyor)
+# Measurement results:
+#   bunkr.ws     -> 200, no challenge          (works)
 #   bunkr.black  -> 403, CF-Mitigated: challenge (Cloudflare)
-#   bunkr.cr     -> 2a01:358:... blok sayfası    (operatör engeli)
-#   bunkr.si     -> aynı                          (operatör engeli)
-#   bunkr.ph     -> bağlantı zaman aşımı          (operatör engeli)
-#   bunkr.fi     -> bağlantı zaman aşımı          (operatör engeli)
+#   bunkr.cr     -> 2a01:358:... block page      (ISP block)
+#   bunkr.si     -> same                         (ISP block)
+#   bunkr.ph     -> connection timeout           (ISP block)
+#   bunkr.fi     -> connection timeout           (ISP block)
 #
-# Bilinen kötüler listeden ÇIKARILMADI: engel ağa göre değişiyor, başka bir
-# bağlantıda çalışabilirler. Sadece sona alındılar; ilk denemede elenip
-# rotasyon devam ediyor.
+# Known-bad domains were NOT REMOVED: blocking varies by network and they may
+# work on another connection. They were only moved to the end; they get
+# eliminated on the first try and rotation continues.
 domains = [
   "bunkr.ws",
   "bunkr.ac",
@@ -120,51 +128,60 @@ domains = [
   "bunkr.fi",
 ]
 
-# Ölü domainler: URL'de TANINIR ama istek atılmaz.
+# Dead domains: RECOGNIZED in URLs but never requested.
 legacy_domains = [
   "bunkr.ax", "bunkr.cat", "bunkr.ru", "bunkrr.ru",
   "bunkr.su", "bunkrr.su", "bunkr.la", "bunkr.is", "bunkr.to",
 ]
 
-# Joker yalnızca TANIMA için. Rotasyon somut listeyi kullanıyor çünkü jokerle
-# rastgele bir domain seçemezsin. İkisi birlikte: yeni bir TLD çıktığında link
-# tanınır, istek bilinen bir domaine gider.
+# Wildcards are for RECOGNITION only. Rotation uses the concrete list because
+# you cannot pick a random domain from a wildcard. Together: when a new TLD
+# appears the link is recognized and the request goes to a known domain.
 match_patterns = ["bunkr.*", "bunkrr.*"]
 
-# bunkr CDN host'ları dönüyor; bu liste bir kapı değil SİNYAL. Listede olmayan
-# bir host indirmeyi durdurmaz, doctor WARN basar ve "sites.toml'a ekle" der.
+# bunkr CDN hosts rotate; this list is a SIGNAL, not a gate. A host missing
+# from the list does not stop the download; doctor prints WARN and says "add
+# it to sites.toml".
 #
-# 2026-09-09'da tek bir albümde altı farklı host görüldü: c3bc-b, c3su-b,
-# c1be-b, c2ch-b, c2ri-b, c2rm-b, hepsi .cdn.cr altında. Tek tek saymak
-# anlamsız; joker kalıp doğru çözüm. Yeni bir kök domain çıkarsa doctor WARN
-# basıp söyleyecek.
+# On 2026-09-09 six different hosts were seen in a single album: c3bc-b,
+# c3su-b, c1be-b, c2ch-b, c2ri-b, c2rm-b, all under .cdn.cr. Listing them one
+# by one is pointless; a wildcard pattern is the right answer. If a new root
+# domain appears doctor will print WARN and say so.
 cdn_patterns = ["*.cdn.cr"]
 
-# Sayfa isteklerinde Referer YOK. İndirme isteğinin Referer'ı ise politikadan
-# değil PROTOKOLDEN geliyor: API endpoint'i <dl_origin>/file/<id> Referer'ını
-# ve Origin'ini zorunlu kılıyor, bu yüzden Item.Headers'a açıkça yazılıyor.
-# Host'u buraya YAZMIYORUZ: dl_origin değiştiğinde bu yorum bayatlamasın.
+# NO Referer on page requests. The download request's Referer comes from the
+# PROTOCOL, not the policy: the API endpoint requires the <dl_origin>/file/<id>
+# Referer and Origin, so they are written into Item.Headers explicitly. The
+# host is NOT written here so this comment doesn't go stale when dl_origin
+# changes.
 referer_policy = "none"
 
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
 
-# bunkr CDN'i pixeldrain'den toleranslı ama abartmanın anlamı yok.
+# Files at once. bunkr's CDN is more tolerant than pixeldrain, but there's no
+# point overdoing it.
 max_concurrent = 4
 
-# Parçalı indirme AÇIK, tavan 3. Ek parçalar host yuvalarına tabi olduğu için
-# bir host'a giden TOPLAM bağlantı hiçbir zaman max_concurrent'ı aşmıyor:
-# 4 dosya paralelken parça açılmaz, tek büyük dosya inerken parçalar ona gider.
+# Segmented download ON, capped at 3 connections per file.
 #
-# ÖLÇÜM 2026-09-11, 523 MB'lik dosya, aynı saat:
-#   4 bağlantı -> biri 503 aldı, uyarlanıp 3'e düştü, 113.8 sn (4.6 MB/s)
-#   1 bağlantı -> 120.1 sn (4.4 MB/s)
-# Yani bunkr CDN'i istemci başına TOPLAM hızı sınırlıyor; bağlantı sayısı
-# kazandırmıyor. Tavan 3: 4'te 503 yiyor, 3 temiz. Parçalı kalıyor çünkü
-# zararı yok ve CDN davranışı değişirse kazanç kendiliğinden gelir.
+# MEASUREMENT 2026-09-11, 523 MB file, same hour:
+#   4 connections -> one got 503, adapted down to 3, 113.8 s (4.6 MB/s)
+#   1 connection  -> 120.1 s (4.4 MB/s)
+# So bunkr's CDN limits the TOTAL speed per client; more connections don't
+# help. Capped at 3: 4 gets a 503, 3 is clean. It stays segmented because it
+# does no harm and the gain comes for free if the CDN's behavior changes.
 max_segments = 3
 
-# Canary site kökü. Bir ALBÜM adresi eklersen doctor'ın Parse katmanı da
-# doğrulanır; kök sayfa albumFiles taşımadığı için şu an Parse WARN basıyor.
+# Connections to one CDN host at once, files included: the 4 files' own
+# connections plus 2 extra. One large file alone gets its 3; with 4 files
+# running, two of them get a second connection. Before, files and extra
+# connections shared max_concurrent, and a file's extra connections could
+# keep the next file from starting. NOT MEASURED beyond the per-file 503
+# above; if the CDN answers 503/429 the download drops a connection by itself.
+max_connections = 6
+
+# Canary is the site root. If you add an ALBUM URL, doctor's Parse layer is
+# verified too; the root page carries no albumFiles, so Parse prints WARN for now.
 canary_urls = [
   "https://bunkr.ws/",
   "https://bunkr.ac/",
@@ -176,72 +193,86 @@ base_delay = "2s"
 max_delay = "60s"
 max_elapsed = "10m"
 
-# bunkr'ın en çok değişen değerleri. 2025-02'de indirme adresi HTML'deki
-# <source src> alanındaydı; 2025-03'te get.bunkrr.su/api/vs oldu; sonra
-# apidl.bunkr.ru/api/_001_v2; 2026-09-10 itibarıyla dl.bunkr.cr/api/_001_v2
-# ve AYRICA bir imza servisi. Kod değiştirmeden güncellenebilmeleri için
-# config'te.
+# bunkr's most frequently changing values. In 2025-02 the download URL was in
+# the HTML's <source src>; in 2025-03 it became get.bunkrr.su/api/vs; then
+# apidl.bunkr.ru/api/_001_v2; as of 2026-09-10 dl.bunkr.cr/api/_001_v2 PLUS a
+# signing service. They live in config so they can be updated without code
+# changes.
 #
-# ÖLÇÜM 2026-09-10: apidl.bunkr.ru hâlâ 200 dönüyor ama BAYAT yol veriyor
-# (".../dosya.m4v" derken güncel API ".../storage/media/dosya.m4v" diyor).
-# Yani eski uca bakıp "çalışıyor" demek yanıltıcıydı; adres çözülüyor,
-# indirme 403 alıyordu.
+# MEASUREMENT 2026-09-10: apidl.bunkr.ru still returns 200 but gives a STALE
+# path (".../file.m4v" where the current API says ".../storage/media/file.m4v").
+# So looking at the old endpoint and saying "it works" was misleading; the URL
+# resolved but the download got 403.
 #
-# sign_endpoint OLMADAN her indirme 403 alır. CDN imzasız isteği dosyaya hiç
-# bakmadan reddediyor: var olmayan bir dosya adı için yanıt bayt bayt aynı.
+# WITHOUT sign_endpoint every download gets 403. The CDN rejects unsigned
+# requests without even looking at the file: the response for a nonexistent
+# file name is byte-for-byte identical.
 [site.extra]
 api_endpoint = "https://dl.bunkr.cr/api/_001_v2"
 dl_origin = "https://dl.bunkr.cr"
 sign_endpoint = "https://glb-apisign.cdn.cr/sign"
 xor_key_prefix = "SECRET_KEY_"
 
-# YEDEK UÇ. Birincil uca ULAŞILAMADIĞINDA kullanılıyor; sunucunun verdiği
-# gerçek bir yanıt (400 "silinmiş" gibi) yedeği tetiklemez.
+# FALLBACK ENDPOINT. Used when the primary endpoint is UNREACHABLE; a real
+# response from the server (such as a 400 "deleted") does not trigger the
+# fallback.
 #
-# ÖLÇÜM 2026-09-10: bu bağlantıda dl.bunkr.cr operatör tarafından DNS
-# seviyesinde ele geçiriliyor (195.175.254.2 = engel sayfası, 443 yanıt
-# vermiyor), apidl.bunkr.ru ise açık. Yedek olmadan bunkr yalnızca VPN ile
-# çalışıyordu.
+# MEASUREMENT 2026-09-10: on this connection dl.bunkr.cr is hijacked by the
+# ISP at the DNS level (195.175.254.2 = block page, 443 doesn't answer), while
+# apidl.bunkr.ru is open. Without the fallback bunkr only worked over a VPN.
 fallback_api_endpoint = "https://apidl.bunkr.ru/api/_001_v2"
 
-# Yedek uç aynı dosya için ".../dosya.m4v" derken güncel uç
-# ".../storage/media/dosya.m4v" diyor; fark bu ön ek. Üç ayrı CDN düğümünde,
-# iki albümde imzalanıp 206 alınarak doğrulandı (2026-09-10). Yine de bir
-# TAHMİN: güncel uca ulaşılabildiğinde gerçek yolu sunucu söylüyor ve bu
-# değer hiç kullanılmıyor.
+# For the same file the fallback endpoint says ".../file.m4v" while the
+# current endpoint says ".../storage/media/file.m4v"; the difference is this
+# prefix. Verified on three different CDN nodes across two albums by signing
+# and getting 206 (2026-09-10). Still a GUESS: when the current endpoint is
+# reachable the server tells the real path and this value is never used.
 legacy_path_prefix = "/storage/media"
 
 [[site]]
 name = "mega"
 
-# mega'nın kendi alan adları. mega.io yalnızca tanıtım sitesi, link üretmiyor.
+# mega's own domains. mega.io is only the marketing site; it doesn't produce links.
 domains = ["mega.nz", "mega.co.nz"]
 legacy_domains = []
 match_patterns = []
 
-# İndirme adresleri API'den geliyor ve her seferinde farklı bir depolama
-# sunucusuna işaret ediyor (gfs###n###.userstorage.mega.co.nz). Sinyal, kapı
-# değil: bunkr ile aynı kural.
+# Download URLs come from the API and point to a different storage server
+# every time (gfs###n###.userstorage.mega.co.nz). A signal, not a gate: the
+# same rule as bunkr.
 cdn_patterns = ["*.userstorage.mega.co.nz"]
 
-# mega Referer istemiyor.
+# mega doesn't want a Referer.
 referer_policy = "none"
 
 user_agent = "siphon/0.1 (+https://github.com/mustafaberatdemirci/siphon)"
 
-# Anonim indirmede IP başına aktarım kotası var; paralelliği düşük tutmak
-# kotayı daha yavaş tüketmiyor ama 509 geldiğinde açık bağlantı sayısını
-# sınırlı tutuyor.
-max_concurrent = 2
+# Files at once (per storage host, and in the queue per site). MegaBasterd's
+# default is 4 simultaneous downloads; 8 leaves room for every "Downloads at
+# once" choice.
+max_concurrent = 8
 
-# Parçalı indirme KAPALI: içerik akış içinde çözülüyor ve bütünlük MAC'i
-# sıralı; çözücü varken indirici zaten tek akışa düşüyor. mega hız değil kota
-# sınırlı, parçalamanın kazandıracağı bir şey yok.
-max_segments = 1
+# Segmented download ON, up to 8 connections per file. The content is
+# AES-CTR, so every range is decrypted on its own, and the integrity MAC (a
+# chain over the whole file) is checked once over the finished file
+# (site.RangeDecoder). MegaBasterd fetches mega files over several
+# connections too.
+#
+# Ranges are asked for in the URL path (".../<start>-<end>"), the way mega's
+# own clients, MegaBasterd and go-mega do; the Range header isn't relied on.
+# NOT YET MEASURED against the live servers: if one ignores the range, the
+# probe notices and the file falls back to a single stream by itself.
+max_segments = 8
 
-# Teşhis, API ucuna kasıtlı olarak geçersiz bir komut gönderir; negatif bir
-# sayı dönmesi "API ulaşılabilir ve konuşuyor" demektir. Gerçek bir dosya
-# tanıtıcısına ihtiyaç yok.
+# Connections to one storage host at once, files included. MegaBasterd's
+# defaults open 24 (4 downloads x 6); 32 leaves room for 4 files x 8. The
+# per-IP quota counts bytes, not connections: more connections don't use it
+# up faster, and when a 509 arrives every connection of the file stops.
+max_connections = 32
+
+# The diagnosis deliberately sends an invalid command to the API endpoint; a
+# negative number in reply means "the API is reachable and talking". No real
+# file handle is needed.
 canary_urls = ["https://g.api.mega.co.nz/cs"]
 
 max_retries = 5
@@ -249,8 +280,42 @@ base_delay = "2s"
 max_delay = "60s"
 max_elapsed = "10m"
 
-# Dosyalar istemci tarafında şifreli (AES-128-CTR); anahtar linkin # kısmında.
-# Bu yüzden mega çözümleyicisi indirme akışını da çözüyor. API ucu buradan
-# değiştirilebilir; kripto şeması kodda (mega_crypto.go).
+# Files are encrypted client-side (AES-128-CTR); the key is in the # part of
+# the link. That is why the mega resolver also decrypts the download stream.
+# The API endpoint can be changed here; the crypto scheme lives in code
+# (internal/megacrypto).
 [site.extra]
 api_endpoint = "https://g.api.mega.co.nz/cs"
+
+[[site]]
+name = "direct"
+
+# PLAIN FILE LINKS: any http(s) link that none of the sites above recognizes,
+# such as https://example.com/files/setup.zip. It has no domains; it is only
+# asked after every other site (whatever its place in this file). The link's
+# first byte is requested to learn its name and size; a link that opens a web
+# page is refused instead of saving the page as "the file".
+
+domains = []
+
+# A browser's User-Agent: arbitrary servers are more likely to reject an
+# unknown client than a browser, and there is no site API to identify to.
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+referer_policy = "none"
+
+# Files at once from one server (and, in the queue, from plain links overall).
+max_concurrent = 4
+
+# Up to 4 connections per file, like common download managers' defaults; a
+# server that answers 503/429 gets fewer by itself.
+max_segments = 4
+
+# Connections to one server at once, files included: one large file alone
+# gets its 4; with several files from the same server they share 8.
+max_connections = 8
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"

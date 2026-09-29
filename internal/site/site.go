@@ -1,8 +1,8 @@
-// Package site, Siphon'un çekirdek sözleşmesini tanımlar: bir siteden Item üretmek
-// ve kırılma halinde hangi katmanın koptuğunu tipli olarak bildirmek.
+// Package site defines Siphon's core contract: producing Items from a site
+// and, when something breaks, reporting in a typed way WHICH layer broke.
 //
-// Manşet özellik katman raporu olduğu için resolver hataları düz error dönmez;
-// her hata bir Layer'a bağlanır ve doctor bunu errors.As ile okur.
+// The layer report is the headline feature, so resolver errors are not plain
+// errors: every error is tied to a Layer and doctor reads it with errors.As.
 package site
 
 import (
@@ -14,21 +14,21 @@ import (
 	"time"
 )
 
-// Layer, bir çözümleme denemesinin kırılabileceği aşamalardır.
+// Layer is a stage at which a resolution attempt can break.
 //
-// DNS, TLS ve Challenge kasıtlı olarak AYRI katmanlardır. 2026-09-09 ölçümü
-// üçünün de farklı hata imzası ürettiğini ve zıt düzeltmeler gerektirdiğini
-// gösterdi:
+// DNS, TLS and Challenge are deliberately SEPARATE layers. A measurement on
+// 2026-09-09 showed that each produces a different error signature and needs
+// an opposite fix:
 //
-//	DNS       : çözümlenen adres beklenen ağın dışında -> operatör engeli,
-//	            çözüm domain değiştirmek. (bunkr.cr -> 2a01:358:... blok sayfası)
-//	TLS       : el sıkışma veya sertifika doğrulaması başarısız -> aynı engelin
-//	            TLS katmanındaki görünümü (x509: unknown authority).
-//	Challenge : TLS temiz ama 403 + CF-Mitigated: challenge -> Cloudflare,
-//	            çözüm önce domain rotasyonu, son çare utls.
+//	DNS       : the resolved address is outside the expected network -> ISP
+//	            block, fix is switching domains. (bunkr.cr -> 2a01:358:... block page)
+//	TLS       : handshake or certificate verification fails -> the same block
+//	            seen at the TLS layer (x509: unknown authority).
+//	Challenge : TLS is clean but 403 + CF-Mitigated: challenge -> Cloudflare,
+//	            fix is domain rotation first, utls as a last resort.
 //
-// Bu üçünü tek katmanda toplamak doctor'ı yalancı yapar: kullanıcıya "TLS sorunu"
-// der ama gereken şey domain değiştirmektir.
+// Collapsing these into one layer makes doctor a liar: it tells the user
+// "TLS problem" when what they actually need is a different domain.
 type Layer string
 
 const (
@@ -41,17 +41,17 @@ const (
 	LayerCDN       Layer = "CDN"
 )
 
-// Layers, doctor'ın raporlama sırası.
+// Layers is doctor's reporting order.
 var Layers = []Layer{
 	LayerDNS, LayerTLS, LayerChallenge,
 	LayerFetch, LayerParse, LayerItemPage, LayerCDN,
 }
 
-// LayerError, bir hatayı katmana bağlar. Evidence teşhis için ham kanıttır.
+// LayerError ties an error to a layer. Evidence is raw proof for diagnosis.
 type LayerError struct {
 	Layer    Layer
 	Err      error
-	Evidence string // "beklenen host kalıbı eşleşmedi: kirsch-cdn.ru"
+	Evidence string // "expected host pattern did not match: kirsch-cdn.ru"
 }
 
 func (e *LayerError) Error() string {
@@ -63,12 +63,12 @@ func (e *LayerError) Error() string {
 
 func (e *LayerError) Unwrap() error { return e.Err }
 
-// Errorf, katmana bağlı hata üretmenin kısa yolu.
+// Errorf is a shorthand for building a layer-bound error.
 func Errorf(l Layer, evidence string, format string, a ...any) *LayerError {
 	return &LayerError{Layer: l, Err: fmt.Errorf(format, a...), Evidence: evidence}
 }
 
-// LayerOf, zincirdeki ilk LayerError'ın katmanını döndürür.
+// LayerOf returns the layer of the first LayerError in the chain.
 func LayerOf(err error) (Layer, bool) {
 	var le *LayerError
 	if errors.As(err, &le) {
@@ -77,15 +77,15 @@ func LayerOf(err error) (Layer, bool) {
 	return "", false
 }
 
-// QuotaError, sitenin IP başına aktarım kotasının dolduğunu söyler.
+// QuotaError says the site's per-IP transfer quota is exhausted.
 //
-// Ne kalıcı ne de "hemen tekrar dene" türünden bir hata: dosya yerinde,
-// erişim var, yalnızca bu IP'nin bu saatlik payı bitmiş. Doğru tepki
-// beklemek (ya da IP değiştirmek) ve sonra yeniden çözümleyip denemek.
-// Retryable DEĞİL: yeniden deneme politikası dakikalar içinde döner, kota
-// saatlerce dolu kalır; bekleme kuyruğun işi.
+// It is neither permanent nor a "retry right away" error: the file is there,
+// access is fine, only this IP's allowance for the current window is used up.
+// The right reaction is to wait (or change IP) and then resolve and try again.
+// NOT Retryable: the retry policy gives up within minutes while a quota stays
+// full for hours; waiting is the queue's job.
 //
-// Wait, sitenin bildirdiği sıfırlanma süresi; 0 ise bilinmiyor.
+// Wait is the reset time reported by the site; 0 means unknown.
 type QuotaError struct {
 	Wait time.Duration
 	Err  error
@@ -93,14 +93,14 @@ type QuotaError struct {
 
 func (e *QuotaError) Error() string {
 	if e.Wait > 0 {
-		return fmt.Sprintf("%v — yaklaşık %s sonra sıfırlanır", e.Err, FormatWait(e.Wait))
+		return fmt.Sprintf("%v — resets in about %s", e.Err, FormatWait(e.Wait))
 	}
 	return e.Err.Error()
 }
 
 func (e *QuotaError) Unwrap() error { return e.Err }
 
-// QuotaOf, zincirdeki QuotaError'ı döndürür.
+// QuotaOf returns the QuotaError in the chain.
 func QuotaOf(err error) (*QuotaError, bool) {
 	var q *QuotaError
 	if errors.As(err, &q) {
@@ -109,21 +109,21 @@ func QuotaOf(err error) (*QuotaError, bool) {
 	return nil, false
 }
 
-// FormatWait, süreyi kullanıcı diliyle yazar: "5 sa 6 dk", "12 dk".
+// FormatWait writes a duration for humans: "5h 6m", "12m".
 func FormatWait(d time.Duration) string {
 	d = d.Round(time.Minute)
 	if d < time.Minute {
-		return "1 dk"
+		return "1m"
 	}
 	h := int(d / time.Hour)
 	m := int((d % time.Hour) / time.Minute)
 	switch {
 	case h > 0 && m > 0:
-		return fmt.Sprintf("%d sa %d dk", h, m)
+		return fmt.Sprintf("%dh %dm", h, m)
 	case h > 0:
-		return fmt.Sprintf("%d sa", h)
+		return fmt.Sprintf("%dh", h)
 	default:
-		return fmt.Sprintf("%d dk", m)
+		return fmt.Sprintf("%dm", m)
 	}
 }
 
@@ -131,54 +131,54 @@ type LayerStatus string
 
 const (
 	StatusOK   LayerStatus = "OK"
-	StatusWarn LayerStatus = "WARN" // örn. sites.toml'da olmayan yeni CDN host'u
+	StatusWarn LayerStatus = "WARN" // e.g. a new CDN host missing from sites.toml
 	StatusFail LayerStatus = "FAIL"
 )
 
-// LayerResult, doctor'ın bastığı satır. WARN ile FAIL ayrımı olmadan
-// "CDN gate değil sinyal" kuralı ifade edilemez.
+// LayerResult is one line printed by doctor. Without the WARN/FAIL
+// distinction the "CDN is a signal, not a gate" rule cannot be expressed.
 type LayerResult struct {
 	Layer    Layer
 	Status   LayerStatus
-	Detail   string // "albüm seçicisi 12 item buldu"
-	Evidence string // "yeni host görüldü: kirsch-cdn.ru"
+	Detail   string // "album selector found 12 items"
+	Evidence string // "new host seen: kirsch-cdn.ru"
 }
 
 type Item struct {
-	URL        string // indirilecek gerçek URL (CDN, süreli olabilir)
-	SourcePage string // yeniden çözümleme için item sayfası. Zorunlu.
-	Dir        string // çıktı köküne göreli albüm klasörü ("" = kök)
+	URL        string // the real URL to download (CDN, may expire)
+	SourcePage string // item page used for re-resolution. Required.
+	Dir        string // album folder relative to the output root ("" = root)
 	Filename   string
-	Headers    map[string]string // Referer dahil, RefererPolicy'den türetilir
-	SHA256     string            // pixeldrain verir, bunkr vermez, boş olabilir
-	Size       int64             // bilinmiyorsa -1
-	Index      int               // albüm içi sıra
+	Headers    map[string]string // Referer included, derived from RefererPolicy
+	SHA256     string            // pixeldrain provides it, bunkr does not; may be empty
+	Size       int64             // -1 if unknown
+	Index      int               // position within the album
 
-	// Secret, resolver'a özel gizli malzemedir; indirici dokunmaz, kayda
-	// yazılmaz, log'a basılmaz. mega'da içerik anahtarı + nonce + meta-MAC
-	// (32 bayt). Item'ın içinde taşınıyor ki yeniden çözümlemede ve resume'da
-	// ayrı bir yerden aranması gerekmesin.
+	// Secret is resolver-private material; the downloader never touches it,
+	// it is never written to the ledger and never logged. For mega it is the
+	// content key + nonce + meta-MAC (32 bytes). It travels inside the Item so
+	// re-resolution and resume don't have to look it up somewhere else.
 	Secret []byte
 }
 
 type ItemError struct {
 	URL string
-	Err error // LayerError sarabilir
+	Err error // may wrap a LayerError
 }
 
 func (e *ItemError) Error() string { return fmt.Sprintf("%s: %v", e.URL, e.Err) }
 func (e *ItemError) Unwrap() error { return e.Err }
 
-// Referer politikası site başına değişir, tek tip mekanizma değildir.
-// pixeldrain'de yanlış Referer tam olarak hotlink_detected tetikler;
-// bunkr'da item sayfası Referer olarak zorunludur.
+// The Referer policy varies per site; it is not a uniform mechanism.
+// On pixeldrain a wrong Referer triggers exactly hotlink_detected;
+// on bunkr the item page is a mandatory Referer.
 const (
 	RefererNone     = "none"
 	RefererItemPage = "item_page"
 	RefererOrigin   = "origin"
 )
 
-// SiteConfig varsayılanları.
+// SiteConfig defaults.
 const (
 	DefaultMaxRetries    = 5
 	DefaultBaseDelay     = 1 * time.Second
@@ -190,98 +190,108 @@ const (
 type SiteConfig struct {
 	Name string
 
-	// Domains, eşleşme için kullanılan aktif domain havuzudur. Girdiler joker
-	// içerebilir ("bunkr.*"). gallery-dl 2024-08-24'te TLD saymaktan vazgeçip
-	// joker seçeneği ekledi; bunkr tarafında liste tutmak kaybedilmiş bir savaş.
+	// Domains is the active domain pool used for matching. Entries may contain
+	// wildcards ("bunkr.*"). gallery-dl gave up enumerating TLDs on 2024-08-24
+	// and added a wildcard option; keeping a list for bunkr is a lost battle.
 	Domains []string
 
-	// LegacyDomains, URL eşleşmesinde KABUL edilir ama fetch için KULLANILMAZ.
-	// gallery-dl aynı ayrımı LEGACY_DOMAINS ile yapıyor: ölü bir domain'den gelen
-	// linki tanımak gerekir, o domain'e istek atmak gerekmez.
+	// LegacyDomains are ACCEPTED when matching URLs but NOT USED for fetching.
+	// gallery-dl makes the same distinction with LEGACY_DOMAINS: a link from a
+	// dead domain must be recognized, but no request should go to that domain.
 	LegacyDomains []string
 
-	// MatchPatterns, yalnızca TANIMA için joker desenler ("bunkr.*").
-	// LegacyDomains ile aynı semantik: eşleşmeyi sağlar, fetch havuzuna girmez.
+	// MatchPatterns are wildcard patterns used ONLY for recognition
+	// ("bunkr.*"). Same semantics as LegacyDomains: they enable matching but
+	// never enter the fetch pool.
 	//
-	// Neden ayrı: domain rotasyonu somut bir listeye ihtiyaç duyuyor (jokerle
-	// rastgele bir domain seçemezsin), ama liste her zaman bayat olacak. İkisi
-	// birlikte: yeni bir TLD çıktığında link tanınır, istek bilinen bir domaine
-	// gider. gallery-dl de aynı ikiliyi kullanıyor (BASE_PATTERN + DOMAINS).
+	// Why separate: domain rotation needs a concrete list (you cannot pick a
+	// random domain from a wildcard), but the list will always be stale.
+	// Together: when a new TLD appears the link is recognized and the request
+	// goes to a known domain. gallery-dl uses the same pair (BASE_PATTERN + DOMAINS).
 	MatchPatterns []string
 
-	CDNPatterns   []string // gate değil, sinyal
+	CDNPatterns   []string // a signal, not a gate
 	UserAgent     string
 	RefererPolicy string // none | item_page | origin
 	MaxConcurrent int
 
-	// MaxSegments, tek bir dosyanın en fazla kaç bağlantıyla çekilebileceği;
-	// 1 = parçalı indirme kapalı. Bu bir TAVAN: kullanıcı ayarı bunu aşamaz.
-	// Site başına çünkü kazanç ve risk siteye göre değişiyor: pixeldrain
-	// ücretsiz katmanda IP başına eşzamanlı bağlantı sayısını sınırlıyor, mega
-	// çözücü yüzünden zaten tek akış, bunkr'ın CDN'i aralık istekleriyle iyi.
+	// MaxSegments is the maximum number of connections a single file may be
+	// fetched with; 1 = segmented download off. It is a CEILING: the user
+	// setting cannot exceed it. Per site because gain and risk differ by
+	// site: pixeldrain limits concurrent connections per IP on the free tier,
+	// bunkr's CDN answers a fourth connection to the same file with 503, mega
+	// decrypts every range on its own (site.RangeDecoder).
 	MaxSegments int
 
-	// CanaryURLs bir LİSTEDİR, tek URL değil. Ölçüm, bunkr.cr'nin bu ağda
-	// operatör tarafından engellendiğini gösterdi; tek canary'ye bağlanan bir
-	// doctor, çalışır durumdaki siteyi "ölü" diye raporlardı. doctor çalışan
-	// ilkini bulana kadar dener.
+	// MaxConnections is the most connections open to one host at once: the
+	// files' own connections plus their extra ones. MaxConcurrent limits
+	// FILES; a file's extra connections come out of what is left and are
+	// taken without waiting, so they never keep another file from starting.
+	// 0 means MaxConcurrent * MaxSegments.
+	MaxConnections int
+
+	// CanaryURLs is a LIST, not a single URL. A measurement showed bunkr.cr
+	// blocked by the ISP on this network; a doctor tied to a single canary
+	// would have reported a working site as "dead". doctor tries until it
+	// finds one that works.
 	CanaryURLs []string
 
-	// DNSResolver boş ise sistem çözümleyicisi kullanılır; aksi halde bir DoH
-	// adresi. SNI tabanlı engeli ÇÖZMEZ, sadece DNS hijack'ini çözer. Asıl
-	// değeri teşhiste: sistem DNS'i ile DoH farklı cevap veriyorsa bu tek
-	// başına operatör müdahalesinin kanıtıdır.
+	// DNSResolver empty means the system resolver; otherwise a DoH address.
+	// It does NOT defeat SNI-based blocking, it only defeats DNS hijacking.
+	// Its real value is diagnostic: if the system DNS and DoH disagree, that
+	// alone is proof of ISP interference.
 	DNSResolver string
 
-	// Retry politikası config'te, çünkü Premise 2 bunu vaat ediyor.
+	// Retry policy lives in config because Premise 2 promises it.
 	MaxRetries int
 	BaseDelay  time.Duration
 	MaxDelay   time.Duration
-	MaxElapsed time.Duration // item başına
+	MaxElapsed time.Duration // per item
 
-	// Extra, siteye özgü ayarlardır (bunkr'ın API endpoint'i gibi).
+	// Extra holds site-specific settings (like bunkr's API endpoint).
 	//
-	// Paylaşılan SiteConfig'e site'a özgü alan eklemek yerine burada
-	// tutuluyor: bunkr'ın endpoint'i üç kez değişmiş bir değer ve tam olarak
-	// "config = değişkenler" kategorisine giriyor, ama pixeldrain'i
-	// ilgilendirmiyor.
+	// Kept here instead of adding site-specific fields to the shared
+	// SiteConfig: bunkr's endpoint has changed three times and is exactly the
+	// "config = variables" kind of value, but pixeldrain doesn't care about it.
 	Extra map[string]string
 
-	// Record, --record ile etkinleşen yanıt kaydedicisi. nil olabilir.
+	// Record is the response recorder enabled by --record. May be nil.
 	//
-	// Neden var: bunkr kırıldığında elinde kırılan sayfanın GERÇEK yanıtı
-	// olmazsa, eski fixture ile diff alamazsın ve neyin değiştiğini tahminle
-	// kovalarsın. Bu aracın var oluş gerekçesi o tahmini ortadan kaldırmak.
+	// Why it exists: when bunkr breaks and you don't have the REAL response of
+	// the broken page, you cannot diff against the old fixture and you end up
+	// guessing what changed. Removing that guesswork is this tool's reason to
+	// exist.
 	Record func(name string, data []byte)
 
-	// Logf, resolver'ın teşhis satırları için. nil olabilir.
+	// Logf is for the resolver's diagnostic lines. May be nil.
 	//
-	// Config'e bir logger koymak ilk bakışta yersiz duruyor, ama bu aracın
-	// manşet özelliği teşhis edilebilirlik: domain rotasyonu sessizce olursa
-	// kullanıcı "neden yavaş" veya "neden başka bir domaine gitti" sorusunu
-	// cevaplayamaz. HTTPClient de aynı gerekçeyle burada.
+	// A logger in a config looks out of place at first, but this tool's
+	// headline feature is diagnosability: if domain rotation happens silently
+	// the user cannot answer "why is it slow" or "why did it go to another
+	// domain". HTTPClient is here for the same reason.
 	Logf func(format string, a ...any)
 
-	// Test enjeksiyonunun TEK mekanizması. httptest.Server'a yönlendirme,
-	// bu client'a takılan rewriting RoundTripper ile yapılır.
+	// HTTPClient for the resolver's API and page requests. Test injection
+	// goes through here too: requests are redirected to an httptest.Server by
+	// a rewriting RoundTripper attached to this client.
 	HTTPClient *http.Client
 }
 
-// Logln, cfg.Logf varsa yazar.
+// Logln writes through cfg.Logf if set.
 func (c SiteConfig) Logln(format string, a ...any) {
 	if c.Logf != nil {
 		c.Logf(format, a...)
 	}
 }
 
-// Recordln, cfg.Record varsa yanıtı kaydedir.
+// Recordln records a response through cfg.Record if set.
 func (c SiteConfig) Recordln(name string, data []byte) {
 	if c.Record != nil && len(data) > 0 {
 		c.Record(name, data)
 	}
 }
 
-// ExtraOr, Extra'dan bir değer okur; yoksa varsayılanı döndürür.
+// ExtraOr reads a value from Extra; returns def if missing.
 func (c SiteConfig) ExtraOr(key, def string) string {
 	if v, ok := c.Extra[key]; ok && v != "" {
 		return v
@@ -289,7 +299,7 @@ func (c SiteConfig) ExtraOr(key, def string) string {
 	return def
 }
 
-// WithDefaults, sıfır değerli alanları varsayılanlarıyla doldurur.
+// WithDefaults fills zero-valued fields with their defaults.
 func (c SiteConfig) WithDefaults() SiteConfig {
 	if c.MaxRetries == 0 {
 		c.MaxRetries = DefaultMaxRetries
@@ -309,6 +319,14 @@ func (c SiteConfig) WithDefaults() SiteConfig {
 	if c.MaxSegments == 0 {
 		c.MaxSegments = 1
 	}
+	// Unset: every file may use its full share of connections at once.
+	// Never below one per file: a file's own connection comes with its slot.
+	if c.MaxConnections == 0 {
+		c.MaxConnections = c.MaxConcurrent * c.MaxSegments
+	}
+	if c.MaxConnections < c.MaxConcurrent {
+		c.MaxConnections = c.MaxConcurrent
+	}
 	if c.RefererPolicy == "" {
 		c.RefererPolicy = RefererNone
 	}
@@ -318,96 +336,133 @@ func (c SiteConfig) WithDefaults() SiteConfig {
 type Resolver interface {
 	Match(u string) bool
 
-	// Resolve, her item bulundukça yield çağırır. Kısmi başarı ifade edilebilir:
-	// "900 çözüldü, 100 hata" durumu []ItemError ile döndürülür.
+	// Resolve calls yield for every item as it is found. Partial success is
+	// expressible: "900 resolved, 100 failed" is returned via []ItemError.
 	Resolve(ctx context.Context, u string, yield func(Item) error) ([]ItemError, error)
 
-	// ResolveOne, imzalı CDN URL'i 403/410 aldığında tek item'ı yeniden çözer.
-	// Premise 4 buna bağlı. sourcePage, Item.SourcePage ile aynı değerdir.
+	// ResolveOne re-resolves a single item when its signed CDN URL gets a
+	// 403/410. Premise 4 depends on it. sourcePage equals Item.SourcePage.
 	ResolveOne(ctx context.Context, sourcePage string) (Item, error)
 
-	// Diagnose, canary üzerinde katman raporu üretir.
+	// Diagnose produces a layer report against the canary.
 	Diagnose(ctx context.Context) ([]LayerResult, error)
 }
 
-// StatusClassifier, bir resolver'ın HTTP hata durumlarını siteye özgü biçimde
-// sınıflandırmasını sağlar. İndirici bunu opsiyonel olarak kullanır (type
-// assertion ile), bu yüzden Resolver arayüzünü genişletmiyor.
+// StatusClassifier lets a resolver classify HTTP error statuses in a
+// site-specific way. The downloader uses it optionally (via type assertion),
+// so it does not widen the Resolver interface.
 //
-// Neden gerekli: indirici tek başına 403'ü "imzalı URL süresi doldu" sayar.
-// pixeldrain ise rate limit, hotlink ve captcha durumlarını da 403 ile
-// bildiriyor. Bu ayrım yapılmazsa araç rate limitliyken URL'i yeniden çözüp
-// tekrar dener, yani limiti kendi eliyle derinleştirir.
+// Why it is needed: on its own the downloader treats 403 as "signed URL
+// expired". pixeldrain, however, also reports rate limit, hotlink and captcha
+// conditions with 403. Without this distinction the tool would re-resolve the
+// URL and try again while rate limited, deepening the limit with its own hands.
 //
-// nil dönmek "tanımadım, varsayılanı uygula" demektir.
+// Returning nil means "not recognized, apply the default".
 type StatusClassifier interface {
 	ClassifyStatus(resp *http.Response, body []byte) error
 }
 
-// ResponseValidator, bir resolver'ın indirme yanıtını siteye özgü biçimde
-// doğrulamasını sağlar. İndirici bunu opsiyonel olarak kullanır.
+// ResponseValidator lets a resolver validate a download response in a
+// site-specific way. The downloader uses it optionally.
 //
-// Neden gerekli: bunkr silinen veya bakımdaki dosyalar için 404 yerine 200 ile
-// bir placeholder video servis ediyor (maint.mp4). Durum kodu temiz, içerik
-// çöp. Bu kanca olmadan araç çöpü "başarıyla indirdim" sayar ve bu, sessiz
-// veri bozulmasının en kötü türü.
+// Why it is needed: for deleted or maintenance files bunkr serves a
+// placeholder video (maint.mp4) with 200 instead of 404. The status is clean,
+// the content is garbage. Without this hook the tool would count the garbage
+// as "downloaded successfully", which is the worst kind of silent corruption.
 //
-// nil dönmek "yanıt geçerli" demektir.
+// Returning nil means "the response is valid".
 type ResponseValidator interface {
 	ValidateResponse(resp *http.Response) error
 }
 
-// URLPreparer, indirme adresini isteğin TAM ÖNCESİNDE hazırlayan resolver'lar
-// için opsiyonel arayüzdür. İndirici bunu type assertion ile kullanıyor.
+// URLPreparer is an optional interface for resolvers that must prepare the
+// download URL JUST BEFORE the request. The downloader uses it via type
+// assertion.
 //
-// Neden gerekli: bunkr'ın CDN'i imzalı adres istiyor ve imza süreli (2 saat).
-// Adresi çözümleme anında imzalamak, bir albümün tüm dosyalarını daha indirme
-// başlamadan imzalamak demekti; kuyruğun sonundaki dosyanın tokenı sırası
-// gelmeden ölüyordu. Ayrıca atlanan ve yalnızca listelenen dosyalar için de
-// boşuna imza isteniyordu.
+// Why it is needed: bunkr's CDN wants a signed URL and the signature expires
+// (2 hours). Signing at resolution time meant signing every file of an album
+// before any download started; the token of the file at the end of the queue
+// died before its turn came. Files that were skipped or only listed also got
+// signatures for nothing.
 //
-// Her denemede yeniden çağrılır; bu yüzden süresi dolan token kendiliğinden
-// tazelenir ve item'ı baştan çözmek gerekmez.
+// It is called again on every attempt, so an expired token refreshes itself
+// and the item doesn't need to be resolved from scratch.
 type URLPreparer interface {
 	PrepareURL(ctx context.Context, rawURL string) (string, error)
 }
 
-// StreamDecoder, tel üzerinden gelen gövdeyi diske yazılmadan ÖNCE çözmesi
-// gereken resolver'lar için opsiyonel arayüzdür. İndirici bunu type assertion
-// ile kullanıyor.
+// StreamDecoder is an optional interface for resolvers whose body must be
+// decoded BEFORE it is written to disk. The downloader uses it via type
+// assertion.
 //
-// Neden gerekli: mega dosyaları istemci tarafında şifreli. Adres verip
-// "indir" demek diske şifreli çöp yazmak olur; anahtar adresteki #'ten sonra
-// duruyor ve sunucuya hiç gitmiyor. pixeldrain ve bunkr'da adres yeterliydi,
-// burada değil.
+// Why it is needed: mega files are encrypted client-side. Handing over a URL
+// and saying "download" would write encrypted garbage to disk; the key sits
+// after the # in the link and never reaches the server. For pixeldrain and
+// bunkr the URL was enough, here it is not.
 //
-// offset, akışın dosyanın kaçıncı baytından başladığıdır (resume). saved,
-// önceki koşudan kalan çözücü durumudur; boş olabilir. Çözücü, offset > 0 iken
-// durumu geri yükleyemiyorsa HATA döndürmeli, sessizce sıfırdan başlamamalı:
-// bütünlük kontrolü o durumu varsayıyor.
+// offset is the plaintext byte the stream starts at (resume). saved is the
+// decoder state left from a previous run; may be empty. If the decoder cannot
+// restore its state while offset > 0 it must return an ERROR and must not
+// silently start over: the integrity check relies on that state.
 type StreamDecoder interface {
 	DecodeStream(it Item, offset int64, saved []byte, r io.Reader) (DecodedStream, error)
 }
 
-// DecodedStream, çözülmüş gövdedir. İndirici hash'i ve diske yazmayı bunun
-// üzerinden yapar; yani offset, boyut ve sha256 durumu hep DÜZ METİN
-// cinsindendir.
+// DecodedStream is the decoded body. The downloader hashes and writes to disk
+// through it, so offset, size and sha256 state are always in PLAINTEXT terms.
 type DecodedStream interface {
 	io.Reader
-	// State, resume için saklanacak çözücü durumunu döndürür. O ana kadar
-	// okunan bayt sayısıyla birebir uyumlu olmak zorunda; indirici bunu her
-	// yazmadan sonra alıp state dosyasına koyuyor.
+	// State returns the decoder state to save for resume. It must correspond
+	// exactly to the number of bytes read so far; the downloader takes it
+	// after every write and stores it in the state file.
 	State() []byte
-	// Verify, akış TAMAMLANDIĞINDA bütünlüğü doğrular. Hata dönerse indirici
-	// .part'ı siler: bozuk içeriği diskte bırakmak her koşuda aynı hatayı
-	// tekrarlatır.
+	// Verify checks integrity once the stream is COMPLETE. If it fails the
+	// downloader deletes the .part: leaving corrupt content on disk would
+	// repeat the same failure on every run.
 	Verify() error
 }
 
-// Factory, config'i resolver'a enjekte eder.
+// RangeDecoder is an optional interface for StreamDecoder resolvers whose
+// body can be decoded starting at ANY offset without earlier state, and
+// whose integrity can be checked afterwards over the finished plaintext.
+// With it the downloader fetches a decoded file over several connections:
+// every segment decodes its own range, and the integrity check runs once
+// over the complete file.
+//
+// Why it is needed: mega's content is AES-CTR (any block can be decrypted on
+// its own) but its integrity MAC is a chain over the whole file in order. A
+// StreamDecoder carries that chain along a single stream, so a mega file used
+// to be limited to one connection whatever the user chose.
+type RangeDecoder interface {
+	// DecodeRange decodes r, whose first byte is plaintext byte offset.
+	DecodeRange(it Item, offset int64, r io.Reader) (io.Reader, error)
+	// NewVerifier returns a checker that is fed the finished plaintext from
+	// the first byte to the last.
+	NewVerifier(it Item) (Verifier, error)
+}
+
+// Verifier checks integrity over plaintext written to it in order.
+type Verifier interface {
+	io.Writer
+	Verify() error
+}
+
+// RangeURLer is an optional interface for sites whose servers take byte
+// ranges in the URL instead of a Range header; the answer is the range
+// itself. end is exclusive.
+//
+// Why it is needed: mega's own clients, MegaBasterd and go-mega all ask
+// mega's storage servers for ".../<start>-<end>". Whether those servers honor
+// a Range header is not verified; without this, multiple connections and
+// resuming would rest on that guess.
+type RangeURLer interface {
+	RangeURL(rawURL string, start, end int64) string
+}
+
+// Factory injects the config into a resolver.
 type Factory func(cfg SiteConfig) Resolver
 
-// Registry global durum tutmaz; her test kendi örneğini kurar.
+// Registry holds no global state; every test builds its own instance.
 type Registry struct {
 	factories map[string]Factory
 }
@@ -418,25 +473,26 @@ func NewRegistry() *Registry {
 
 func (r *Registry) Register(name string, f Factory) error {
 	if name == "" {
-		return errors.New("site: boş isimle kayıt")
+		return errors.New("site: registration with an empty name")
 	}
 	if f == nil {
-		return fmt.Errorf("site: %q için nil factory", name)
+		return fmt.Errorf("site: nil factory for %q", name)
 	}
 	if _, dup := r.factories[name]; dup {
-		return fmt.Errorf("site: %q zaten kayıtlı", name)
+		return fmt.Errorf("site: %q is already registered", name)
 	}
 	r.factories[name] = f
 	return nil
 }
 
-// Build, her SiteConfig için kayıtlı fabrikayı çağırır ve resolver listesi üretir.
+// Build calls the registered factory for every SiteConfig and returns the
+// resolver list.
 func (r *Registry) Build(cfgs []SiteConfig) ([]Resolver, error) {
 	out := make([]Resolver, 0, len(cfgs))
 	for _, cfg := range cfgs {
 		f, ok := r.factories[cfg.Name]
 		if !ok {
-			return nil, fmt.Errorf("site: %q için kayıtlı factory yok", cfg.Name)
+			return nil, fmt.Errorf("site: no factory registered for %q", cfg.Name)
 		}
 		out = append(out, f(cfg.WithDefaults()))
 	}

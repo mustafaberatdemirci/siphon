@@ -1,8 +1,9 @@
-// Siphon: pixeldrain ve bunkr linklerini toplu indirir.
+// Siphon downloads pixeldrain, bunkr and mega links in bulk.
 //
-// Bu dosya yalnızca komut satırı arayüzüdür: bayraklar, girdi okuma, çıktı
-// biçimi. İndirme hattının tamamı internal/run'da ve pencere sürümü (cmd/
-// siphon-gui) aynı hattı çağırıyor; iki arayüzün ayrışmaması bu ayrıma bağlı.
+// This file is only the command-line interface: flags, reading input, output
+// format. The whole download pipeline lives in internal/run, and the window
+// version (cmd/siphon-gui) calls the same pipeline; keeping the two
+// interfaces from drifting apart depends on this separation.
 package main
 
 import (
@@ -43,30 +44,30 @@ func (l logger) errorf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
 }
 
-// events, logger'ı run.Events'e bağlar.
+// events wires the logger into run.Events.
 func (l logger) events() run.Events {
 	return run.Events{
 		Debugf: l.debugf,
 		Infof:  l.infof,
 		Errorf: l.errorf,
 		ConfigLoaded: func(src string, n int) {
-			l.debugf("config: %s (%d site)", src, n)
+			l.debugf("config: %s (%d sites)", src, n)
 		},
 		LedgerOpened: func(path string, items, _ int) {
-			l.debugf("kayıt: %s (%d item)", path, items)
+			l.debugf("ledger: %s (%d items)", path, items)
 		},
 		ItemResolved: func(it site.Item) {
-			// --resolve-only çıktısı: sadece adres, satır satır. Boruya
-			// verilebilir olması önemli.
+			// --resolve-only output: just the URL, one per line. Being
+			// pipeable matters.
 			fmt.Fprintln(os.Stdout, it.URL)
 		},
 	}
 }
 
 func main() {
-	// Alt komut, flag.Parse'tan ÖNCE ayrılıyor. Go'nun flag paketi ilk
-	// bayrak olmayan argümanda duruyor, yani "siphon doctor -v" biçimini
-	// tek bir FlagSet ile ayrıştırmak mümkün değil.
+	// The subcommand is split off BEFORE flag.Parse. Go's flag package stops
+	// at the first non-flag argument, so the "siphon doctor -v" form can't be
+	// parsed with a single FlagSet.
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		os.Exit(runDoctor(os.Args[2:]))
 	}
@@ -83,23 +84,23 @@ func runCLI() int {
 		resolveOnly bool
 		onQuota     string
 	)
-	flag.StringVar(&inputPath, "i", "", "URL listesi dosyası (satır başına bir URL, # ile yorum)")
-	flag.StringVar(&outDir, "out", ".", "çıktı kökü")
-	flag.StringVar(&cfgPath, "c", "", "sites.toml yolu (verilmezse exe yanı, sonra cwd, sonra gömülü)")
-	flag.BoolVar(&verbose, "v", false, "katman detayını da bas")
-	flag.BoolVar(&quiet, "q", false, "sadece hataları bas")
-	flag.BoolVar(&resolveOnly, "resolve-only", false, "çözümlenen URL'leri bas, indirme")
-	flag.StringVar(&onQuota, "on-quota", "", "site kotası dolunca çalıştırılacak komut (ör. VPN değiştiren betik); pay açılınca devam edilir")
+	flag.StringVar(&inputPath, "i", "", "URL list file (one URL per line, # for comments)")
+	flag.StringVar(&outDir, "out", ".", "output root")
+	flag.StringVar(&cfgPath, "c", "", "path to sites.toml (if not given: next to the exe, then the cwd, then embedded)")
+	flag.BoolVar(&verbose, "v", false, "also print layer details")
+	flag.BoolVar(&quiet, "q", false, "only print errors")
+	flag.BoolVar(&resolveOnly, "resolve-only", false, "print the resolved URLs, don't download")
+	flag.StringVar(&onQuota, "on-quota", "", "command to run when a site's quota runs out (e.g. a script that switches VPN); continues when the allowance opens up")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kullanım: siphon [bayraklar] [url ...]\n")
-		fmt.Fprintf(os.Stderr, "          siphon doctor [bayraklar] [site ...]\n\n")
+		fmt.Fprintf(os.Stderr, "usage: siphon [flags] [url ...]\n")
+		fmt.Fprintf(os.Stderr, "       siphon doctor [flags] [site ...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
 	log := logger{verbose: verbose, quiet: quiet}
 
-	// Ctrl+C: context iptal edilir, indirici .part'ı sync edip state yazar.
+	// Ctrl+C: the context is canceled, the downloader syncs the .part and writes the state.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -109,7 +110,7 @@ func runCLI() int {
 		return run.ExitUsage
 	}
 	if len(urls) == 0 {
-		log.errorf("girdi yok: -i ile dosya ver veya URL'leri argüman olarak geç")
+		log.errorf("no input: give a file with -i or pass URLs as arguments")
 		flag.Usage()
 		return run.ExitUsage
 	}
@@ -128,12 +129,13 @@ func runCLI() int {
 	return sum.ExitCode()
 }
 
-// runDoctor, katman teşhisini çalıştırır.
+// runDoctor runs the layer diagnosis.
 //
-// Çıkış kodu: 0 hiç FAIL yok, 1 en az bir FAIL, 3 konfigürasyon hatası.
-// WARN çıkış kodunu ETKİLEMEZ ve bu kasıtlı: "CDN bir kapı değil sinyal"
-// kuralı ancak WARN başarısızlık sayılmazsa anlam taşıyor. Yeni bir CDN host'u
-// görmek betiği kırmamalı; kullanıcıya söylemeli.
+// Exit code: 0 no FAIL, 1 at least one FAIL, 3 configuration error.
+// WARN does NOT AFFECT the exit code, and that is deliberate: the "CDN is a
+// signal, not a gate" rule only means something if WARN doesn't count as a
+// failure. Seeing a new CDN host must not break a script; it should tell the
+// user.
 func runDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	var (
@@ -143,21 +145,21 @@ func runDoctor(args []string) int {
 		record    bool
 		recordDir string
 	)
-	fs.StringVar(&cfgPath, "c", "", "sites.toml yolu")
-	fs.BoolVar(&verbose, "v", false, "teşhis detayını da bas")
-	fs.BoolVar(&quiet, "q", false, "sadece hataları bas")
-	fs.BoolVar(&record, "record", false, "yanıtları diske kaydet (diff için)")
-	fs.StringVar(&recordDir, "record-dir", doctor.DefaultDir, "kayıt klasörü")
-	// Neden bir bayrak gerekiyor: canary_urls bir dizi alanı ve dizi alanları
-	// config birleştirmede BİRLEŞİYOR (union, sıra korunur). Dış dosyaya canary
-	// yazmak onu listenin SONUNA ekliyor ve Diagnose ilk çalışan canary'de
-	// durduğu için oraya hiç gelinmiyor. Birleştirme semantiği domainler için
-	// doğru (eklemek istiyorsun, değiştirmek değil), ama "şu albüm kırık mı"
-	// diye sormanın bir yolu olmak zorunda.
+	fs.StringVar(&cfgPath, "c", "", "path to sites.toml")
+	fs.BoolVar(&verbose, "v", false, "also print diagnostic detail")
+	fs.BoolVar(&quiet, "q", false, "only print errors")
+	fs.BoolVar(&record, "record", false, "save the responses to disk (for diffing)")
+	fs.StringVar(&recordDir, "record-dir", doctor.DefaultDir, "recording folder")
+	// Why a flag is needed: canary_urls is an array field and array fields
+	// are MERGED when configs are combined (union, order preserved). Writing
+	// a canary into an external file appends it to the END of the list, and
+	// since Diagnose stops at the first working canary it is never reached.
+	// The merge semantics are right for domains (you want to add, not
+	// replace), but there has to be a way to ask "is this album broken".
 	var canaries stringList
-	fs.Var(&canaries, "canary", "canary URL'ini değiştir (tekrarlanabilir)")
+	fs.Var(&canaries, "canary", "replace the canary URL (repeatable)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "kullanım: siphon doctor [bayraklar] [site ...]\n\n")
+		fmt.Fprintf(os.Stderr, "usage: siphon doctor [flags] [site ...]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -176,19 +178,22 @@ func runDoctor(args []string) int {
 		recFn = rec.For
 	}
 
-	cfgs, resolvers, err := run.Setup(log.events(), cfgPath, recFn, canaries)
+	cfgs, resolvers, err := run.Setup(log.events(), cfgPath, recFn, canaries, nil)
 	if err != nil {
 		log.errorf("%v", err)
 		return run.ExitUsage
 	}
 
-	// Argüman verilmişse yalnızca o siteler teşhis edilir.
+	// If arguments are given only those sites are diagnosed.
 	want := map[string]bool{}
 	for _, a := range fs.Args() {
 		want[strings.ToLower(a)] = true
 	}
 	var sites []doctor.Named
 	for i, r := range resolvers {
+		if _, fallback := r.(site.Fallback); fallback {
+			continue // plain file links: no site to diagnose
+		}
 		name := cfgs[i].Name
 		if len(want) > 0 && !want[strings.ToLower(name)] {
 			continue
@@ -196,7 +201,7 @@ func runDoctor(args []string) int {
 		sites = append(sites, doctor.Named{Name: name, Resolver: r})
 	}
 	if len(sites) == 0 {
-		log.errorf("teşhis edilecek site yok (bilinen: %s)", strings.Join(siteNames(cfgs), ", "))
+		log.errorf("no site to diagnose (known: %s)", strings.Join(siteNames(cfgs), ", "))
 		return run.ExitUsage
 	}
 
@@ -205,14 +210,14 @@ func runDoctor(args []string) int {
 
 	if rec != nil {
 		for _, f := range rec.Saved() {
-			log.infof("kaydedildi: %s", f)
+			log.infof("saved: %s", f)
 		}
-		// Kayıt hatası teşhisi DÜŞÜRMEZ: asıl iş katman raporu.
+		// A recording error does NOT fail the diagnosis: the real job is the layer report.
 		for _, e := range rec.Errs() {
-			log.errorf("kayıt hatası: %v", e)
+			log.errorf("recording error: %v", e)
 		}
 		if len(rec.Saved()) == 0 && len(rec.Errs()) == 0 {
-			log.errorf("kayıt istendi ama hiçbir yanıt kaydedilmedi")
+			log.errorf("recording was requested but no response was saved")
 		}
 	}
 
@@ -222,7 +227,7 @@ func runDoctor(args []string) int {
 	return run.ExitOK
 }
 
-// stringList, tekrarlanabilir bir string bayrağı.
+// stringList is a repeatable string flag.
 type stringList []string
 
 func (l *stringList) String() string { return strings.Join(*l, ",") }
@@ -230,7 +235,7 @@ func (l *stringList) String() string { return strings.Join(*l, ",") }
 func (l *stringList) Set(v string) error {
 	v = strings.TrimSpace(v)
 	if v == "" {
-		return errors.New("boş canary")
+		return errors.New("empty canary")
 	}
 	*l = append(*l, v)
 	return nil
@@ -239,13 +244,16 @@ func (l *stringList) Set(v string) error {
 func siteNames(cfgs []site.SiteConfig) []string {
 	out := make([]string, 0, len(cfgs))
 	for _, c := range cfgs {
+		if c.Name == site.DirectName {
+			continue // plain file links, not a site to diagnose
+		}
 		out = append(out, c.Name)
 	}
 	return out
 }
 
-// readURLs, -i dosyasını ve konumsal argümanları birleştirir.
-// Boş satırlar ve # ile başlayanlar atlanır.
+// readURLs combines the -i file and the positional arguments.
+// Blank lines and lines starting with # are skipped.
 func readURLs(path string, args []string) ([]string, error) {
 	out := append([]string{}, args...)
 	if path == "" {
@@ -253,7 +261,7 @@ func readURLs(path string, args []string) ([]string, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: -i dosyası okunamadı: %v", config.ErrUsage, err)
+		return nil, fmt.Errorf("%w: could not read the -i file: %v", config.ErrUsage, err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))

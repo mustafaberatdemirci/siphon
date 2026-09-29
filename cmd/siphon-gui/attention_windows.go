@@ -9,14 +9,14 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// requestAttention, kullanıcı başka bir penceredeyken "buraya bak" der:
-// görev çubuğu düğmesi pencere öne gelene kadar yanıp söner ve kısa bir
-// uyarı sesi çalar.
+// requestAttention says "look here" while the user is in another window: the
+// taskbar button flashes until the window comes to the front and a short
+// warning sound plays.
 //
-// ÖLÇÜLDÜ: bu makinede Windows bildirimleri hesap genelinde kapalı
-// (ToastEnabled=0); PowerShell'in kendi kimliğiyle gönderilen deneme bile
-// görünmedi. Kota uyarısı o ayara bağımlı kalamaz; FlashWindowEx ve
-// MessageBeep bildirim ayarından etkilenmez.
+// MEASURED: on this machine Windows notifications are turned off
+// account-wide (ToastEnabled=0); even a test sent with PowerShell's own
+// identity didn't show up. The quota warning can't depend on that setting;
+// FlashWindowEx and MessageBeep aren't affected by notification settings.
 func requestAttention(w fyne.Window) {
 	nw, ok := w.(driver.NativeWindow)
 	if !ok {
@@ -41,8 +41,8 @@ var (
 )
 
 const (
-	flashwAll       = 0x3 // başlık + görev çubuğu
-	flashwTimerNoFG = 0xC // pencere öne gelene kadar
+	flashwAll       = 0x3 // caption + taskbar
+	flashwTimerNoFG = 0xC // until the window comes to the front
 	mbIconWarning   = 0x30
 )
 
@@ -55,7 +55,7 @@ type flashInfo struct {
 }
 
 func flashWindow(hwnd uintptr) {
-	// Pencere zaten öndeyse yanıp sönmeye gerek yok; şerit ve ses yeter.
+	// If the window is already in front there's no need to flash; the banner and the sound are enough.
 	if fg, _, _ := procGetForeground.Call(); fg == hwnd {
 		return
 	}
@@ -68,11 +68,11 @@ func messageBeep() {
 	_, _, _ = procMessageBeep.Call(mbIconWarning)
 }
 
-// registerToastIdentity, Windows'un masaüstü uygulamalarından beklediği
-// AppUserModelId kaydını HKCU'ya yazar (yönetici gerekmez). Bildirimler
-// açıksa toast "Siphon" adıyla görünür; kayıt olmadan Windows toast'ı
-// sessizce düşürebiliyor. Thunderbird, Acrobat ve TreeSize aynı anahtarı
-// kullanıyor (ölçüldü). Bildirimler kapalıysa etkisi yok, zararı da yok.
+// registerToastIdentity writes the AppUserModelId entry Windows expects from
+// desktop apps into HKCU (no admin needed). If notifications are on, the
+// toast shows up under the name "Siphon"; without the entry Windows may
+// silently drop the toast. Thunderbird, Acrobat and TreeSize use the same key
+// (measured). If notifications are off it has no effect, and no harm either.
 func registerToastIdentity(appID string) {
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\Classes\AppUserModelId\`+appID, registry.SET_VALUE)
 	if err != nil {

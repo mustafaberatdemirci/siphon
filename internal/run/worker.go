@@ -13,14 +13,14 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/store"
 )
 
-// Worker, tek bir site için indirme bileşenlerini bir arada tutar: indirici,
-// host başına eşzamanlılık sınırı ve yeniden deneme politikası.
+// Worker holds the download components for a single site together: the
+// downloader, the per-host concurrency limit and the retry policy.
 //
-// Neden ayrı bir tip: iki çağıran var. Komut satırı toplu koşu yapıyor (bir
-// URL çöz, item'larını indir, bitir); pencere ise kalıcı bir kuyruk sürüyor
-// (item'lar tek tek başlar, duraklar, devam eder). İkisi de tek bir item'ı
-// AYNI şekilde indirmek zorunda: kayıt kontrolü, host sınırı, politika,
-// kayıt yazma. Bu mantık iki yerde yaşasaydı zamanla ayrışırdı.
+// Why a separate type: there are two callers. The command line does a batch
+// run (resolve a URL, download its items, done); the window drives a
+// persistent queue (items start, pause and resume one by one). Both MUST
+// download a single item the SAME way: ledger check, host limit, policy,
+// ledger write. If this logic lived in two places it would drift apart over time.
 type Worker struct {
 	Resolver site.Resolver
 	Cfg      site.SiteConfig
@@ -29,44 +29,66 @@ type Worker struct {
 	Policy   snet.Policy
 }
 
-// NewWorker, resolver'ın opsiyonel arayüzlerini indiriciye bağlayarak kurar.
+// NewWorker builds a worker, wiring the resolver's optional interfaces into the downloader.
 func NewWorker(r site.Resolver, cfg site.SiteConfig, client *http.Client, ev Events) *Worker {
 	down := &dl.Downloader{
-		Client:    client,
-		Logf:      ev.Debugf,
-		Reresolve: r.ResolveOne,
-		UserAgent: cfg.UserAgent,
-		Progress:  ev.Progress,
+		Client:      client,
+		Logf:        ev.Debugf,
+		Reresolve:   r.ResolveOne,
+		UserAgent:   cfg.UserAgent,
+		Progress:    ev.Progress,
+		Connections: ev.Connections,
 	}
-	// Resolver 403'ü siteye özgü yorumlayabiliyorsa indiriciye bağla; yoksa
-	// her 403 "imzalı URL süresi doldu" sayılır ve rate limit derinleşir.
+	// If the resolver can interpret 403 in a site-specific way, wire it into
+	// the downloader; otherwise every 403 counts as "signed URL expired" and
+	// the rate limit deepens.
 	if c, ok := r.(site.StatusClassifier); ok {
 		down.Classify = c.ClassifyStatus
 	}
-	// Adresin isteğin tam öncesinde hazırlanması gerekiyorsa (bunkr'da süreli
-	// imza) indiriciye bağlanıyor.
+	// If the URL must be prepared just before the request (a time-limited
+	// signature on bunkr), it is wired into the downloader.
 	if p, ok := r.(site.URLPreparer); ok {
 		down.PrepareURL = p.PrepareURL
 	}
-	// Gövde diske yazılmadan önce çözülmesi gerekiyorsa (mega: AES-CTR).
+	// If the body must be decoded before it is written to disk (mega: AES-CTR).
 	if dec, ok := r.(site.StreamDecoder); ok {
 		down.Decode = dec.DecodeStream
 	}
-	// bunkr 200 ile bakım placeholder'ı döndürebiliyor; durum kodu yeterli
-	// sinyal değil.
+	// If every range can be decoded on its own (mega: AES-CTR), a decoded file
+	// can be fetched over several connections too.
+	if rd, ok := r.(site.RangeDecoder); ok {
+		down.DecodeRange = rd.DecodeRange
+		down.NewVerifier = rd.NewVerifier
+	}
+	// bunkr can return a maintenance placeholder with 200; the status code
+	// isn't a sufficient signal.
 	if v, ok := r.(site.ResponseValidator); ok {
 		down.Validate = v.ValidateResponse
 	}
 
-	// Sınır HOST başına: bir albüm birden fazla CDN host'una yayılabiliyor
-	// ve tek bir genel sayaç yanlış yerde daraltma yapar.
-	limiter := snet.NewHostLimiter(cfg.MaxConcurrent)
+	// mega's storage servers take byte ranges in the URL.
+	if ru, ok := r.(site.RangeURLer); ok {
+		down.RangeURL = ru.RangeURL
+	}
 
-	// Parçalı indirme: site tavanı kadar bağlantı; ek parçalar host
-	// yuvalarına tabi (beklemeden alınır, yoksa daha az parça).
+	// The limits are PER HOST: an album can spread across several CDN hosts
+	// and a single global counter would throttle in the wrong place.
+	//
+	// Files and connections are counted separately. A file takes a file slot
+	// (max_concurrent) and comes with its own connection; its extra
+	// connections come from the host's remaining budget (max_connections
+	// minus the file slots), taken without waiting. Before, both came out of
+	// one pool: a file that took every slot for its segments kept the next
+	// file waiting at 0% until it finished.
+	limiter := snet.NewHostLimiter(cfg.MaxConcurrent)
 	down.Segments = cfg.MaxSegments
-	down.AcquireExtra = func(rawURL string, want int) (int, func()) {
-		return limiter.TryAcquire(snet.HostOf(rawURL), want)
+	if extra := cfg.MaxConnections - cfg.MaxConcurrent; extra > 0 {
+		extras := snet.NewHostLimiter(extra)
+		down.AcquireExtra = func(rawURL string, want int) (int, func()) {
+			return extras.TryAcquire(snet.HostOf(rawURL), want)
+		}
+	} else {
+		down.AcquireExtra = func(string, int) (int, func()) { return 0, func() {} }
 	}
 
 	return &Worker{
@@ -83,47 +105,49 @@ func NewWorker(r site.Resolver, cfg site.SiteConfig, client *http.Client, ev Eve
 	}
 }
 
-// OutcomeKind, tek item'ın nasıl bittiği.
+// OutcomeKind is how a single item ended.
 type OutcomeKind int
 
 const (
-	OutcomeDone     OutcomeKind = iota // indi ve kaydedildi
-	OutcomeSkipped                     // kayıt zaten vardı, dosya yerinde
-	OutcomeFailed                      // kalıcı hata
-	OutcomeStopped                     // captcha: koşu durmalı
-	OutcomeCanceled                    // context iptali (kullanıcı durdurdu)
+	OutcomeDone     OutcomeKind = iota // downloaded and recorded
+	OutcomeSkipped                     // the ledger already had it, the file is in place
+	OutcomeFailed                      // permanent failure
+	OutcomeStopped                     // captcha: the run must stop
+	OutcomeCanceled                    // context cancellation (the user stopped it)
 )
 
-// Outcome, DownloadItem'ın sonucu.
+// Outcome is the result of DownloadItem.
 type Outcome struct {
 	Kind   OutcomeKind
-	Result dl.Result   // Done'da
-	Entry  store.Entry // Skipped'ta
-	Err    error       // Failed/Stopped/Canceled'da
-	// Degraded: dosya indi ama kaydı yazılamadı. İndirme geçerli, idempotence
-	// bozuk; sonraki koşu bunu yeniden indirir.
+	Result dl.Result   // on Done
+	Entry  store.Entry // on Skipped
+	Err    error       // on Failed/Stopped/Canceled
+	// Degraded: the file was downloaded but its ledger entry couldn't be
+	// written. The download is valid, idempotence is broken; the next run
+	// downloads it again.
 	Degraded bool
 }
 
-// DownloadItem, tek bir item'ı baştan sona işler: kayıt kontrolü, host
-// sınırı, politika ile indirme, kayıt yazma. Olayları ev üzerinden bildirir.
+// DownloadItem handles a single item from start to finish: ledger check,
+// host limit, download under the policy, ledger write. It reports events
+// through ev.
 //
-// ledger nil olabilir (kayıt tutulmayan çağıran); o zaman atlama kontrolü ve
-// kayıt yazma yapılmaz.
+// ledger may be nil (a caller that keeps no ledger); then the skip check and
+// the ledger write are not done.
 func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.Ledger, it site.Item, ev Events) Outcome {
-	// Zaten indirilmiş mi? Kayda tek başına GÜVENİLMİYOR: dosyanın gerçekten
-	// yerinde olduğu da kontrol ediliyor. Kullanıcı dosyayı silmişse kayda
-	// bakıp atlamak sessiz başarısızlık olur.
+	// Already downloaded? The ledger ALONE is not TRUSTED: it is also checked
+	// that the file really is in place. If the user deleted the file, looking
+	// at the ledger and skipping would be a silent failure.
 	if ledger != nil {
 		if e, ok := ledger.Lookup(it.Dir, it.SourcePage, it.Filename); ok {
 			if fi, serr := os.Stat(filepath.Join(outDir, e.Path)); serr == nil && !fi.IsDir() {
 				if ev.ItemSkipped != nil {
 					ev.ItemSkipped(it, e)
 				}
-				ev.debugf("[%d] %s zaten kayıtlı, atlanıyor", it.Index+1, e.Filename)
+				ev.debugf("[%d] %s already in the ledger, skipping", it.Index+1, e.Filename)
 				return Outcome{Kind: OutcomeSkipped, Entry: e}
 			}
-			ev.errorf("  kayıt %q diyor ama dosya yok, yeniden indiriliyor", e.Path)
+			ev.errorf("  the ledger says %q but the file is missing, downloading again", e.Path)
 		}
 	}
 
@@ -148,8 +172,8 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 	case derr == nil:
 		out := Outcome{Kind: OutcomeDone, Result: res}
 		if ledger != nil {
-			// Yol GÖRELİ kaydediliyor: çıktı klasörü taşındığında kayıt
-			// geçerli kalsın.
+			// The path is recorded RELATIVE: so the ledger stays valid when
+			// the output folder is moved.
 			rel, relErr := filepath.Rel(outDir, res.Path)
 			if relErr != nil {
 				rel = filepath.Base(res.Path)
@@ -162,7 +186,7 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 				Size:       res.Size,
 				SHA256:     res.SHA256,
 			}); lerr != nil {
-				ev.errorf("  %s indi ama kaydı yazılamadı: %v", rel, lerr)
+				ev.errorf("  %s downloaded but its ledger entry could not be written: %v", rel, lerr)
 				out.Degraded = true
 			}
 		}
@@ -173,16 +197,16 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 		return out
 
 	case errors.Is(derr, snet.ErrStop):
-		// Captcha. Beklemek çözmez ve denemeye devam etmek durumu
-		// kötüleştirir; koşuyu durdur.
-		ev.errorf("DURDURULDU: %v", derr)
+		// Captcha. Waiting doesn't solve it and continuing makes things
+		// worse; stop the run.
+		ev.errorf("STOPPED: %v", derr)
 		return Outcome{Kind: OutcomeStopped, Err: derr}
 
 	case errors.Is(derr, context.Canceled):
 		return Outcome{Kind: OutcomeCanceled, Err: derr}
 
 	default:
-		// Albüm içinde ölü item albümü düşürmez.
+		// A dead item inside an album doesn't bring the album down.
 		ev.errorf("  %s: %v", it.Filename, derr)
 		if ev.ItemFailed != nil {
 			ev.ItemFailed(it, derr)

@@ -11,22 +11,23 @@ import (
 )
 
 func TestKeyDoesNotDependOnURL(t *testing.T) {
-	// Anahtar imzasinda URL YOK. bunkr'in imzali adresi her kosuda degisiyor;
-	// URL ile anahtarlamak idempotent yeniden baslatmayi her seferinde bozardi.
-	// Bu test imzanin kendisini sabitliyor: Key'e URL eklenirse derlenmez.
-	a := Key("albüm", "https://bunkr.ws/f/slug", "dosya.mp4")
-	b := Key("albüm", "https://bunkr.ws/f/slug", "dosya.mp4")
+	// The key's signature has NO URL. bunkr's signed address changes on every
+	// run; keying by URL would break idempotent restarts every time.
+	// This test pins the signature itself: if a URL is added to Key it won't
+	// compile.
+	a := Key("album", "https://bunkr.ws/f/slug", "file.mp4")
+	b := Key("album", "https://bunkr.ws/f/slug", "file.mp4")
 	if a != b {
-		t.Fatalf("ayni item farkli anahtar uretti: %q vs %q", a, b)
+		t.Fatalf("the same item produced different keys: %q vs %q", a, b)
 	}
 	if a == "" {
-		t.Fatal("bos anahtar")
+		t.Fatal("empty key")
 	}
 }
 
-// Duz birlestirme ("a"+"bc" ile "ab"+"c") iki farkli item'i ayni anahtara
-// dusurebilir. Dosya adlari her karakteri icerebildigi icin guvenli bir
-// ayirici yok; uzunluk oneki bu yuzden var.
+// Plain concatenation ("a"+"bc" vs "ab"+"c") could map two different items
+// to the same key. File names can contain any character, so there is no safe
+// separator; that is why there is a length prefix.
 func TestKeyIsUnambiguous(t *testing.T) {
 	pairs := [][2][3]string{
 		{{"a", "bc", "x"}, {"ab", "c", "x"}},
@@ -38,16 +39,16 @@ func TestKeyIsUnambiguous(t *testing.T) {
 		k1 := Key(p[0][0], p[0][1], p[0][2])
 		k2 := Key(p[1][0], p[1][1], p[1][2])
 		if k1 == k2 {
-			t.Errorf("cakisma: %v ve %v ayni anahtar (%s)", p[0], p[1], k1)
+			t.Errorf("collision: %v and %v give the same key (%s)", p[0], p[1], k1)
 		}
 	}
 }
 
 func TestOpenPlacesLedgerUnderOutRoot(t *testing.T) {
-	// Kayit CIKTI KOKUNUN altinda olmali. cwd'de veya exe yaninda olsaydi,
-	// farkli bir -out ile ikinci kosu "hepsi indi" deyip hicbir sey indirmeden
-	// 0 donerdi.
-	out := filepath.Join(t.TempDir(), "cikti", "alt")
+	// The ledger must live UNDER THE OUTPUT ROOT. If it were in the cwd or
+	// next to the exe, a second run with a different -out would say
+	// "everything is downloaded" and return 0 without downloading anything.
+	out := filepath.Join(t.TempDir(), "output", "sub")
 	l, err := Open(out)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -56,10 +57,10 @@ func TestOpenPlacesLedgerUnderOutRoot(t *testing.T) {
 
 	want := filepath.Join(out, FileName)
 	if l.Path() != want {
-		t.Fatalf("kayit yolu = %q, beklenen %q", l.Path(), want)
+		t.Fatalf("ledger path = %q, want %q", l.Path(), want)
 	}
 	if _, serr := os.Stat(want); serr != nil {
-		t.Fatalf("kayit dosyasi olusmadi: %v", serr)
+		t.Fatalf("ledger file was not created: %v", serr)
 	}
 }
 
@@ -73,9 +74,9 @@ func TestAddAndLookup(t *testing.T) {
 
 	e := Entry{
 		SourcePage: "https://bunkr.ws/f/slug",
-		Dir:        "Albüm 2026",
-		Filename:   "bir.mp4",
-		Path:       filepath.Join("Albüm 2026", "bir.mp4"),
+		Dir:        "Album 2026",
+		Filename:   "one.mp4",
+		Path:       filepath.Join("Album 2026", "one.mp4"),
 		Size:       1234,
 		SHA256:     "deadbeef",
 	}
@@ -83,26 +84,26 @@ func TestAddAndLookup(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 	if l.Len() != 1 {
-		t.Fatalf("Len = %d, 1 bekleniyordu", l.Len())
+		t.Fatalf("Len = %d, want 1", l.Len())
 	}
 
 	got, ok := l.Lookup(e.Dir, e.SourcePage, e.Filename)
 	if !ok {
-		t.Fatal("eklenen item bulunamadi")
+		t.Fatal("the added item was not found")
 	}
 	if got.Path != e.Path || got.Size != 1234 || got.SHA256 != "deadbeef" {
-		t.Errorf("kayit bozuk: %+v", got)
+		t.Errorf("corrupted entry: %+v", got)
 	}
 	if got.TS == "" {
-		t.Error("zaman damgasi doldurulmadi")
+		t.Error("timestamp was not filled in")
 	}
 
-	if _, ok := l.Lookup("baska", e.SourcePage, e.Filename); ok {
-		t.Error("farkli dir ayni anahtara dustu")
+	if _, ok := l.Lookup("other", e.SourcePage, e.Filename); ok {
+		t.Error("a different dir mapped to the same key")
 	}
 }
 
-// Asil kriter: kayit KOSULAR ARASINDA yasiyor.
+// The real criterion: the ledger survives ACROSS RUNS.
 func TestLedgerSurvivesReopen(t *testing.T) {
 	out := t.TempDir()
 	l, err := Open(out)
@@ -130,55 +131,93 @@ func TestLedgerSurvivesReopen(t *testing.T) {
 	}
 	defer l2.Close()
 	if l2.Len() != 3 {
-		t.Fatalf("yeniden acilista Len = %d, 3 bekleniyordu", l2.Len())
+		t.Fatalf("Len on reopen = %d, want 3", l2.Len())
 	}
 	if _, ok := l2.Lookup("d", "https://s/1", "f1.bin"); !ok {
-		t.Error("onceki kosunun kaydi okunamadi")
+		t.Error("the previous run's entry could not be read")
 	}
-	// Ekleme append-only: eski satirlar korunmus olmali.
+	// Appends are append-only: old lines must be preserved.
 	data, _ := os.ReadFile(l2.Path())
 	if n := strings.Count(strings.TrimSpace(string(data)), "\n") + 1; n != 3 {
-		t.Errorf("%d satir var, 3 bekleniyordu", n)
+		t.Errorf("%d lines present, want 3", n)
 	}
 }
 
-// Cokme aninda yarim yazilmis son satir BEKLENEN durum. Kaydi bozuk sayip
-// kosuyu dusurmek, kurtarilabilir bir durumu olumcul yapmak olurdu.
-// Ama sessiz de gecilmiyor: sayiliyor.
+// A last line half-written during a crash is an EXPECTED state. Treating the
+// ledger as corrupt and failing the run would turn a recoverable state into a
+// fatal one. But it doesn't pass silently either: it is counted.
 func TestCorruptLinesAreSkippedNotFatal(t *testing.T) {
 	out := t.TempDir()
 	path := filepath.Join(out, FileName)
 	good, _ := json.Marshal(Entry{
-		SourcePage: "https://s/1", Dir: "d", Filename: "iyi.bin", Path: "d/iyi.bin",
+		SourcePage: "https://s/1", Dir: "d", Filename: "good.bin", Path: "d/good.bin",
 	})
 	content := string(good) + "\n" +
-		"{bu gecerli json degil\n" +
+		"{this is not valid json\n" +
 		"\n" +
-		`{"source_page":"https://s/2","dir":"d"}` + "\n" + // filename yok
-		`{"source_page":"https://s/3","dir":"d","filename":"yarim.bin"` // kapanmamis
+		`{"source_page":"https://s/2","dir":"d"}` + "\n" + // no filename
+		`{"source_page":"https://s/3","dir":"d","filename":"half.bin"` // unterminated
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	l, err := Open(out)
 	if err != nil {
-		t.Fatalf("bozuk satir kosuyu dusurmemeliydi: %v", err)
+		t.Fatalf("a corrupt line should not have failed the run: %v", err)
 	}
 	defer l.Close()
 
 	if l.Len() != 1 {
-		t.Fatalf("Len = %d, yalnizca iyi satir okunmaliydi", l.Len())
+		t.Fatalf("Len = %d, only the good line should have been read", l.Len())
 	}
-	if _, ok := l.Lookup("d", "https://s/1", "iyi.bin"); !ok {
-		t.Error("iyi satir kaybedildi")
+	if _, ok := l.Lookup("d", "https://s/1", "good.bin"); !ok {
+		t.Error("the good line was lost")
 	}
-	// Bos satir sayilmiyor; diger uc satir bozuk.
+	// The empty line isn't counted; the other three lines are corrupt.
 	if l.Skipped() != 3 {
-		t.Errorf("Skipped = %d, 3 bekleniyordu", l.Skipped())
+		t.Errorf("Skipped = %d, want 3", l.Skipped())
 	}
 }
 
-// Uzun dosya adlari ve yollar varsayilan 64 KB tarayici sinirini asabilir.
+// The first entry added AFTER a half-written last line must not be lost.
+// Previously the new line was glued onto the half line; together they formed
+// one corrupt line and the new entry could not be read on the next open
+// either.
+func TestAddAfterTruncatedLastLineSurvivesReopen(t *testing.T) {
+	out := t.TempDir()
+	path := filepath.Join(out, FileName)
+	good, _ := json.Marshal(Entry{SourcePage: "https://s/1", Filename: "a.bin", Path: "a.bin"})
+	content := string(good) + "\n" + `{"source_page":"https://s/2","fil` // cut off by a crash
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Add(Entry{SourcePage: "https://s/3", Filename: "c.bin", Path: "c.bin"}); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+
+	l2, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	if _, ok := l2.Lookup("", "https://s/3", "c.bin"); !ok {
+		t.Error("the entry added after the half line was lost on reopen")
+	}
+	if l2.Len() != 2 {
+		t.Errorf("Len = %d, want 2", l2.Len())
+	}
+	if l2.Skipped() != 1 {
+		t.Errorf("Skipped = %d, only the half line should be counted", l2.Skipped())
+	}
+}
+
+// Long file names and paths can exceed the default 64 KB scanner limit.
 func TestLongLinesAreRead(t *testing.T) {
 	out := t.TempDir()
 	long := strings.Repeat("u", 200000)
@@ -193,7 +232,7 @@ func TestLongLinesAreRead(t *testing.T) {
 	}
 	defer l.Close()
 	if l.Len() != 1 {
-		t.Fatalf("uzun satir okunamadi (Len=%d, Skipped=%d)", l.Len(), l.Skipped())
+		t.Fatalf("the long line could not be read (Len=%d, Skipped=%d)", l.Len(), l.Skipped())
 	}
 }
 
@@ -204,7 +243,7 @@ func TestAddRequiresFilename(t *testing.T) {
 	}
 	defer l.Close()
 	if err := l.Add(Entry{SourcePage: "https://s", Dir: "d"}); err == nil {
-		t.Fatal("dosya adi olmadan kayit kabul edildi")
+		t.Fatal("an entry without a file name was accepted")
 	}
 }
 
@@ -217,15 +256,15 @@ func TestAddAfterCloseFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := l.Add(Entry{Filename: "f.bin"}); err == nil {
-		t.Fatal("kapali kayda yazildi")
+		t.Fatal("wrote to a closed ledger")
 	}
-	// Close idempotent olmali.
+	// Close must be idempotent.
 	if err := l.Close(); err != nil {
-		t.Errorf("ikinci Close hata verdi: %v", err)
+		t.Errorf("second Close returned an error: %v", err)
 	}
 }
 
-// Indirmeler esanzamanli; kayit da esanzamanli yazilacak.
+// Downloads run concurrently; the ledger will be written concurrently too.
 func TestConcurrentAdd(t *testing.T) {
 	out := t.TempDir()
 	l, err := Open(out)
@@ -255,34 +294,34 @@ func TestConcurrentAdd(t *testing.T) {
 		}
 	}
 	if l.Len() != n {
-		t.Fatalf("Len = %d, %d bekleniyordu", l.Len(), n)
+		t.Fatalf("Len = %d, want %d", l.Len(), n)
 	}
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Satirlar birbirine karismamis olmali: her satir gecerli JSON.
+	// Lines must not be interleaved: every line is valid JSON.
 	l2, err := Open(out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l2.Close()
 	if l2.Skipped() != 0 {
-		t.Errorf("%d satir bozulmus; esanzamanli yazim satirlari karistiriyor", l2.Skipped())
+		t.Errorf("%d lines corrupted; concurrent writes interleave lines", l2.Skipped())
 	}
 	if l2.Len() != n {
-		t.Errorf("yeniden acilista Len = %d, %d bekleniyordu", l2.Len(), n)
+		t.Errorf("Len on reopen = %d, want %d", l2.Len(), n)
 	}
 }
 
 func TestOpenFailsOnUnusableRoot(t *testing.T) {
-	// Var olan bir DOSYAyi cikti koku olarak vermek hata vermeli; sessizce
-	// kayitsiz devam etmek idempotence'i sessizce kapatmak olurdu.
-	f := filepath.Join(t.TempDir(), "dosya")
+	// Giving an existing FILE as the output root must fail; silently
+	// continuing without a ledger would silently switch off idempotence.
+	f := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Open(f); err == nil {
-		t.Fatal("dosya yolunda Open basarili oldu")
+		t.Fatal("Open succeeded on a file path")
 	}
 }

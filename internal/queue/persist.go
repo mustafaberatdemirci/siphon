@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 )
 
-// stateVersion, kuyruk dosyasının biçim sürümü. Bilinmeyen sürüm okunmaz:
-// sessizce yanlış yorumlamaktansa boş kuyrukla başlamak ve söylemek daha iyi.
+// stateVersion is the format version of the queue file. An unknown version
+// isn't read: starting with an empty queue and saying so beats silently
+// misinterpreting it.
 const stateVersion = 1
 
 type stateFile struct {
@@ -17,24 +18,24 @@ type stateFile struct {
 	Jobs    []*Job `json:"jobs"`
 }
 
-// load, kuyruk dosyasını okur. Dosya yoksa boş liste ve nil hata.
+// load reads the queue file. If the file doesn't exist: empty list and nil error.
 func load(path string) ([]*Job, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("kuyruk okunamadı: %w", err)
+		return nil, fmt.Errorf("could not read the queue: %w", err)
 	}
 	var sf stateFile
 	if err := json.Unmarshal(data, &sf); err != nil {
-		return nil, fmt.Errorf("kuyruk dosyası bozuk: %w", err)
+		return nil, fmt.Errorf("the queue file is corrupt: %w", err)
 	}
 	if sf.Version != stateVersion {
-		return nil, fmt.Errorf("kuyruk dosyası sürüm %d, bu sürüm %d bekliyor", sf.Version, stateVersion)
+		return nil, fmt.Errorf("the queue file is version %d, this version expects %d", sf.Version, stateVersion)
 	}
-	// Kapanış anında "running" olan işler kaldığı yerden DEVAM ETMELİ:
-	// kullanıcı durdurmadı, uygulama kapandı. Kuyruğa geri konuyor.
+	// Jobs that were "running" at shutdown MUST CONTINUE where they left off:
+	// the user didn't stop them, the app closed. They are put back in the queue.
 	for _, j := range sf.Jobs {
 		if j.State == StateRunning {
 			j.State = StateQueued
@@ -43,8 +44,8 @@ func load(path string) ([]*Job, error) {
 	return sf.Jobs, nil
 }
 
-// save, kuyruğu ATOMİK yazar: geçici dosya + rename. Yarım yazılmış bir
-// kuyruk dosyası bir sonraki açılışta tüm listeyi kaybettirirdi.
+// save writes the queue ATOMICALLY: temp file + rename. A half-written queue
+// file would lose the whole list on the next launch.
 func save(path string, jobs []*Job) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -60,9 +61,9 @@ func save(path string, jobs []*Job) error {
 	return os.Rename(tmp, path)
 }
 
-// DefaultStatePath, kuyruk dosyasının varsayılan yeri: kullanıcının config
-// klasörü (Windows'ta %AppData%\Siphon). Çıktı klasörüne yazılmıyor: kuyruk
-// uygulama seviyesinde, işler farklı çıktı klasörlerine gidebilir.
+// DefaultStatePath is the default location of the queue file: the user's
+// config folder (%AppData%\Siphon on Windows). It isn't written to the output
+// folder: the queue is app-level, jobs can go to different output folders.
 func DefaultStatePath() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {

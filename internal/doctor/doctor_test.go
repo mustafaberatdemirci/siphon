@@ -12,8 +12,8 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// fakeResolver, site.Resolver arayüzünü karşılayan asgari bir taklit.
-// doctor yalnızca Diagnose'u çağırıyor; geri kalanı sözleşme gereği var.
+// fakeResolver is a minimal imitation satisfying the site.Resolver interface.
+// doctor only calls Diagnose; the rest exists because of the contract.
 type fakeResolver struct {
 	results []site.LayerResult
 	err     error
@@ -45,46 +45,46 @@ func TestReportWorst(t *testing.T) {
 		r    Report
 		want site.LayerStatus
 	}{
-		{"hepsi OK", Report{Results: []site.LayerResult{
+		{"all OK", Report{Results: []site.LayerResult{
 			ok(site.LayerDNS, "a"), ok(site.LayerTLS, "b"),
 		}}, site.StatusOK},
-		{"bir WARN", Report{Results: []site.LayerResult{
+		{"one WARN", Report{Results: []site.LayerResult{
 			ok(site.LayerDNS, "a"),
 			{Layer: site.LayerCDN, Status: site.StatusWarn},
 		}}, site.StatusWarn},
-		{"WARN ve FAIL -> FAIL", Report{Results: []site.LayerResult{
+		{"WARN and FAIL -> FAIL", Report{Results: []site.LayerResult{
 			{Layer: site.LayerCDN, Status: site.StatusWarn},
 			{Layer: site.LayerDNS, Status: site.StatusFail},
 		}}, site.StatusFail},
-		{"Diagnose hatasi -> FAIL", Report{Err: errors.New("canary yok")}, site.StatusFail},
-		{"bos rapor -> OK", Report{}, site.StatusOK},
+		{"Diagnose error -> FAIL", Report{Err: errors.New("no canary")}, site.StatusFail},
+		{"empty report -> OK", Report{}, site.StatusOK},
 	}
 	for _, c := range cases {
 		if got := c.r.Worst(); got != c.want {
-			t.Errorf("%s: Worst() = %v, beklenen %v", c.name, got, c.want)
+			t.Errorf("%s: Worst() = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
 
 func TestRunCallsDiagnosePerSite(t *testing.T) {
 	a := &fakeResolver{results: []site.LayerResult{ok(site.LayerDNS, "a")}}
-	b := &fakeResolver{err: errors.New("patladi")}
+	b := &fakeResolver{err: errors.New("blew up")}
 
 	reports := Run(context.Background(), []Named{
-		{Name: "alfa", Resolver: a},
+		{Name: "alpha", Resolver: a},
 		{Name: "beta", Resolver: b},
 	})
 	if len(reports) != 2 {
-		t.Fatalf("%d rapor, 2 bekleniyordu", len(reports))
+		t.Fatalf("%d reports, want 2", len(reports))
 	}
 	if a.calls != 1 || b.calls != 1 {
-		t.Errorf("Diagnose cagri sayilari: a=%d b=%d", a.calls, b.calls)
+		t.Errorf("Diagnose call counts: a=%d b=%d", a.calls, b.calls)
 	}
-	if reports[0].Site != "alfa" || reports[1].Site != "beta" {
-		t.Errorf("site sirasi korunmadi: %q, %q", reports[0].Site, reports[1].Site)
+	if reports[0].Site != "alpha" || reports[1].Site != "beta" {
+		t.Errorf("site order not preserved: %q, %q", reports[0].Site, reports[1].Site)
 	}
 	if reports[1].Err == nil {
-		t.Error("Diagnose hatasi rapora tasinmadi")
+		t.Error("the Diagnose error was not carried into the report")
 	}
 }
 
@@ -93,41 +93,41 @@ func TestFormatOutputShape(t *testing.T) {
 	worst := Format(&buf, []Report{{
 		Site: "bunkr",
 		Results: []site.LayerResult{
-			{Layer: site.LayerDNS, Status: site.StatusOK, Detail: "4 adres", Evidence: "1.2.3.4"},
-			{Layer: site.LayerCDN, Status: site.StatusWarn, Detail: "yeni host", Evidence: "x.cdn.cr"},
+			{Layer: site.LayerDNS, Status: site.StatusOK, Detail: "4 addresses", Evidence: "1.2.3.4"},
+			{Layer: site.LayerCDN, Status: site.StatusWarn, Detail: "new host", Evidence: "x.cdn.cr"},
 		},
 	}})
 	out := buf.String()
 
-	for _, want := range []string{"bunkr", "DNS", "OK", "4 adres", "1.2.3.4", "CDN", "WARN", "x.cdn.cr"} {
+	for _, want := range []string{"bunkr", "DNS", "OK", "4 addresses", "1.2.3.4", "CDN", "WARN", "x.cdn.cr"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("cikti %q icermiyor:\n%s", want, out)
+			t.Errorf("output doesn't contain %q:\n%s", want, out)
 		}
 	}
-	// Evidence ayri bir satirda ve girintili olmali: teshis satirinin
-	// okunabilirligi bu aracin butun amaci.
+	// Evidence must be on its own line and indented: the readability of a
+	// diagnostic line is this tool's whole point.
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 5 {
-		t.Fatalf("%d satir, 5 bekleniyordu:\n%s", len(lines), out)
+		t.Fatalf("%d lines, want 5:\n%s", len(lines), out)
 	}
 	if !strings.Contains(lines[2], "1.2.3.4") || strings.Contains(lines[2], "DNS") {
-		t.Errorf("Evidence kendi satirinda olmali: %q", lines[2])
+		t.Errorf("Evidence must be on its own line: %q", lines[2])
 	}
 	if worst != site.StatusWarn {
-		t.Errorf("worst = %v, WARN bekleniyordu", worst)
+		t.Errorf("worst = %v, want WARN", worst)
 	}
 }
 
-// WARN cikisi FAIL'e yukseltmemeli: "CDN bir kapi degil sinyal" kurali ancak
-// WARN basarisizlik sayilmazsa anlam tasiyor.
+// WARN must not escalate the exit to FAIL: the "CDN is a signal, not a gate"
+// rule only means something if WARN doesn't count as failure.
 func TestFormatWarnDoesNotBecomeFail(t *testing.T) {
 	var buf bytes.Buffer
 	worst := Format(&buf, []Report{
 		{Site: "a", Results: []site.LayerResult{{Layer: site.LayerCDN, Status: site.StatusWarn}}},
-		{Site: "b", Results: []site.LayerResult{ok(site.LayerDNS, "tamam")}},
+		{Site: "b", Results: []site.LayerResult{ok(site.LayerDNS, "fine")}},
 	})
 	if worst != site.StatusWarn {
-		t.Fatalf("worst = %v, WARN bekleniyordu", worst)
+		t.Fatalf("worst = %v, want WARN", worst)
 	}
 }
 
@@ -136,21 +136,21 @@ func TestFormatFailWinsAcrossSites(t *testing.T) {
 	worst := Format(&buf, []Report{
 		{Site: "a", Results: []site.LayerResult{{Layer: site.LayerCDN, Status: site.StatusWarn}}},
 		{Site: "b", Results: []site.LayerResult{{Layer: site.LayerDNS, Status: site.StatusFail}}},
-		{Site: "c", Results: []site.LayerResult{ok(site.LayerDNS, "tamam")}},
+		{Site: "c", Results: []site.LayerResult{ok(site.LayerDNS, "fine")}},
 	})
 	if worst != site.StatusFail {
-		t.Fatalf("worst = %v, FAIL bekleniyordu", worst)
+		t.Fatalf("worst = %v, want FAIL", worst)
 	}
 }
 
 func TestFormatHandlesDiagnoseError(t *testing.T) {
 	var buf bytes.Buffer
-	worst := Format(&buf, []Report{{Site: "bunkr", Err: errors.New("canary listesi bos")}})
+	worst := Format(&buf, []Report{{Site: "bunkr", Err: errors.New("canary list is empty")}})
 	if worst != site.StatusFail {
-		t.Errorf("worst = %v, FAIL bekleniyordu", worst)
+		t.Errorf("worst = %v, want FAIL", worst)
 	}
-	if !strings.Contains(buf.String(), "canary listesi bos") {
-		t.Errorf("hata mesaji basilmadi:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "canary list is empty") {
+		t.Errorf("the error message was not printed:\n%s", buf.String())
 	}
 }
 
@@ -158,12 +158,12 @@ func TestFormatHandlesEmptyResults(t *testing.T) {
 	var buf bytes.Buffer
 	worst := Format(&buf, []Report{{Site: "bunkr"}})
 	if worst != site.StatusOK {
-		// Sonuc yoksa WARN basiliyor ama Worst() OK doner; cikis kodunu
-		// bozmamak icin bu kasitli.
+		// Without results WARN is printed but Worst() returns OK; this is
+		// deliberate so the exit code isn't affected.
 		t.Logf("worst = %v", worst)
 	}
-	if !strings.Contains(buf.String(), "teşhis sonucu yok") {
-		t.Errorf("bos sonuc bildirilmedi:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "no diagnosis results") {
+		t.Errorf("empty results were not reported:\n%s", buf.String())
 	}
 }
 
@@ -173,29 +173,29 @@ func TestRecorderSavesRealBytes(t *testing.T) {
 	dir := t.TempDir()
 	rec := &Recorder{Dir: dir}
 
-	body := []byte("<html>gercek govde</html>")
+	body := []byte("<html>real body</html>")
 	rec.For("bunkr")("canary.html", body)
 
 	saved := rec.Saved()
 	if len(saved) != 1 {
-		t.Fatalf("%d dosya kaydedildi, 1 bekleniyordu: %v", len(saved), saved)
+		t.Fatalf("%d files saved, want 1: %v", len(saved), saved)
 	}
 	got, err := os.ReadFile(saved[0])
 	if err != nil {
-		t.Fatalf("kayit okunamadi: %v", err)
+		t.Fatalf("could not read the recording: %v", err)
 	}
 	if !bytes.Equal(got, body) {
-		t.Errorf("kaydedilen icerik farkli: %q", got)
+		t.Errorf("saved content differs: %q", got)
 	}
 
-	// Ad hem siteyi hem etiketi tasimali: alti ay sonra hangi kaydin neye ait
-	// oldugunu bilmek gerekiyor.
+	// The name must carry both the site and the label: six months later you
+	// need to know which recording belongs to what.
 	base := filepath.Base(saved[0])
 	if !strings.Contains(base, "bunkr") || !strings.Contains(base, "canary.html") {
-		t.Errorf("dosya adi eksik bilgi tasiyor: %q", base)
+		t.Errorf("file name carries incomplete information: %q", base)
 	}
 	if len(rec.Errs()) != 0 {
-		t.Errorf("beklenmeyen hatalar: %v", rec.Errs())
+		t.Errorf("unexpected errors: %v", rec.Errs())
 	}
 }
 
@@ -207,17 +207,17 @@ func TestRecorderPerSiteLabels(t *testing.T) {
 
 	saved := rec.Saved()
 	if len(saved) != 2 {
-		t.Fatalf("%d dosya, 2 bekleniyordu", len(saved))
+		t.Fatalf("%d files, want 2", len(saved))
 	}
 	joined := strings.Join(saved, " ")
 	for _, want := range []string{"bunkr", "pixeldrain"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("%q adli kayit yok: %v", want, saved)
+			t.Errorf("no recording named %q: %v", want, saved)
 		}
 	}
 }
 
-// Bos govde kaydedilmemeli: sifir baytlik bir dosya diff'te gurultu.
+// An empty body must not be recorded: a zero-byte file is noise in a diff.
 func TestRecorderSkipsEmptyBodies(t *testing.T) {
 	dir := t.TempDir()
 	cfg := site.SiteConfig{Record: (&Recorder{Dir: dir}).For("bunkr")}
@@ -229,31 +229,32 @@ func TestRecorderSkipsEmptyBodies(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(entries) != 0 {
-		t.Fatalf("%d dosya olustu, bos govde kaydedilmemeliydi", len(entries))
+		t.Fatalf("%d files created, an empty body should not have been recorded", len(entries))
 	}
 }
 
-// Kayit hatasi teshisi DUSURMEZ: asil is katman raporu, kayit yardimci.
+// A recording error does NOT fail the diagnosis: the real job is the layer
+// report, recording is a helper.
 func TestRecorderCollectsErrorsWithoutPanicking(t *testing.T) {
-	// Var olan bir DOSYAyi klasor olarak kullanmaya zorla.
-	f := filepath.Join(t.TempDir(), "dosya")
+	// Force using an existing FILE as the folder.
+	f := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rec := &Recorder{Dir: f}
-	rec.For("bunkr")("canary.html", []byte("veri"))
+	rec.For("bunkr")("canary.html", []byte("data"))
 
 	if len(rec.Saved()) != 0 {
-		t.Error("hata durumunda dosya kaydedilmis gorunuyor")
+		t.Error("a file looks saved despite the error")
 	}
 	if len(rec.Errs()) == 0 {
-		t.Error("kayit hatasi toplanmadi")
+		t.Error("the recording error was not collected")
 	}
 }
 
 func TestRecorderDefaultDir(t *testing.T) {
-	// Dir bos ise DefaultDir kullanilmali. Gercekten yazmamak icin cwd'yi
-	// gecici klasore tasi.
+	// With an empty Dir, DefaultDir must be used. Move the cwd to a temp
+	// folder so nothing is really written.
 	old, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -265,12 +266,12 @@ func TestRecorderDefaultDir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(old) })
 
 	rec := &Recorder{}
-	rec.For("bunkr")("canary.html", []byte("veri"))
+	rec.For("bunkr")("canary.html", []byte("data"))
 	if len(rec.Saved()) != 1 {
-		t.Fatalf("kaydedilmedi: %v / %v", rec.Saved(), rec.Errs())
+		t.Fatalf("not saved: %v / %v", rec.Saved(), rec.Errs())
 	}
 	if !strings.Contains(rec.Saved()[0], DefaultDir) {
-		t.Errorf("DefaultDir kullanilmadi: %q", rec.Saved()[0])
+		t.Errorf("DefaultDir was not used: %q", rec.Saved()[0])
 	}
 }
 
@@ -279,13 +280,13 @@ func TestSafeFilename(t *testing.T) {
 		{"bunkr", "bunkr"},
 		{"canary.html", "canary.html"},
 		{"a/b\\c", "a-b-c"},
-		{"boşluk var", "bo-luk-var"},
-		{"", "kayit"},
-		{"   ", "kayit"},
+		{"spaced naïve", "spaced-na-ve"},
+		{"", "record"},
+		{"   ", "record"},
 	}
 	for _, c := range cases {
 		if got := safe(c.in); got != c.want {
-			t.Errorf("safe(%q) = %q, beklenen %q", c.in, got, c.want)
+			t.Errorf("safe(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

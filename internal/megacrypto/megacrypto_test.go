@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// Bu dosyadaki testler sifreleme/cozme/MAC'in KENDI ICINDE tutarli oldugunu
-// kanitliyor. Semanin mega'nin gercek semasiyla ayni oldugu canli bir dosyayla
-// dogrulanmak zorunda; o adim mega_test.go'da degil, elle yapilan olcumde.
+// The tests in this file prove that encryption/decryption/MAC are consistent
+// WITH THEMSELVES. That the scheme matches mega's real scheme has to be
+// verified against a live file; that step is a manual measurement, not part
+// of mega_test.go.
 
 func randBytes(t *testing.T, n int) []byte {
 	t.Helper()
@@ -20,8 +21,8 @@ func randBytes(t *testing.T, n int) []byte {
 	return b
 }
 
-// testMegaKey, rastgele anahtar+nonce uretir ve duz metnin meta-MAC'iyle
-// paketler: linkte gelen 32 baytin birebir karsiligi.
+// testMegaKey generates a random key+nonce and packs it with the plaintext's
+// meta-MAC: the exact equivalent of the 32 bytes that arrive in a link.
 func testMegaKey(t *testing.T, plain []byte) (Key, []byte) {
 	t.Helper()
 	aesKey := randBytes(t, 16)
@@ -45,10 +46,10 @@ func TestMegaKeyPackUnpackRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(k.AES, aesKey) || !bytes.Equal(k.Nonce, nonce) || !bytes.Equal(k.MAC, mac) {
-		t.Fatal("pack/unpack anahtari bozdu")
+		t.Fatal("pack/unpack corrupted the key")
 	}
 	if _, err := UnpackFileKey(make([]byte, 16)); err == nil {
-		t.Error("16 baytlik dosya anahtari kabul edildi")
+		t.Error("a 16-byte file key was accepted")
 	}
 }
 
@@ -64,7 +65,8 @@ func TestMegaB64Variants(t *testing.T) {
 
 func TestMegaAttrsRoundTripAndWrongKey(t *testing.T) {
 	key := randBytes(t, 16)
-	at, err := EncryptAttrs(key, Attrs{Name: "Tatil Videosu — Özgür & Aslı.mp4"})
+	const name = "Holiday Video — Zoë & Chloé.mp4"
+	at, err := EncryptAttrs(key, Attrs{Name: name})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,12 +74,13 @@ func TestMegaAttrsRoundTripAndWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Name != "Tatil Videosu — Özgür & Aslı.mp4" {
-		t.Errorf("ad = %q", a.Name)
+	if a.Name != name {
+		t.Errorf("name = %q", a.Name)
 	}
-	// Yanlis anahtar "MEGA" onekini uretmez: hata net olmali, cop ad degil.
+	// A wrong key does not produce the "MEGA" prefix: the error must be clear,
+	// not a garbage name.
 	if _, err := DecryptAttrs(randBytes(t, 16), at); err == nil {
-		t.Error("yanlis anahtarla oznitelik 'cozuldu'")
+		t.Error("attributes were 'decrypted' with a wrong key")
 	}
 }
 
@@ -93,12 +96,12 @@ func TestMegaNodeKeyRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(dec, nodeKey) {
-		t.Fatal("dugum anahtari bozuldu")
+		t.Fatal("node key was corrupted")
 	}
 }
 
-// Parca sinirlari mega'nin duzenine gore: 128K, 384K, 768K, 1280K, 1920K,
-// 2688K, 3584K, 4608K, sonra her 1M.
+// Chunk boundaries follow mega's layout: 128K, 384K, 768K, 1280K, 1920K,
+// 2688K, 3584K, 4608K, then every 1M.
 func TestMegaChunkBoundaries(t *testing.T) {
 	const k = 1024
 	cases := []struct{ pos, end int64 }{
@@ -110,19 +113,19 @@ func TestMegaChunkBoundaries(t *testing.T) {
 		{4608*k - 1, 4608 * k},
 		{4608 * k, 5632 * k},
 		{5632 * k, 6656 * k},
-		// 4.5 MiB'den sonra sinirlar TAM MiB'e hizali DEGIL: 4608K + n*1024K.
-		// 100 MiB = 102400K, onu iceren parca 102912K'da (100.5 MiB) biter.
+		// After 4.5 MiB the boundaries are NOT aligned to whole MiB: 4608K + n*1024K.
+		// 100 MiB = 102400K; the chunk containing it ends at 102912K (100.5 MiB).
 		{100 * 1024 * k, 102912 * k},
 	}
 	for _, c := range cases {
 		if got := ChunkEnd(c.pos); got != c.end {
-			t.Errorf("ChunkEnd(%d) = %d, %d bekleniyordu", c.pos, got, c.end)
+			t.Errorf("ChunkEnd(%d) = %d, want %d", c.pos, got, c.end)
 		}
 	}
 }
 
-// Tam akis: sifrele -> coz -> dogrula. Boyut, parca sinirlarini ve yarim
-// bloklari zorlayacak sekilde secildi (birden fazla parca, 16'nin kati degil).
+// Full stream: encrypt -> decrypt -> verify. The size is chosen to exercise
+// chunk boundaries and partial blocks (several chunks, not a multiple of 16).
 func TestMegaStreamRoundTrip(t *testing.T) {
 	plain := randBytes(t, 300*1024+7)
 	key, _ := testMegaKey(t, plain)
@@ -140,14 +143,14 @@ func TestMegaStreamRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, plain) {
-		t.Fatal("cozulen icerik duz metinle ayni degil")
+		t.Fatal("decrypted content differs from the plaintext")
 	}
 	if err := ms.Verify(); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 }
 
-// Dosya tam bir parca sinirinda bitiyorsa bos parca katlanmamali.
+// If the file ends exactly on a chunk boundary, no empty chunk may be folded in.
 func TestMegaStreamExactChunkBoundary(t *testing.T) {
 	plain := randBytes(t, 128*1024)
 	key, _ := testMegaKey(t, plain)
@@ -161,8 +164,9 @@ func TestMegaStreamExactChunkBoundary(t *testing.T) {
 	}
 }
 
-// Tek bir bayt degisirse dogrulama DUSMELI. Bu, bozuk indirmenin "basarili"
-// sayilmasini engelleyen tek kontrol: mega sha256 vermiyor.
+// If a single byte changes, verification MUST fail. This is the only check
+// that keeps a corrupt download from counting as "successful": mega does not
+// provide sha256.
 func TestMegaStreamDetectsTampering(t *testing.T) {
 	plain := randBytes(t, 200*1024)
 	key, _ := testMegaKey(t, plain)
@@ -174,13 +178,14 @@ func TestMegaStreamDetectsTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := ms.Verify(); err == nil {
-		t.Fatal("bozuk icerik dogrulamayi gecti")
+		t.Fatal("corrupted content passed verification")
 	}
 }
 
-// Resume: akis rastgele bir yerde kesilip kaydedilen durumla devam edince
-// hem icerik hem MAC dogru olmali. Kesme noktalari kasitli olarak zor secildi:
-// blok ortasi, parca ortasi, tam parca siniri, ilk bayttan sonra.
+// Resume: when the stream is cut at an arbitrary point and continued with the
+// saved state, both the content and the MAC must be correct. The cut points
+// are deliberately awkward: mid-block, mid-chunk, exactly on a chunk
+// boundary, right after the first byte.
 func TestMegaStreamResumeAtAwkwardOffsets(t *testing.T) {
 	plain := randBytes(t, 400*1024+5)
 	key, _ := testMegaKey(t, plain)
@@ -196,21 +201,22 @@ func TestMegaStreamResumeAtAwkwardOffsets(t *testing.T) {
 
 		second, err := NewStream(key, int64(cut), saved, bytes.NewReader(enc[cut:]))
 		if err != nil {
-			t.Fatalf("cut=%d: resume kurulamadi: %v", cut, err)
+			t.Fatalf("cut=%d: could not set up resume: %v", cut, err)
 		}
 		tail, _ := io.ReadAll(second)
 
 		if got := append(head, tail...); !bytes.Equal(got, plain) {
-			t.Fatalf("cut=%d: resume sonrasi icerik bozuk", cut)
+			t.Fatalf("cut=%d: content corrupted after resume", cut)
 		}
 		if err := second.Verify(); err != nil {
-			t.Fatalf("cut=%d: resume sonrasi Verify: %v", cut, err)
+			t.Fatalf("cut=%d: Verify after resume: %v", cut, err)
 		}
 	}
 }
 
-// Durum ile offset uyusmuyorsa cozucu KURULMAMALI; sessizce yanlis yerden
-// baslamak dogrulamanin en sonda dusmesi demek, yani tum indirme bosa gider.
+// If the state and the offset disagree the decoder must NOT be built;
+// silently starting from the wrong place means verification fails at the very
+// end, i.e. the whole download is wasted.
 func TestMegaStreamRejectsMismatchedState(t *testing.T) {
 	plain := randBytes(t, 50*1024)
 	key, _ := testMegaKey(t, plain)
@@ -221,18 +227,18 @@ func TestMegaStreamRejectsMismatchedState(t *testing.T) {
 	saved := first.State()
 
 	if _, err := NewStream(key, 2000, saved, bytes.NewReader(enc[2000:])); err == nil {
-		t.Error("durum 1000 derken 2000'den resume kabul edildi")
+		t.Error("resume from 2000 accepted while the state says 1000")
 	}
 	if _, err := NewStream(key, 1000, nil, bytes.NewReader(enc[1000:])); err == nil {
-		t.Error("durumsuz resume kabul edildi")
+		t.Error("resume without state accepted")
 	}
 	if _, err := NewStream(key, 1000, saved[:10], bytes.NewReader(enc[1000:])); err == nil {
-		t.Error("kirpilmis durum kabul edildi")
+		t.Error("truncated state accepted")
 	}
 }
 
-// State() her cagrida o ana kadar okunan bayt sayisini yansitmali: indirici
-// bunu offset ile ayni anda aliyor.
+// State() must reflect the number of bytes read so far on every call: the
+// downloader takes it together with the offset.
 func TestMegaStreamStateTracksPosition(t *testing.T) {
 	plain := randBytes(t, 10*1024)
 	key, _ := testMegaKey(t, plain)
@@ -249,10 +255,79 @@ func TestMegaStreamStateTracksPosition(t *testing.T) {
 			t.Fatal(rerr)
 		}
 		if probe.pos != read {
-			t.Fatalf("State pos=%d, okunan=%d", probe.pos, read)
+			t.Fatalf("State pos=%d, read=%d", probe.pos, read)
 		}
 		if err == io.EOF {
 			break
+		}
+	}
+}
+
+// A file fetched over several connections: every range must decrypt on its
+// own to exactly the bytes of the same range of the full plaintext, at the
+// awkward offsets too (mid-block, block boundary, chunk boundary, the end).
+func TestRangeReaderDecryptsAnyRange(t *testing.T) {
+	plain := randBytes(t, 3<<20+77)
+	k, _ := testMegaKey(t, plain)
+	enc, err := EncryptCTR(k.AES, k.Nonce, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range [][2]int64{
+		{0, 1}, {0, 16}, {5, 21}, {16, 32}, {15, 17},
+		{128 << 10, 384 << 10},       // exactly the first two chunk boundaries
+		{(128 << 10) - 3, 1<<20 + 5}, // straddles several chunks
+		{int64(len(plain)) - 9, int64(len(plain))},
+	} {
+		rd, err := NewRangeReader(k, r[0], bytes.NewReader(enc[r[0]:r[1]]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(rd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, plain[r[0]:r[1]]) {
+			t.Errorf("range %d-%d decrypted wrong", r[0], r[1])
+		}
+	}
+	if _, err := NewRangeReader(k, -1, bytes.NewReader(nil)); err == nil {
+		t.Error("a negative offset was accepted")
+	}
+}
+
+// The verifier must accept the right plaintext however it is written in
+// (one call or odd-sized pieces) and reject a single flipped bit.
+func TestVerifierOverFinishedPlaintext(t *testing.T) {
+	for _, size := range []int{0, 1, 128 << 10, 128<<10 + 1, 5<<20 + 13} {
+		plain := randBytes(t, size)
+		k, _ := testMegaKey(t, plain)
+
+		v, err := NewVerifier(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for p := plain; len(p) > 0; {
+			n := 7919 // prime: pieces never line up with blocks or chunks
+			if n > len(p) {
+				n = len(p)
+			}
+			_, _ = v.Write(p[:n])
+			p = p[n:]
+		}
+		if err := v.Verify(); err != nil {
+			t.Errorf("size %d: the right plaintext was rejected: %v", size, err)
+		}
+
+		if size == 0 {
+			continue
+		}
+		bad := append([]byte(nil), plain...)
+		bad[size/2] ^= 0x01
+		v2, _ := NewVerifier(k)
+		_, _ = v2.Write(bad)
+		if err := v2.Verify(); err == nil {
+			t.Errorf("size %d: a corrupted plaintext passed", size)
 		}
 	}
 }

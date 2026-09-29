@@ -11,36 +11,36 @@ import (
 func TestComponentForbiddenCharacters(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`a<b>c:d"e|f?g*h`, "a-b-c-d-e-f-g-h"},
-		{`yol/ayirici`, "yol-ayirici"},
-		{`ters\ayirici`, "ters-ayirici"},
-		// Kontrol karakterleri tamamen atilir, "-" koymak gurultu uretir.
-		{"sekme\tve\nsatir", "sekmevesatir"},
-		{"bel\x7fkarakteri", "belkarakteri"},
-		// Normal karakterler dokunulmaz; Turkce ve bosluk korunur.
-		{"Tatil 2026 - Özgür & Aslı.mp4", "Tatil 2026 - Özgür & Aslı.mp4"},
+		{`path/separator`, "path-separator"},
+		{`back\slash`, "back-slash"},
+		// Control characters are dropped entirely; a "-" would only add noise.
+		{"tab\tand\nnewline", "tabandnewline"},
+		{"del\x7fcharacter", "delcharacter"},
+		// Normal characters are untouched; non-ASCII and spaces are kept.
+		{"Holiday 2026 - Zoë & Chloé.mp4", "Holiday 2026 - Zoë & Chloé.mp4"},
 	}
 	for _, c := range cases {
 		if got := Component(c.in); got != c.want {
-			t.Errorf("Component(%q) = %q, beklenen %q", c.in, got, c.want)
+			t.Errorf("Component(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
 
-// Windows sondaki nokta ve bosluklari SESSIZCE atar. Biz atmazsak disk uzerinde
-// olusan ad, bizim sandigimiz addan farkli olur ve "zaten var" kontrolu ile
-// rename beklenmedik davranir.
+// Windows SILENTLY drops trailing dots and spaces. If we don't, the name
+// created on disk differs from the name we think we have, and the "already
+// exists" check and rename behave unexpectedly.
 func TestComponentTrailingDotsAndSpaces(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"dosya.", "dosya"},
-		{"dosya...", "dosya"},
-		{"dosya ", "dosya"},
-		{"dosya. . ", "dosya"},
-		{"  bastaki bosluk", "bastaki bosluk"},
-		{"dosya.txt", "dosya.txt"},
+		{"file.", "file"},
+		{"file...", "file"},
+		{"file ", "file"},
+		{"file. . ", "file"},
+		{"  leading space", "leading space"},
+		{"file.txt", "file.txt"},
 	}
 	for _, c := range cases {
 		if got := Component(c.in); got != c.want {
-			t.Errorf("Component(%q) = %q, beklenen %q", c.in, got, c.want)
+			t.Errorf("Component(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -48,40 +48,40 @@ func TestComponentTrailingDotsAndSpaces(t *testing.T) {
 func TestComponentEmptyAndDotNames(t *testing.T) {
 	for _, in := range []string{"", "   ", ".", "..", "...", ". . .", "\x00\x01"} {
 		if got := Component(in); got != "" {
-			t.Errorf("Component(%q) = %q, bos bekleniyordu", in, got)
+			t.Errorf("Component(%q) = %q, expected empty", in, got)
 		}
 	}
 }
 
-// Ayrilmis aygit adlariyla dosya acmak dosya degil AYGIT acar.
-// Eslestirme ilk noktadan oncesi uzerinden ve buyuk/kucuk harf duyarsiz.
+// Opening a file with a reserved device name opens a DEVICE, not a file.
+// Matching is on the part before the first dot, case-insensitive.
 func TestComponentReservedDeviceNames(t *testing.T) {
 	reservedInputs := []string{
 		"CON", "con", "Con", "PRN", "AUX", "NUL",
 		"COM1", "com9", "LPT1", "lpt9",
 		"CONIN$", "conout$",
 		"COM¹", "LPT³",
-		// Uzantili hali de ayrilmistir: CON.txt da aygita cozulur.
+		// With an extension it is reserved too: CON.txt also resolves to the device.
 		"CON.txt", "nul.mp4", "com1.tar.gz",
-		// Aygit adi cozumlemesinde sondaki bosluklar yok sayilir.
+		// Device name resolution ignores trailing spaces.
 		"CON .txt",
 	}
 	for _, in := range reservedInputs {
 		got := Component(in)
 		if !strings.HasPrefix(got, "_") {
-			t.Errorf("Component(%q) = %q, ayrilmis ad kacirilmadi", in, got)
+			t.Errorf("Component(%q) = %q, reserved name was not escaped", in, got)
 		}
 	}
 
-	// Ayrilmis OLMAYAN, benzeyen adlar dokunulmamali.
+	// Names that are NOT reserved but look alike must be left untouched.
 	safe := []string{
 		"CONSOLE", "console.txt", "COM", "COM10", "COM0", "LPT0",
 		"NULL", "nullable.json", "printer.txt", "auxiliary",
-		"my CON file.txt", // ilk noktadan oncesi "my CON file"
+		"my CON file.txt", // the part before the first dot is "my CON file"
 	}
 	for _, in := range safe {
 		if got := Component(in); got != in {
-			t.Errorf("Component(%q) = %q, degismemeliydi", in, got)
+			t.Errorf("Component(%q) = %q, should not have changed", in, got)
 		}
 	}
 }
@@ -93,14 +93,14 @@ func TestUTF16Len(t *testing.T) {
 	}{
 		{"", 0},
 		{"abc", 3},
-		{"Özgür", 5},      // BMP icinde, her rune 1 birim
-		{"日本語", 3},        // BMP icinde
-		{"\U0001F600", 2}, // emoji: BMP disi, vekil cift = 2 birim
+		{"Chloé", 5},      // inside the BMP, each rune is 1 unit
+		{"日本語", 3},        // inside the BMP
+		{"\U0001F600", 2}, // emoji: outside the BMP, surrogate pair = 2 units
 		{"a\U0001F600b", 4},
 	}
 	for _, c := range cases {
 		if got := utf16Len(c.in); got != c.want {
-			t.Errorf("utf16Len(%q) = %d, beklenen %d", c.in, got, c.want)
+			t.Errorf("utf16Len(%q) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
@@ -109,50 +109,50 @@ func TestComponentTruncatesToUTF16Limit(t *testing.T) {
 	long := strings.Repeat("a", 400) + ".mp4"
 	got := Component(long)
 	if n := utf16Len(got); n > MaxComponentUTF16 {
-		t.Fatalf("uzunluk %d, en fazla %d olmaliydi", n, MaxComponentUTF16)
+		t.Fatalf("length %d, should be at most %d", n, MaxComponentUTF16)
 	}
 	if filepath.Ext(got) != ".mp4" {
-		t.Errorf("uzanti korunmadi: %q", got)
+		t.Errorf("extension not kept: %q", got)
 	}
 	if !strings.Contains(got, "~") {
-		t.Errorf("kirpma soneki yok: %q", got)
+		t.Errorf("no truncation suffix: %q", got)
 	}
 }
 
-// Kirpma DETERMINISTIK olmak zorunda: aksi halde resume ve "zaten var"
-// kontrolu koşular arasinda calismaz.
+// Truncation MUST be deterministic: otherwise resume and the "already exists"
+// check don't work across runs.
 func TestTruncationIsDeterministic(t *testing.T) {
 	long := strings.Repeat("b", 500) + ".bin"
 	a := Component(long)
 	b := Component(long)
 	if a != b {
-		t.Fatalf("ayni girdi iki farkli cikti verdi:\n%q\n%q", a, b)
+		t.Fatalf("the same input produced two different outputs:\n%q\n%q", a, b)
 	}
 }
 
-// Ilk 255 karakteri AYNI olan iki uzun ad, kirpildiginda ayni ada donusurse
-// biri digerini ezer. Hash soneki bunu engellemek icin var.
+// If two long names whose first 255 characters are IDENTICAL truncate to the
+// same name, one overwrites the other. The hash suffix exists to prevent that.
 func TestTruncationAvoidsCollisionOnSharedPrefix(t *testing.T) {
 	prefix := strings.Repeat("c", 300)
-	a := Component(prefix + "-birinci.mp4")
-	b := Component(prefix + "-ikinci.mp4")
+	a := Component(prefix + "-first.mp4")
+	b := Component(prefix + "-second.mp4")
 	if a == b {
-		t.Fatalf("iki farkli uzun ad ayni kisa ada dusmus: %q", a)
+		t.Fatalf("two different long names truncated to the same short name: %q", a)
 	}
 	if utf16Len(a) > MaxComponentUTF16 || utf16Len(b) > MaxComponentUTF16 {
-		t.Fatal("kirpma sinira uymadi")
+		t.Fatal("truncation did not respect the limit")
 	}
 }
 
-// Emoji iceren uzun ad: vekil cift yarilmamali ve sinir asilmamali.
+// A long name with emoji: a surrogate pair must not be split and the limit must hold.
 func TestTruncationDoesNotSplitSurrogatePairs(t *testing.T) {
 	long := strings.Repeat("\U0001F600", 300) + ".png"
 	got := Component(long)
 	if n := utf16Len(got); n > MaxComponentUTF16 {
-		t.Fatalf("uzunluk %d, sinir %d", n, MaxComponentUTF16)
+		t.Fatalf("length %d, limit %d", n, MaxComponentUTF16)
 	}
 	if !utf8Valid(got) {
-		t.Fatalf("gecersiz UTF-8 uretildi: %q", got)
+		t.Fatalf("invalid UTF-8 produced: %q", got)
 	}
 }
 
@@ -165,47 +165,48 @@ func utf8Valid(s string) bool {
 	return true
 }
 
-// Patolojik "uzanti" (noktadan sonra cok uzun) butcenin tamamini yememeli.
+// A pathological "extension" (very long after the dot) must not eat the whole budget.
 func TestPathologicalExtensionIsDropped(t *testing.T) {
 	long := strings.Repeat("d", 100) + "." + strings.Repeat("e", 300)
 	got := Component(long)
 	if n := utf16Len(got); n > MaxComponentUTF16 {
-		t.Fatalf("uzunluk %d, sinir %d", n, MaxComponentUTF16)
+		t.Fatalf("length %d, limit %d", n, MaxComponentUTF16)
 	}
 }
 
-// Sinira tam oturan ad kirpilmamali.
+// A name that fits the limit exactly must not be truncated.
 func TestExactLimitIsNotTruncated(t *testing.T) {
 	exact := strings.Repeat("f", MaxComponentUTF16)
 	got := Component(exact)
 	if got != exact {
-		t.Fatalf("tam sinirdaki ad kirpildi: %d -> %d birim", MaxComponentUTF16, utf16Len(got))
+		t.Fatalf("a name exactly at the limit was truncated: %d -> %d units", MaxComponentUTF16, utf16Len(got))
 	}
 }
 
-// Gercek albumde gorulen bir ad: uzun, ozel karakterli, parantezli.
+// The shape of a name seen in a real album: long, with special characters
+// and parentheses, but valid as is.
 func TestRealWorldAlbumFilename(t *testing.T) {
-	in := "2024-01-02 - Family Therapy - Stella Barey - Play by the Rules (also known as Anal Therapy - Safe Sex with.mp4"
+	in := "2024-01-02 - Summer Trip - Lake District - Day by the Water (also known as Hiking Diary - Part One with.mp4"
 	got := Component(in)
 	if got != in {
-		t.Errorf("gecerli ad degistirildi:\n%q\n%q", in, got)
+		t.Errorf("a valid name was changed:\n%q\n%q", in, got)
 	}
 }
 
-// Albüm klasör adı da AYNI temizleyiciden gecer; ayri bir kod yolu olmamali.
+// The album folder name goes through the SAME sanitizer; there must be no
+// separate code path.
 func TestComponentUsedForDirectoryLabels(t *testing.T) {
-	if got := Component("Albüm: 2026 / Yaz"); got != "Albüm- 2026 - Yaz" {
-		t.Errorf("klasor adi = %q", got)
+	if got := Component("Album: 2026 / Summer"); got != "Album- 2026 - Summer" {
+		t.Errorf("folder name = %q", got)
 	}
 	if got := Component("NUL"); got != "_NUL" {
-		t.Errorf("ayrilmis klasor adi = %q", got)
+		t.Errorf("reserved folder name = %q", got)
 	}
 }
 
-// Entegrasyon: temizleyici gercekten diske yansiyor mu? Birim testler
-// Component'i kanitliyor ama Download'un onu cagirdigini kanitlamiyor.
-// Temizleme cagiranda olsaydi bir cagiran atlayabilirdi; bu test o baglantiyi
-// sabitliyor.
+// Integration: does the sanitizer really reach the disk? The unit tests prove
+// Component but not that Download calls it. If sanitizing lived in the
+// caller, a caller could skip it; this test pins that connection.
 func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
@@ -215,18 +216,18 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 		wantName        string
 		wantDir         string
 	}{
-		// Ayrilmis aygit adi: dosya degil AYGIT acilirdi.
+		// Reserved device name: a DEVICE would be opened, not a file.
 		{"CON.txt", "", "_CON.txt", ""},
-		// Yasak karakterler ve sondaki nokta.
-		{`kotu:ad?.mp4`, "", "kotu-ad-.mp4", ""},
-		{"sondaki nokta.mp4.", "", "sondaki nokta.mp4", ""},
-		// Klasor adi da ayni temizleyiciden gecer.
-		{"tamam.bin", "Albüm: Yaz / 2026", "tamam.bin", "Albüm- Yaz - 2026"},
+		// Forbidden characters and a trailing dot.
+		{`bad:name?.mp4`, "", "bad-name-.mp4", ""},
+		{"trailing dot.mp4.", "", "trailing dot.mp4", ""},
+		// The folder name goes through the same sanitizer.
+		{"ok.bin", "Album: Summer / 2026", "ok.bin", "Album- Summer - 2026"},
 	}
 
 	for _, c := range cases {
 		d := &Downloader{Client: srv.Client()}
-		it := testItem(srv.URL+"/veri.bin", c.rawName)
+		it := testItem(srv.URL+"/data.bin", c.rawName)
 		it.Dir = c.rawDir
 		it.SHA256 = payloadSHA()
 		if _, err := d.Download(context.Background(), out, it); err != nil {
@@ -234,17 +235,17 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 		}
 		want := filepath.Join(out, c.wantDir, c.wantName)
 		if _, err := os.Stat(want); err != nil {
-			t.Errorf("beklenen yol yok: %s (%v)", want, err)
+			t.Errorf("expected path missing: %s (%v)", want, err)
 		}
 	}
 
-	// 255 birim sinirini asan ad gercekten kisaltilmis halde diske inmeli.
+	// A name beyond the 255-unit limit must really land on disk shortened.
 	d := &Downloader{Client: srv.Client()}
 	long := strings.Repeat("z", 400) + ".mp4"
-	it := testItem(srv.URL+"/veri.bin", long)
+	it := testItem(srv.URL+"/data.bin", long)
 	it.SHA256 = payloadSHA()
 	if _, err := d.Download(context.Background(), out, it); err != nil {
-		t.Fatalf("uzun ad: %v", err)
+		t.Fatalf("long name: %v", err)
 	}
 	entries, err := os.ReadDir(out)
 	if err != nil {
@@ -254,20 +255,20 @@ func TestDownloadAppliesComponentSanitizer(t *testing.T) {
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), "zzz") {
 			found = true
-			// ASIL DEGISMEZ: nihai ad + ".part.state" de bilesen sinirina sigmali.
-			// Bu entegrasyon testi tam olarak bu hatayi buldu: temizleyici 255'i
-			// nihai ada harciyordu ve .part.state 266 birime cikip NTFS
-			// tarafindan reddediliyordu.
+			// THE REAL INVARIANT: the final name + ".part.state" must also fit
+			// the component limit. This integration test found exactly this
+			// bug: the sanitizer spent 255 on the final name and .part.state
+			// reached 266 units and was rejected by NTFS.
 			if n := utf16Len(e.Name()) + utf16Len(stateSuffix); n > MaxComponentUTF16 {
-				t.Errorf("ad + %q = %d birim, sinir %d (%q)",
+				t.Errorf("name + %q = %d units, limit %d (%q)",
 					stateSuffix, n, MaxComponentUTF16, e.Name())
 			}
 			if !strings.Contains(e.Name(), "~") {
-				t.Errorf("kirpma soneki diske yansimamis: %q", e.Name())
+				t.Errorf("the truncation suffix did not reach the disk: %q", e.Name())
 			}
 		}
 	}
 	if !found {
-		t.Error("uzun adli dosya diskte bulunamadi")
+		t.Error("the file with the long name was not found on disk")
 	}
 }

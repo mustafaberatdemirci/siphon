@@ -6,8 +6,8 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
-// tempDir, paylaşılan yardımcıya devrediyor. Aynı Windows temizlik sorunu
-// run testlerinde de var; iki kopya zamanla ayrışmıştı.
+// tempDir delegates to the shared helper. The run tests have the same Windows
+// cleanup problem; two copies had drifted apart over time.
 func tempDir(t *testing.T) string {
 	t.Helper()
 	return testutil.TempDir(t)

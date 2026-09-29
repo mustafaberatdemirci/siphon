@@ -11,8 +11,8 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 )
 
-// TestMain, bassiz bir Fyne uygulamasi kurar: bazi yardimcilar Fyne'a
-// dokunuyor ve calisan bir uygulama olmadan nil pointer panigi atiyor.
+// TestMain sets up a headless Fyne app: some helpers touch Fyne and panic
+// with a nil pointer without a running app.
 func TestMain(m *testing.M) {
 	test.NewApp()
 	os.Exit(m.Run())
@@ -22,23 +22,23 @@ func job(id string, st queue.State, done, size int64) queue.Job {
 	return queue.Job{ID: id, Filename: id + ".mp4", State: st, Done: done, Size: size}
 }
 
-// --- Gorunum modeli ---
+// --- View model ---
 
 func TestViewModelKeepsInsertionOrder(t *testing.T) {
 	vm := newViewModel()
 	vm.Apply(job("b", queue.StateQueued, 0, 10))
 	vm.Apply(job("a", queue.StateQueued, 0, 10))
-	vm.Apply(job("b", queue.StateRunning, 5, 10)) // guncelleme sirayi bozmamali
+	vm.Apply(job("b", queue.StateRunning, 5, 10)) // an update must not break the order
 	rows := vm.Rows()
 	if len(rows) != 2 || rows[0].Job.ID != "b" || rows[1].Job.ID != "a" {
-		t.Fatalf("sira bozuk: %+v", rows)
+		t.Fatalf("order broken: %+v", rows)
 	}
 	if rows[0].Job.State != queue.StateRunning {
-		t.Error("guncelleme uygulanmadi")
+		t.Error("the update was not applied")
 	}
 }
 
-// Hiz yalnizca calisan islerde olculur; duran isin hizi silinir.
+// Speed is only measured for running jobs; a stopped job's speed is cleared.
 func TestViewModelTracksRateOnlyWhileRunning(t *testing.T) {
 	vm := newViewModel()
 	now := time.Now()
@@ -48,16 +48,16 @@ func TestViewModelTracksRateOnlyWhileRunning(t *testing.T) {
 	vm.mu.Unlock()
 	r, _ := vm.Row(0)
 	if r.Rate <= 0 {
-		t.Fatalf("calisan isin hizi olculmedi: %v", r.Rate)
+		t.Fatalf("the running job's speed was not measured: %v", r.Rate)
 	}
 	vm.Apply(job("a", queue.StatePaused, 512<<10, 1<<20))
 	r, _ = vm.Row(0)
 	if r.Rate != 0 {
-		t.Fatalf("duraklayan isin hizi kaldi: %v", r.Rate)
+		t.Fatalf("the paused job's speed remained: %v", r.Rate)
 	}
 }
 
-// Replace, motordan gelen tam listeyle eslesir: kaldirilan is dusmeli.
+// Replace syncs with the full list from the engine: a removed job must drop.
 func TestViewModelReplaceDropsMissing(t *testing.T) {
 	vm := newViewModel()
 	vm.Apply(job("a", queue.StateQueued, 0, 10))
@@ -65,29 +65,29 @@ func TestViewModelReplaceDropsMissing(t *testing.T) {
 	vm.Replace([]queue.Job{job("b", queue.StateDone, 10, 10)})
 	rows := vm.Rows()
 	if len(rows) != 1 || rows[0].Job.ID != "b" || rows[0].Job.State != queue.StateDone {
-		t.Fatalf("Replace yanlis: %+v", rows)
+		t.Fatalf("Replace wrong: %+v", rows)
 	}
 }
 
-// Degisiklik bayragi: olay basina degil, periyodik cizim icin.
+// The change flag: for periodic drawing, not per event.
 func TestViewModelDirtyFlag(t *testing.T) {
 	vm := newViewModel()
 	if vm.TakeDirty() {
-		t.Fatal("bos modelde dirty")
+		t.Fatal("dirty on an empty model")
 	}
 	vm.Apply(job("a", queue.StateQueued, 0, 10))
 	if !vm.TakeDirty() {
-		t.Fatal("degisiklik sonrasi dirty degil")
+		t.Fatal("not dirty after a change")
 	}
 	if vm.TakeDirty() {
-		t.Fatal("bayrak sifirlanmadi")
+		t.Fatal("the flag was not reset")
 	}
 }
 
 func TestSummaryCountsAndTotalRate(t *testing.T) {
 	vm := newViewModel()
-	if got := vm.Summary(); !strings.Contains(got, "boş") {
-		t.Errorf("bos ozet: %q", got)
+	if got := vm.Summary(); !strings.Contains(got, "empty") {
+		t.Errorf("empty summary: %q", got)
 	}
 	now := time.Now()
 	vm.mu.Lock()
@@ -99,79 +99,80 @@ func TestSummaryCountsAndTotalRate(t *testing.T) {
 	vm.apply(job("e", queue.StateFailed, 0, 5), now)
 	vm.mu.Unlock()
 	got := vm.Summary()
-	for _, want := range []string{"1 aktif", "1 sırada", "1 duraklatıldı", "1 hata", "1 bitti", "MB/s"} {
+	for _, want := range []string{"1 active", "1 queued", "1 paused", "1 failed", "1 done", "MB/s"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("ozet %q icinde %q yok", got, want)
+			t.Errorf("%q missing from the summary %q", want, got)
 		}
 	}
 }
 
-// Bildirim, yenileme dongusunun ozetiyle ezilmemeli: kuyruk bosken kalici,
-// kuyruk doluyken ozetle yan yana ve 30 sn sonra ozete birakir.
+// A notice must not be overwritten by the refresh loop's summary: permanent
+// with an empty queue, next to the summary with a non-empty queue, and giving
+// way to the summary after 30 s.
 func TestStatusLineKeepsNoticeOverSummary(t *testing.T) {
 	vm := newViewModel()
 	vm.TakeDirty()
-	vm.Notify("Eklenemedi: klasör boş")
+	vm.Notify("Could not add: folder is empty")
 	if !vm.TakeDirty() {
-		t.Fatal("bildirim yeniden cizim istemedi")
+		t.Fatal("the notice did not ask for a redraw")
 	}
 	now := time.Now()
-	if got := vm.statusLine(now.Add(time.Hour)); got != "Eklenemedi: klasör boş" {
-		t.Errorf("bos kuyrukta bildirim kaybolmus: %q", got)
+	if got := vm.statusLine(now.Add(time.Hour)); got != "Could not add: folder is empty" {
+		t.Errorf("the notice was lost with an empty queue: %q", got)
 	}
 	vm.mu.Lock()
 	vm.apply(job("a", queue.StateQueued, 0, 5), now)
 	vm.mu.Unlock()
-	if got := vm.statusLine(now); !strings.HasPrefix(got, "Eklenemedi: klasör boş  ·  1 sırada") {
-		t.Errorf("dolu kuyrukta bildirim + ozet bekleniyordu: %q", got)
+	if got := vm.statusLine(now); !strings.HasPrefix(got, "Could not add: folder is empty  ·  1 queued") {
+		t.Errorf("notice + summary expected with a non-empty queue: %q", got)
 	}
-	if got := vm.statusLine(now.Add(noticeTTL + time.Second)); got != "1 sırada" {
-		t.Errorf("suresi dolan bildirim kalkmali: %q", got)
+	if got := vm.statusLine(now.Add(noticeTTL + time.Second)); got != "1 queued" {
+		t.Errorf("an expired notice must go away: %q", got)
 	}
 }
 
-// Kota bekleyen satir: saat ve kalan sure gorunur, ▶ ipucu var; sure bosken
-// "birazdan"; RetryAt yoksa dogrudan "simdi dene".
+// A row waiting for quota: the time and the time left are visible, there's a
+// ▶ hint; "shortly" when the wait is short; "try now" straight away without RetryAt.
 func TestWaitingMetaShowsRetryClock(t *testing.T) {
 	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
 	j := queue.Job{State: queue.StateWaiting, RetryAt: now.Add(5*time.Hour + 6*time.Minute)}
 	got := waitingMeta(j, now)
-	for _, want := range []string{"20:31", "5 sa 6 dk", "▶"} {
+	for _, want := range []string{"20:31", "5h 6m", "▶"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("%q icinde %q yok", got, want)
+			t.Errorf("%q missing from %q", want, got)
 		}
 	}
-	if got := waitingMeta(queue.Job{State: queue.StateWaiting, RetryAt: now.Add(20 * time.Second)}, now); !strings.Contains(got, "birazdan") {
-		t.Errorf("kisa bekleme: %q", got)
+	if got := waitingMeta(queue.Job{State: queue.StateWaiting, RetryAt: now.Add(20 * time.Second)}, now); !strings.Contains(got, "shortly") {
+		t.Errorf("short wait: %q", got)
 	}
-	if got := waitingMeta(queue.Job{State: queue.StateWaiting}, now); !strings.Contains(got, "şimdi dene") {
-		t.Errorf("RetryAt'siz: %q", got)
+	if got := waitingMeta(queue.Job{State: queue.StateWaiting}, now); !strings.Contains(got, "try now") {
+		t.Errorf("without RetryAt: %q", got)
 	}
 	if label, act := actionFor(queue.StateWaiting); label != "▶" || act != actionResume {
-		t.Errorf("bekleyen satirin dugmesi %q/%v", label, act)
+		t.Errorf("the waiting row's button is %q/%v", label, act)
 	}
 }
 
-// Bildirim govdesi: ne yapilacagi ve yapilmazsa ne olacagi.
+// The notification body: what to do and what happens if you don't.
 func TestQuotaHoldMessage(t *testing.T) {
 	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
 	got := quotaHoldMessage(now.Add(5*time.Hour+6*time.Minute), now)
-	for _, want := range []string{"VPN", "kendiliğinden", "20:31", "5 sa 6 dk"} {
+	for _, want := range []string{"VPN", "by themselves", "20:31", "5h 6m"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("%q icinde %q yok", got, want)
+			t.Errorf("%q missing from %q", want, got)
 		}
 	}
-	if got := quotaHoldMessage(time.Time{}, now); !strings.Contains(got, "kendiliğinden") || strings.Contains(got, "yeniden denenecek") {
-		t.Errorf("saatsiz mesaj: %q", got)
+	if got := quotaHoldMessage(time.Time{}, now); !strings.Contains(got, "by themselves") || strings.Contains(got, "retried") {
+		t.Errorf("message without a time: %q", got)
 	}
 }
 
-// Serit yalnizca kota bekleyen is varken; sayi, site ve en erken saat.
+// The banner only while jobs wait for quota; count, site and the earliest time.
 func TestQuotaBanner(t *testing.T) {
 	vm := newViewModel()
 	now := time.Date(2026, 9, 14, 15, 25, 0, 0, time.Local)
 	if got := vm.quotaBanner(now); got != "" {
-		t.Fatalf("bos kuyrukta serit: %q", got)
+		t.Fatalf("banner with an empty queue: %q", got)
 	}
 	vm.mu.Lock()
 	a := job("a", queue.StateWaiting, 0, 5)
@@ -183,9 +184,9 @@ func TestQuotaBanner(t *testing.T) {
 	vm.apply(job("c", queue.StateRunning, 1, 5), now)
 	vm.mu.Unlock()
 	got := vm.quotaBanner(now)
-	for _, want := range []string{"mega", "2 dosya", "VPN", "16:25", "1 sa"} {
+	for _, want := range []string{"mega", "2 files", "VPN", "16:25", "1h"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("%q icinde %q yok", got, want)
+			t.Errorf("%q missing from %q", want, got)
 		}
 	}
 	vm.mu.Lock()
@@ -194,50 +195,50 @@ func TestQuotaBanner(t *testing.T) {
 	vm.apply(b, now)
 	vm.mu.Unlock()
 	if got := vm.quotaBanner(now); got != "" {
-		t.Errorf("bekleyen kalmayinca serit kalkmadi: %q", got)
+		t.Errorf("the banner did not go away once nothing was waiting: %q", got)
 	}
 }
 
-// --- Satir bicimlendirme ---
+// --- Row formatting ---
 
 func TestRowMetaByState(t *testing.T) {
 	run := row{Job: job("a", queue.StateRunning, 20<<20, 100<<20), Rate: 10 << 20}
-	if got := rowMeta(run); !strings.Contains(got, "MB/s") || !strings.Contains(got, "kalan") {
-		t.Errorf("calisan satir: %q", got)
+	if got := rowMeta(run); !strings.Contains(got, "MB/s") || !strings.Contains(got, "left") {
+		t.Errorf("running row: %q", got)
 	}
-	// Boyut bilinmiyorken kalan sure UYDURULMAMALI.
+	// With an unknown size the time left must NOT BE MADE UP.
 	unk := row{Job: job("u", queue.StateRunning, 5<<20, -1), Rate: 1 << 20}
-	if got := rowMeta(unk); strings.Contains(got, "kalan") {
-		t.Errorf("boyutsuz satirda kalan sure: %q", got)
+	if got := rowMeta(unk); strings.Contains(got, "left") {
+		t.Errorf("time left on a row without a size: %q", got)
 	}
-	// Hiz bilinmiyorken "0 B/s" yazilmamali.
+	// With an unknown speed "0 B/s" must not be written.
 	slow := row{Job: job("s", queue.StateRunning, 1, 100), Rate: 0}
 	if got := rowMeta(slow); strings.Contains(got, "/s") {
-		t.Errorf("hizsiz satirda hiz: %q", got)
+		t.Errorf("speed on a row without a speed: %q", got)
 	}
 	failed := job("f", queue.StateFailed, 0, 10)
-	failed.Error = "mega aktarım kotası doldu (HTTP 509): IP başına sınır\nikinci satır"
-	if got := rowMeta(row{Job: failed}); !strings.Contains(got, "kota") || strings.Contains(got, "ikinci") {
-		t.Errorf("hatali satir ilk satiri gostermeli: %q", got)
+	failed.Error = "mega transfer quota exceeded (HTTP 509): per-IP limit\nsecond line"
+	if got := rowMeta(row{Job: failed}); !strings.Contains(got, "quota") || strings.Contains(got, "second") {
+		t.Errorf("a failed row must show the first line: %q", got)
 	}
 	done := job("d", queue.StateDone, 10, 10)
-	if got := rowMeta(row{Job: done}); !strings.Contains(got, "bitti") {
-		t.Errorf("biten satir: %q", got)
+	if got := rowMeta(row{Job: done}); !strings.Contains(got, "done") {
+		t.Errorf("finished row: %q", got)
 	}
 }
 
 func TestRowProgress(t *testing.T) {
 	if p := rowProgress(job("a", queue.StateRunning, 50, 200)); p < 0.24 || p > 0.26 {
-		t.Errorf("ilerleme = %v", p)
+		t.Errorf("progress = %v", p)
 	}
 	if p := rowProgress(job("a", queue.StateRunning, 50, -1)); p != 0 {
-		t.Errorf("boyutsuz ilerleme uyduruldu: %v", p)
+		t.Errorf("progress made up without a size: %v", p)
 	}
 	if p := rowProgress(job("a", queue.StateDone, 0, 0)); p != 1 {
-		t.Errorf("biten is dolu gorunmeli: %v", p)
+		t.Errorf("a finished job must look full: %v", p)
 	}
 	if p := rowProgress(job("a", queue.StateRunning, 300, 200)); p != 1 {
-		t.Errorf("tasma 1'e kirpilmali: %v", p)
+		t.Errorf("overflow must be clipped to 1: %v", p)
 	}
 }
 
@@ -249,12 +250,12 @@ func TestActionForState(t *testing.T) {
 	}
 	for st, want := range cases {
 		if _, got := actionFor(st); got != want {
-			t.Errorf("%s -> %v, %v bekleniyordu", st, got, want)
+			t.Errorf("%s -> %v, want %v", st, got, want)
 		}
 	}
 }
 
-// --- Hiz siniri girdisi ---
+// --- Speed limit input ---
 
 func TestParseSpeedLimit(t *testing.T) {
 	cases := []struct {
@@ -269,7 +270,56 @@ func TestParseSpeedLimit(t *testing.T) {
 	for _, c := range cases {
 		got, err := parseSpeedLimit(c.in)
 		if (err != nil) != c.err || got != c.want {
-			t.Errorf("parseSpeedLimit(%q) = %d, %v; %d, err=%v bekleniyordu", c.in, got, err, c.want, c.err)
+			t.Errorf("parseSpeedLimit(%q) = %d, %v; want %d, err=%v", c.in, got, err, c.want, c.err)
 		}
+	}
+}
+
+// --- Connections ---
+
+// A running row shows the connections its download really got; nothing while unknown.
+func TestRowMetaShowsConnections(t *testing.T) {
+	j := job("a", queue.StateRunning, 20<<20, 100<<20)
+	j.Conns = 8
+	if got := rowMeta(row{Job: j, Rate: 10 << 20}); !strings.Contains(got, "8 connections") {
+		t.Errorf("running row with 8 connections: %q", got)
+	}
+	j.Conns = 1
+	if got := rowMeta(row{Job: j}); !strings.Contains(got, "1 connection") || strings.Contains(got, "connections") {
+		t.Errorf("running row with 1 connection: %q", got)
+	}
+	j.Conns = 0
+	if got := rowMeta(row{Job: j}); strings.Contains(got, "connection") {
+		t.Errorf("a connection count was made up: %q", got)
+	}
+}
+
+// The notice after picking a number names only the sites that cap it.
+func TestSegmentsNotice(t *testing.T) {
+	ceilings := []queue.SiteCeiling{{Site: "bunkr", Max: 3}, {Site: "mega", Max: 8}, {Site: "pixeldrain", Max: 1}}
+	got := segmentsNotice(8, ceilings)
+	for _, want := range []string{"8", "3 on bunkr", "1 on pixeldrain"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q missing from %q", want, got)
+		}
+	}
+	if strings.Contains(got, "on mega") {
+		t.Errorf("mega doesn't cap 8 but is named: %q", got)
+	}
+	if got := segmentsNotice(1, ceilings); strings.Contains(got, "limit") {
+		t.Errorf("nothing caps 1, yet: %q", got)
+	}
+}
+
+// "Cancel all" counts only unfinished jobs and their downloaded bytes.
+func TestUnfinishedCountsForCancelAll(t *testing.T) {
+	vm := newViewModel()
+	vm.Apply(job("a", queue.StateDone, 10, 10))
+	vm.Apply(job("b", queue.StatePaused, 4, 10))
+	vm.Apply(job("c", queue.StateRunning, 3, 10))
+	vm.Apply(job("d", queue.StateQueued, 0, 10))
+	vm.Apply(job("e", queue.StateSkipped, 10, 10))
+	if n, partial := vm.Unfinished(); n != 3 || partial != 7 {
+		t.Errorf("Unfinished = %d jobs, %d bytes; want 3, 7", n, partial)
 	}
 }

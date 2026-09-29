@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// --- Yol normalizasyonu ---
+// --- Path normalization ---
 
-// OLCULDU: Fyne'in klasor seciciden dondurdugu yol EGIK CIZGILI ("E:/x").
-// Go'nun dosya cagrilari bunu kabul ediyor, explorer.exe etmiyor ve sessizce
-// Belgeler klasorunu aciyor.
+// MEASURED: the path Fyne's folder picker returns uses FORWARD SLASHES
+// ("E:/x"). Go's file calls accept it, explorer.exe doesn't and silently
+// opens the Documents folder.
 func TestNormalizeDirConvertsPickerPathForExplorer(t *testing.T) {
 	if got := normalizeDir("E:/x"); got != `E:\x` {
 		t.Fatalf("normalizeDir(\"E:/x\") = %q", got)
@@ -21,10 +21,10 @@ func TestNormalizeDirConvertsPickerPathForExplorer(t *testing.T) {
 
 func TestNormalizeDirStripsTrailingSeparatorAndQuotes(t *testing.T) {
 	for in, want := range map[string]string{
-		`E:\x\`: `E:\x`, "E:/x/": `E:\x`, `"E:\x"`: `E:\x`, `  "E:\alt klasor"  `: `E:\alt klasor`,
+		`E:\x\`: `E:\x`, "E:/x/": `E:\x`, `"E:\x"`: `E:\x`, `  "E:\sub folder"  `: `E:\sub folder`,
 	} {
 		if got := normalizeDir(in); got != want {
-			t.Errorf("normalizeDir(%q) = %q, %q bekleniyordu", in, got, want)
+			t.Errorf("normalizeDir(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -32,27 +32,27 @@ func TestNormalizeDirStripsTrailingSeparatorAndQuotes(t *testing.T) {
 func TestNormalizeDirEmptyAndValid(t *testing.T) {
 	for _, in := range []string{"", "   ", `""`} {
 		if got := normalizeDir(in); got != "" {
-			t.Errorf("normalizeDir(%q) = %q, bos bekleniyordu", in, got)
+			t.Errorf("normalizeDir(%q) = %q, expected empty", in, got)
 		}
 	}
-	for _, in := range []string{`E:\x`, `C:\Users\musta\Downloads\siphon`, `\\sunucu\pay\klasor`} {
+	for _, in := range []string{`E:\x`, `C:\Users\me\Downloads\siphon`, `\\server\share\folder`} {
 		if got := normalizeDir(in); got != in {
-			t.Errorf("gecerli yol degisti: %q -> %q", in, got)
+			t.Errorf("a valid path changed: %q -> %q", in, got)
 		}
 	}
 }
 
-// Ciplak "E:" SURUCUYE GORELI bir yoldur; kok olarak yorumlanmali.
+// A bare "E:" is a path RELATIVE TO THE DRIVE; it must be interpreted as the root.
 func TestNormalizeDirDriveRoot(t *testing.T) {
 	if got := normalizeDir("E:/"); got != `E:\` {
 		t.Errorf("E:/ -> %q", got)
 	}
 	if got := normalizeDir("E:"); got != `E:\` {
-		t.Errorf("E: -> %q (surucuye goreli yol!)", got)
+		t.Errorf("E: -> %q (a drive-relative path!)", got)
 	}
 }
 
-// --- "Klasoru ac" hedefi ---
+// --- "Open folder" target ---
 
 func TestPickOpenTargetOrder(t *testing.T) {
 	root := t.TempDir()
@@ -65,69 +65,69 @@ func TestPickOpenTargetOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if target, sel, _ := pickOpenTarget(file, album, root); target != file || !sel {
-		t.Errorf("son dosya varken hedef = %q secili=%v", target, sel)
+		t.Errorf("with a last file, target = %q selected=%v", target, sel)
 	}
-	if target, sel, _ := pickOpenTarget(filepath.Join(album, "yok.mp4"), album, root); target != album || sel {
-		t.Errorf("dosya yokken album bekleniyordu: %q %v", target, sel)
+	if target, sel, _ := pickOpenTarget(filepath.Join(album, "missing.mp4"), album, root); target != album || sel {
+		t.Errorf("without the file the album was expected: %q %v", target, sel)
 	}
 	if target, sel, _ := pickOpenTarget("", "", root); target != root || sel {
-		t.Errorf("kok bekleniyordu: %q %v", target, sel)
+		t.Errorf("the root was expected: %q %v", target, sel)
 	}
 }
 
-// Kok yoksa SESSIZCE OLUSTURULMAMALI; sebep soylenmeli.
+// If the root is missing it must NOT BE CREATED SILENTLY; the reason must be given.
 func TestPickOpenTargetMissingRootExplains(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "henuz-yok")
+	missing := filepath.Join(t.TempDir(), "not-yet")
 	target, _, reason := pickOpenTarget("", "", missing)
-	if target != "" || !strings.Contains(reason, "henüz yok") {
-		t.Errorf("hedef=%q sebep=%q", target, reason)
+	if target != "" || !strings.Contains(reason, "doesn't exist yet") {
+		t.Errorf("target=%q reason=%q", target, reason)
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
-		t.Error("klasor sessizce olusturuldu")
+		t.Error("the folder was created silently")
 	}
 }
 
-// --- Link ayristirma ---
+// --- Link parsing ---
 
 func TestParseLinksSkipsBlankAndComments(t *testing.T) {
-	got := parseLinks("https://a\r\n\n# yorum\n  https://b  \n")
+	got := parseLinks("https://a\r\n\n# comment\n  https://b  \n")
 	if len(got) != 2 || got[0] != "https://a" || got[1] != "https://b" {
 		t.Errorf("parseLinks = %v", got)
 	}
 }
 
-// --- Hiz olcumu ---
+// --- Speed measurement ---
 
 func TestSpeedoNeedsTwoSamplesAndHandlesReset(t *testing.T) {
 	var sp speedo
 	base := time.Now()
 	if r := sp.update(0, base); r != 0 {
-		t.Errorf("ilk ornek hiz uretti: %v", r)
+		t.Errorf("the first sample produced a speed: %v", r)
 	}
 	r := sp.update(1<<20, base.Add(time.Second))
 	if r < float64(1<<20)*0.9 || r > float64(1<<20)*1.1 {
-		t.Errorf("hiz = %v, ~1 MB/s bekleniyordu", r)
+		t.Errorf("speed = %v, ~1 MB/s expected", r)
 	}
-	// Sayac geriye giderse negatif hiz olmamali.
+	// If the counter goes backwards there must be no negative speed.
 	if r := sp.update(0, base.Add(2*time.Second)); r < 0 {
-		t.Errorf("negatif hiz: %v", r)
+		t.Errorf("negative speed: %v", r)
 	}
 }
 
 func TestHumanRateAndETA(t *testing.T) {
 	if humanRate(0) != "" || humanRate(-5) != "" {
-		t.Error("bilinmeyen hiz icin bos bekleniyordu")
+		t.Error("expected empty for an unknown speed")
 	}
 	if got := humanRate(1 << 20); got != "1.0 MB/s" {
 		t.Errorf("humanRate = %q", got)
 	}
 	if humanETA(0, 100) != "" || humanETA(100, 0) != "" {
-		t.Error("kalan/hiz bilinmiyorken ETA basildi")
+		t.Error("an ETA was printed with an unknown remainder/speed")
 	}
-	if got := humanETA(300, 1); !strings.Contains(got, "dk") {
-		t.Errorf("dakika bekleniyordu: %q", got)
+	if got := humanETA(300, 1); got != "5m" {
+		t.Errorf("minutes expected: %q", got)
 	}
 	if got := humanETA(1<<40, 1); got != "" {
-		t.Errorf("bir gunden uzun tahmin basildi: %q", got)
+		t.Errorf("an estimate longer than a day was printed: %q", got)
 	}
 }

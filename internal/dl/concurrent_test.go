@@ -1,11 +1,11 @@
 package dl
 
-// Adım 6'dan itibaren Download eşzamanlı çağrılıyor. Bu ortamda -race
-// kullanılamıyor (cgo için C derleyicisi kurulu değil), bu yüzden yarış
-// koşullarını gözlemlenebilir SONUÇLAR üzerinden kovalıyoruz: çakışan adlarla
-// yüzlerce eşzamanlı indirme, beklenen dosya sayısı ve içerik doğruluğu.
+// Since step 6 Download is called concurrently. Independent of -race, these
+// tests chase race conditions through observable RESULTS: hundreds of
+// concurrent downloads with colliding names, the expected number of files
+// and correct content.
 //
-// claim()'in kilidi kaldırılırsa bu testler dosya sayısı tutmadığı için düşer.
+// If claim()'s lock is removed these tests fail because the file count is off.
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ func TestConcurrentDownloadsDistinctNames(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			it := testItem(srv.URL+"/veri.bin", fmt.Sprintf("dosya-%03d.bin", i))
+			it := testItem(srv.URL+"/data.bin", fmt.Sprintf("file-%03d.bin", i))
 			it.Index = i
 			it.SHA256 = payloadSHA()
 			_, errs[i] = d.Download(context.Background(), out, it)
@@ -47,13 +47,13 @@ func TestConcurrentDownloadsDistinctNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(entries) != n {
-		t.Fatalf("%d dosya olustu, %d bekleniyordu", len(entries), n)
+		t.Fatalf("%d files created, want %d", len(entries), n)
 	}
 }
 
-// Asil yaris koşulu burada: hepsi AYNI ada cozulüyor, yani claim() haritasina
-// aynı anda yaziliyor. Kilit olmadan iki item ayni adi alir ve biri digerini
-// ezer; sonuc n'den az dosya olur.
+// The real race is here: they all resolve to the SAME name, i.e. they write
+// into the claim() map at the same time. Without the lock two items take the
+// same name and one overwrites the other; the result is fewer than n files.
 func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
@@ -67,9 +67,9 @@ func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			it := testItem(srv.URL+"/veri.bin", "ayni.bin")
+			it := testItem(srv.URL+"/data.bin", "same.bin")
 			it.Index = i
-			it.SourcePage = fmt.Sprintf("https://ornek.test/u/%d", i) // farkli item'lar
+			it.SourcePage = fmt.Sprintf("https://example.test/u/%d", i) // different items
 			it.SHA256 = payloadSHA()
 			var res Result
 			res, errs[i] = d.Download(context.Background(), out, it)
@@ -84,14 +84,14 @@ func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 		}
 	}
 
-	// Her item kendine ait bir yol almis olmali.
+	// Every item must have gotten a path of its own.
 	seen := map[string]bool{}
 	for i, p := range paths {
 		if p == "" {
-			t.Fatalf("item %d yol dondurmedi", i)
+			t.Fatalf("item %d returned no path", i)
 		}
 		if seen[p] {
-			t.Fatalf("iki item ayni yolu aldi: %s", p)
+			t.Fatalf("two items got the same path: %s", p)
 		}
 		seen[p] = true
 	}
@@ -101,23 +101,23 @@ func TestConcurrentDownloadsCollidingNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(entries) != n {
-		t.Fatalf("%d dosya olustu, %d bekleniyordu; claim() yarisi var", len(entries), n)
+		t.Fatalf("%d files created, want %d; claim() has a race", len(entries), n)
 	}
 
-	// Icerik de dogru olmali: ezilme olsa hash kontrolu zaten dusurecekti ama
-	// dosyalarin gercekten tam oldugunu ayrica dogruluyoruz.
+	// The content must be right too: an overwrite would already fail the
+	// hash check, but we separately verify the files really are complete.
 	for _, e := range entries {
 		b, rerr := os.ReadFile(filepath.Join(out, e.Name()))
 		if rerr != nil {
-			t.Fatalf("%s okunamadi: %v", e.Name(), rerr)
+			t.Fatalf("could not read %s: %v", e.Name(), rerr)
 		}
 		if !bytes.Equal(b, payload) {
-			t.Fatalf("%s icerigi bozuk (%d bayt)", e.Name(), len(b))
+			t.Fatalf("%s content is corrupt (%d bytes)", e.Name(), len(b))
 		}
 	}
 }
 
-// Aynı anda çalışan indirmeler ayrı klasörlere yazarken de karışmamalı.
+// Downloads running at the same time must not mix up while writing into separate folders.
 func TestConcurrentDownloadsAcrossDirectories(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
@@ -130,10 +130,10 @@ func TestConcurrentDownloadsAcrossDirectories(t *testing.T) {
 			wg.Add(1)
 			go func(di, fi int) {
 				defer wg.Done()
-				it := testItem(srv.URL+"/veri.bin", "ayni.bin")
+				it := testItem(srv.URL+"/data.bin", "same.bin")
 				it.Dir = fmt.Sprintf("album-%d", di)
 				it.Index = fi
-				it.SourcePage = fmt.Sprintf("https://ornek.test/u/%d-%d", di, fi)
+				it.SourcePage = fmt.Sprintf("https://example.test/u/%d-%d", di, fi)
 				it.SHA256 = payloadSHA()
 				if _, err := d.Download(context.Background(), out, it); err != nil {
 					t.Errorf("album-%d/%d: %v", di, fi, err)
@@ -150,13 +150,13 @@ func TestConcurrentDownloadsAcrossDirectories(t *testing.T) {
 			t.Fatalf("%s: %v", dir, err)
 		}
 		if len(entries) != perDir {
-			t.Errorf("%s icinde %d dosya, %d bekleniyordu", dir, len(entries), perDir)
+			t.Errorf("%d files in %s, want %d", len(entries), dir, perDir)
 		}
 	}
 }
 
-// Eszamanli iptal: her indirme ya tamamlanmis ya da tutarli bir .part
-// birakmis olmali. Yarim dosya ASLA nihai adla durmamali.
+// Concurrent cancellation: every download must have either completed or left
+// a consistent .part. A partial file must NEVER sit under the final name.
 func TestConcurrentCancelLeavesNoFinalPartialFiles(t *testing.T) {
 	release := make(chan struct{})
 	srv := slowServer(t, 8000, release)
@@ -170,7 +170,7 @@ func TestConcurrentCancelLeavesNoFinalPartialFiles(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			it := testItem(srv.URL+"/veri.bin", fmt.Sprintf("kesilen-%02d.bin", i))
+			it := testItem(srv.URL+"/data.bin", fmt.Sprintf("canceled-%02d.bin", i))
 			it.Index = i
 			it.SHA256 = payloadSHA()
 			_, _ = d.Download(ctx, out, it)
@@ -187,25 +187,25 @@ func TestConcurrentCancelLeavesNoFinalPartialFiles(t *testing.T) {
 	for _, e := range entries {
 		name := e.Name()
 		if filepath.Ext(name) == ".bin" {
-			// Nihai adla duran bir dosya varsa tam olmak zorunda.
+			// A file under the final name must be complete.
 			b, rerr := os.ReadFile(filepath.Join(out, name))
 			if rerr != nil {
 				t.Fatalf("%s: %v", name, rerr)
 			}
 			if !bytes.Equal(b, payload) {
-				t.Fatalf("%s nihai adla ama eksik (%d bayt)", name, len(b))
+				t.Fatalf("%s is under the final name but incomplete (%d bytes)", name, len(b))
 			}
 		}
 	}
 }
 
-// Downloader tek bir item'i iki kez indirmemeli: ikinci cagri "zaten var"
-// dalina dusup ayni yolu dondurmeli.
+// The Downloader must not download one item twice: the second call must fall
+// into the "already exists" branch and return the same path.
 func TestDownloadTwiceReturnsSamePath(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
 
-	it := testItem(srv.URL+"/veri.bin", "bir.bin")
+	it := testItem(srv.URL+"/data.bin", "one.bin")
 	it.SHA256 = payloadSHA()
 
 	d := &Downloader{Client: srv.Client()}
@@ -213,19 +213,20 @@ func TestDownloadTwiceReturnsSamePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Ayni Downloader'da ikinci cagri claim() yuzunden yeni ad uretir; bu
-	// dogru davranis (iki farkli item ayni ada cozulmus olabilir). Yeni bir
-	// Downloader ise ayni adi hedefler ve "zaten var" dalina duser.
+	// A second call on the same Downloader produces a new name because of
+	// claim(); that is correct (two different items may resolve to the same
+	// name). A new Downloader targets the same name and falls into the
+	// "already exists" branch.
 	d2 := &Downloader{Client: srv.Client()}
 	r2, err := d2.Download(context.Background(), out, it)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r1.Path != r2.Path {
-		t.Fatalf("ikinci kosu farkli yol dondurdu:\n%s\n%s", r1.Path, r2.Path)
+		t.Fatalf("the second run returned a different path:\n%s\n%s", r1.Path, r2.Path)
 	}
 	entries, _ := os.ReadDir(out)
 	if len(entries) != 1 {
-		t.Fatalf("%d dosya var, 1 bekleniyordu", len(entries))
+		t.Fatalf("%d files present, want 1", len(entries))
 	}
 }

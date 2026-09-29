@@ -10,12 +10,13 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
-// viewModel, kuyruğun ekranda gösterilecek hali. Motorun olayları buraya
-// akar; arayüz buradan okur. İkisi arasında tek yön: model arayüzü bilmez.
+// viewModel is the queue as it is shown on screen. The engine's events flow
+// in here; the UI reads from here. One direction between them: the model
+// doesn't know about the UI.
 //
-// Neden ayrı: Fyne widget'ları test edilmesi zahmetli nesneler. Satır
-// metinleri, yüzde, hız ve özet gibi kararlar burada saf fonksiyonlarda
-// duruyor ve pencere olmadan test ediliyor.
+// Why separate: Fyne widgets are tedious objects to test. Decisions such as
+// row texts, percentages, speed and summary live here in pure functions and
+// are tested without a window.
 type viewModel struct {
 	mu    sync.Mutex
 	order []string
@@ -24,14 +25,16 @@ type viewModel struct {
 	rate  map[string]float64
 	dirty bool
 
-	// notice, bir eylemin sonucu ("Eklenemedi: …", "Klasör açılamadı: …").
-	// Durum satırına doğrudan yazılmıyor; StatusLine onu özetle birleştiriyor.
+	// notice is the result of an action ("Could not add: …", "Could not open
+	// the folder: …"). It isn't written straight to the status line;
+	// StatusLine combines it with the summary.
 	notice   string
 	noticeAt time.Time
 }
 
-// noticeTTL: kuyruk doluyken bildirim bu kadar sonra özete yerini bırakır.
-// Kuyruk boşken gösterecek başka şey yok, bildirim kalır.
+// noticeTTL: with a non-empty queue the notice gives way to the summary
+// after this long. With an empty queue there's nothing else to show, so the
+// notice stays.
 const noticeTTL = 30 * time.Second
 
 func newViewModel() *viewModel {
@@ -42,7 +45,7 @@ func newViewModel() *viewModel {
 	}
 }
 
-// Apply, motordan gelen tek bir iş güncellemesini işler.
+// Apply processes a single job update coming from the engine.
 func (vm *viewModel) Apply(j queue.Job) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -63,15 +66,15 @@ func (vm *viewModel) apply(j queue.Job, now time.Time) {
 		}
 		vm.rate[j.ID] = sp.update(j.Done, now)
 	default:
-		// Duran işin hızı yok; "0 B/s" yazmak yerine hiç yazılmaz.
+		// A stopped job has no speed; rather than writing "0 B/s" nothing is written.
 		delete(vm.speed, j.ID)
 		delete(vm.rate, j.ID)
 	}
 	vm.dirty = true
 }
 
-// Replace, listeyi motorun tam kopyasıyla eşitler. Kaldırma ve temizleme
-// olay üretmediği için bunlardan sonra çağrılır.
+// Replace syncs the list with the engine's full copy. Removing and clearing
+// produce no events, so it is called after them.
 func (vm *viewModel) Replace(jobs []queue.Job) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -81,7 +84,7 @@ func (vm *viewModel) Replace(jobs []queue.Job) {
 		seen[j.ID] = true
 		vm.order = append(vm.order, j.ID)
 		if old, ok := vm.jobs[j.ID]; ok && old.State == queue.StateRunning && j.State == queue.StateRunning {
-			// Hız ölçümünü koru; sadece veriyi tazele.
+			// Keep the speed measurement; only refresh the data.
 			vm.jobs[j.ID] = j
 			continue
 		}
@@ -97,9 +100,9 @@ func (vm *viewModel) Replace(jobs []queue.Job) {
 	vm.dirty = true
 }
 
-// TakeDirty, "değişti" bayrağını okuyup sıfırlar. Arayüz bunu periyodik
-// olarak sorup yalnızca değişiklik varsa çiziyor; olay başına çizmek, 20
-// paralel indirmede saniyede yüzlerce yenileme demekti.
+// TakeDirty reads and resets the "changed" flag. The UI asks for it
+// periodically and only draws when something changed; drawing per event
+// meant hundreds of refreshes per second with 20 parallel downloads.
 func (vm *viewModel) TakeDirty() bool {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -108,7 +111,7 @@ func (vm *viewModel) TakeDirty() bool {
 	return d
 }
 
-// row, tek satırın çizim için gereken hali.
+// row is what a single row needs for drawing.
 type row struct {
 	Job  queue.Job
 	Rate float64
@@ -130,9 +133,9 @@ func (vm *viewModel) Row(i int) (row, bool) {
 	return row{Job: vm.jobs[id], Rate: vm.rate[id]}, true
 }
 
-// QuotaBanner, listenin üstündeki uyarı şeridinin metni; kota bekleyen iş
-// yoksa "". Bildirimlere bağımlı olmayan, pencere açılınca göze çarpan
-// tek yer burası.
+// QuotaBanner is the text of the warning banner above the list; "" if no job
+// waits for quota. It is the one place that doesn't depend on notifications
+// and catches the eye when the window opens.
 func (vm *viewModel) QuotaBanner() string {
 	return vm.quotaBanner(time.Now())
 }
@@ -159,10 +162,10 @@ func (vm *viewModel) quotaBanner(now time.Time) string {
 	}
 	when := ""
 	if !earliest.IsZero() && earliest.After(now) {
-		when = fmt.Sprintf("; değiştirmezsen %s'de (%s sonra) kendiliğinden denenecek",
+		when = fmt.Sprintf("; if you don't, they'll be retried automatically at %s (in %s)",
 			earliest.Local().Format("15:04"), site.FormatWait(earliest.Sub(now)))
 	}
-	return fmt.Sprintf("%s kotası doldu — %d dosya bekliyor. VPN'de konumu değiştir; değişince indirmeler kendiliğinden sürer%s.",
+	return fmt.Sprintf("%s quota exceeded — %d files waiting. Switch your VPN location; downloads resume by themselves once it changes%s.",
 		siteName, n, when)
 }
 
@@ -176,12 +179,12 @@ func (vm *viewModel) Rows() []row {
 	return out
 }
 
-// Notify, bir eylemin sonucunu durum satırına koyar ve yeniden çizim ister.
+// Notify puts an action's result on the status line and asks for a redraw.
 //
-// ÖLÇÜLDÜ: eylem "Eklenemedi: …" yazıp modeli değiştirince 150 ms sonra
-// yenileme döngüsü satırı özetle ("Kuyruk boş…") eziyordu; kullanıcı mega
-// klasörünün neden eklenmediğini hiç göremedi. Bildirim artık modelde
-// duruyor ve her çizimde yeniden yazılıyor.
+// MEASURED: when an action wrote "Could not add: …" and changed the model,
+// the refresh loop overwrote the line with the summary ("Queue is empty…")
+// 150 ms later; the user never got to see why the mega folder wasn't added.
+// The notice now lives in the model and is rewritten on every draw.
 func (vm *viewModel) Notify(msg string) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
@@ -190,7 +193,7 @@ func (vm *viewModel) Notify(msg string) {
 	vm.dirty = true
 }
 
-// StatusLine, alt durum satırının tamamı: bildirim (varsa ve tazeyse) ve özet.
+// StatusLine is the whole bottom status line: the notice (if any and fresh) and the summary.
 func (vm *viewModel) StatusLine() string {
 	return vm.statusLine(time.Now())
 }
@@ -212,12 +215,12 @@ func (vm *viewModel) statusLine(now time.Time) string {
 	return notice + "  ·  " + summary
 }
 
-// Summary, kuyruğun özeti: "2 aktif · 5 sırada · 12 bitti · 24.3 MB/s".
+// Summary is the queue's summary: "2 active · 5 queued · 12 done · 24.3 MB/s".
 func (vm *viewModel) Summary() string {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	if len(vm.order) == 0 {
-		return "Kuyruk boş. Link yapıştırıp Ekle'ye bas."
+		return "The queue is empty. Paste links and press Add."
 	}
 	var active, queued, waiting, paused, done, failed int
 	var total float64
@@ -241,22 +244,22 @@ func (vm *viewModel) Summary() string {
 	}
 	var parts []string
 	if active > 0 {
-		parts = append(parts, fmt.Sprintf("%d aktif", active))
+		parts = append(parts, fmt.Sprintf("%d active", active))
 	}
 	if queued > 0 {
-		parts = append(parts, fmt.Sprintf("%d sırada", queued))
+		parts = append(parts, fmt.Sprintf("%d queued", queued))
 	}
 	if waiting > 0 {
-		parts = append(parts, fmt.Sprintf("%d kota bekliyor", waiting))
+		parts = append(parts, fmt.Sprintf("%d waiting for quota", waiting))
 	}
 	if paused > 0 {
-		parts = append(parts, fmt.Sprintf("%d duraklatıldı", paused))
+		parts = append(parts, fmt.Sprintf("%d paused", paused))
 	}
 	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d hata", failed))
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
 	}
 	if done > 0 {
-		parts = append(parts, fmt.Sprintf("%d bitti", done))
+		parts = append(parts, fmt.Sprintf("%d done", done))
 	}
 	if r := humanRate(total); r != "" {
 		parts = append(parts, r)
@@ -264,56 +267,57 @@ func (vm *viewModel) Summary() string {
 	return strings.Join(parts, "  ·  ")
 }
 
-// --- Satır biçimlendirme (saf) ---
+// --- Row formatting (pure) ---
 
-// stateLabel, durumun Türkçe etiketi.
+// stateLabel is the display label of a state.
 func stateLabel(s queue.State) string {
 	switch s {
 	case queue.StateQueued:
-		return "sırada"
+		return "queued"
 	case queue.StateRunning:
-		return "indiriliyor"
+		return "downloading"
 	case queue.StatePaused:
-		return "duraklatıldı"
+		return "paused"
 	case queue.StateDone:
-		return "bitti"
+		return "done"
 	case queue.StateFailed:
-		return "hata"
+		return "failed"
 	case queue.StateSkipped:
-		return "zaten inmiş"
+		return "already downloaded"
 	case queue.StateStopped:
-		return "durduruldu"
+		return "stopped"
 	case queue.StateWaiting:
-		return "kota bekliyor"
+		return "waiting for quota"
 	}
 	return string(s)
 }
 
-// waitingMeta, kota bekleyen satır: ne zaman kendiliğinden deneneceği ve
-// kullanıcının ne yapabileceği. Saat MUTLAK yazılıyor ("20:31'de"): liste
-// yalnızca değişiklikte çizildiği için geri sayım donuk kalırdı.
+// waitingMeta is the row of a job waiting for quota: when it will be retried
+// by itself and what the user can do. The time is written ABSOLUTE ("at
+// 20:31"): the list is only drawn on changes, so a countdown would stay frozen.
 func waitingMeta(j queue.Job, now time.Time) string {
 	if j.RetryAt.IsZero() {
-		return "kota doldu  ·  ▶ ile şimdi dene"
+		return "quota exceeded  ·  ▶ to try now"
 	}
 	left := j.RetryAt.Sub(now)
 	if left < time.Minute {
-		return "kota doldu  ·  birazdan yeniden denenecek"
+		return "quota exceeded  ·  retrying shortly"
 	}
-	return fmt.Sprintf("kota doldu  ·  VPN değişince ya da %s'de kendiliğinden sürer (%s)  ·  ▶ şimdi dene",
+	return fmt.Sprintf("quota exceeded  ·  resumes when the VPN changes or at %s (%s)  ·  ▶ try now",
 		j.RetryAt.Local().Format("15:04"), site.FormatWait(left))
 }
 
-// quotaHoldMessage, kota bildiriminin gövdesi: ne oldu, ne yapılabilir.
+// quotaHoldMessage is the body of the quota notification: what happened, what can be done.
 func quotaHoldMessage(retryAt, now time.Time) string {
 	if retryAt.IsZero() || retryAt.Before(now) {
-		return "VPN sunucusunu değiştirirsen indirmeler kendiliğinden sürer."
+		return "If you switch VPN server, downloads resume by themselves."
 	}
-	return fmt.Sprintf("VPN sunucusunu değiştirirsen indirmeler kendiliğinden sürer; değiştirmezsen %s'de (%s sonra) yeniden denenecek.",
+	return fmt.Sprintf("If you switch VPN server, downloads resume by themselves; otherwise they'll be retried at %s (in %s).",
 		retryAt.Local().Format("15:04"), site.FormatWait(retryAt.Sub(now)))
 }
 
-// rowMeta, satırın sağ üstündeki bilgi: duruma göre boyut/hız/kalan ya da hata.
+// rowMeta is the info at the top right of a row: size/speed/time left or
+// the error, depending on the state.
 func rowMeta(r row) string {
 	j := r.Job
 	switch j.State {
@@ -327,17 +331,22 @@ func rowMeta(r row) string {
 		if s := humanRate(r.Rate); s != "" {
 			b.WriteString("  ·  " + s)
 		}
+		// What the download really got, not what was asked for: the site
+		// ceiling, the host slots and the server all have a say.
+		if s := connsLabel(j.Conns); s != "" {
+			b.WriteString("  ·  " + s)
+		}
 		if j.Size > 0 {
 			if eta := humanETA(j.Size-j.Done, r.Rate); eta != "" {
-				b.WriteString("  ·  kalan " + eta)
+				b.WriteString("  ·  " + eta + " left")
 			}
 		}
 		return b.String()
 	case queue.StatePaused:
 		if j.Size > 0 {
-			return fmt.Sprintf("%s / %s  ·  duraklatıldı", humanBytes(j.Done), humanBytes(j.Size))
+			return fmt.Sprintf("%s / %s  ·  paused", humanBytes(j.Done), humanBytes(j.Size))
 		}
-		return "duraklatıldı"
+		return "paused"
 	case queue.StateWaiting:
 		return waitingMeta(j, time.Now())
 	case queue.StateFailed, queue.StateStopped:
@@ -359,7 +368,51 @@ func rowMeta(r row) string {
 	}
 }
 
-// rowProgress, 0..1 arası ilerleme; boyut bilinmiyorsa 0 (çubuk uydurmuyor).
+// connsLabel is "1 connection" / "8 connections"; empty while unknown.
+func connsLabel(n int) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n == 1:
+		return "1 connection"
+	default:
+		return fmt.Sprintf("%d connections", n)
+	}
+}
+
+// segmentsNotice explains a new "Connections/file" choice: the number is a
+// request, and sites whose ceiling is lower are named so the user isn't left
+// wondering why a row shows fewer.
+func segmentsNotice(n int, ceilings []queue.SiteCeiling) string {
+	var capped []string
+	for _, c := range ceilings {
+		if c.Max < n {
+			capped = append(capped, fmt.Sprintf("%d on %s", c.Max, c.Site))
+		}
+	}
+	if len(capped) == 0 {
+		return fmt.Sprintf("Connections per file: %d.", n)
+	}
+	return fmt.Sprintf("Connections per file: %d (site limits: %s). Each row shows what its download really gets.",
+		n, strings.Join(capped, ", "))
+}
+
+// Unfinished counts the jobs "Cancel all" would take out of the queue, and
+// the bytes already downloaded for them.
+func (vm *viewModel) Unfinished() (n int, partial int64) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	for _, id := range vm.order {
+		if j := vm.jobs[id]; !j.State.Finished() {
+			n++
+			partial += j.Done
+		}
+	}
+	return n, partial
+}
+
+// rowProgress is the progress between 0 and 1; 0 if the size is unknown (the
+// bar doesn't make things up).
 func rowProgress(j queue.Job) float64 {
 	switch j.State {
 	case queue.StateDone, queue.StateSkipped:
@@ -378,7 +431,7 @@ func rowProgress(j queue.Job) float64 {
 	return p
 }
 
-// actionFor, satırdaki ana düğmenin etiketi ve ne yapacağı.
+// actionFor is the label of the row's main button and what it does.
 type rowAction int
 
 const (

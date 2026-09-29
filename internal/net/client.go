@@ -1,10 +1,10 @@
-// Package net, HTTP istemcisi fabrikası, host başına eşzamanlılık sınırı ve
-// jitter'lı üstel backoff sağlar.
+// Package net provides the HTTP client factory, a per-host concurrency limit
+// and exponential backoff with jitter.
 //
-// Premise 3'ün somut hali burada: rate limit bir hata değil, normal çalışma
-// durumudur. pixeldrain ücretsiz hesapta eşzamanlı bağlantı ve transfer
-// limitleri uyguluyor; araç bunlara çarpmayı bekleyip geri çekilmek zorunda,
-// yoksa limiti kendi eliyle derinleştirir.
+// This is where Premise 3 becomes concrete: a rate limit is not an error, it
+// is a normal operating state. pixeldrain enforces concurrent connection and
+// transfer limits on the free tier; the tool must expect to hit them and back
+// off, otherwise it deepens the limit with its own hands.
 package net
 
 import (
@@ -19,12 +19,12 @@ import (
 	"time"
 )
 
-// NewClient, transfer ve API istekleri için istemciyi kurar.
+// NewClient builds the client for transfer and API requests.
 //
-// Client.Timeout KASITLI olarak verilmiyor: o alan gövde okumayı da kapsar ve
-// birkaç gigabaytlık bir indirmeyi ortasından keser. Zaman aşımları bağlantı
-// kurma ve yanıt başlığı seviyesinde tutuluyor; takılan bir sunucu yakalanır,
-// yavaş ama çalışan bir transfer kesilmez.
+// Client.Timeout is DELIBERATELY not set: that field also covers reading the
+// body and would cut a multi-gigabyte download in the middle. Timeouts are
+// kept at the connection and response-header level; a hung server is caught,
+// a slow but working transfer is not cut.
 func NewClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -35,20 +35,48 @@ func NewClient() *http.Client {
 			ExpectContinueTimeout: 1 * time.Second,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          64,
-			MaxIdleConnsPerHost:   8,
-			IdleConnTimeout:       90 * time.Second,
+			// A segmented download fetches chunk after chunk over the same
+			// connections; an idle pool smaller than the connections to a
+			// host (mega: up to 32) would close them between chunks and
+			// pay a new TLS handshake for every chunk.
+			MaxIdleConnsPerHost: 32,
+			IdleConnTimeout:     90 * time.Second,
 		},
 	}
 }
 
-// HostLimiter, host başına eşzamanlı istek sayısını sınırlar.
+// IsTransient reports whether the error is of the "the network can't be
+// reached right now" kind: DNS did not resolve, the connection could not be
+// established or dropped, a timeout. These can be a temporary state of the
+// local network (Wi-Fi connecting, VPN switching) and fix themselves after a
+// while; they must not be treated as permanent failures.
 //
-// Sınır HOST başına, koşu başına değil: bir albüm birden fazla CDN host'una
-// yayılabiliyor (bunkr'da normal davranış) ve o durumda tek bir genel sayaç
-// yanlış yerde daraltma yapar. Tek bir host'a 3 yerine 30 eşzamanlı bağlantı
-// açmak pixeldrain'de doğrudan max_concurrent_downloads demek.
+// The user's cancellation (context.Canceled) and real server answers (404,
+// "deleted") are NOT transient.
+func IsTransient(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var nerr net.Error
+	return errors.As(err, &nerr) && nerr.Timeout()
+}
+
+// HostLimiter limits the number of concurrent requests per host.
 //
-// x/sync/semaphore alınmadı: host başına tamponlu kanal bu kadar kod.
+// The limit is PER HOST, not per run: an album can spread over several CDN
+// hosts (normal behavior on bunkr), and a single global counter would
+// throttle in the wrong place. Opening 30 concurrent connections to one host
+// instead of 3 means max_concurrent_downloads on pixeldrain, right away.
+//
+// x/sync/semaphore was not used: a buffered channel per host is this much code.
 type HostLimiter struct {
 	n  int
 	mu sync.Mutex
@@ -62,8 +90,8 @@ func NewHostLimiter(n int) *HostLimiter {
 	return &HostLimiter{n: n, ch: make(map[string]chan struct{})}
 }
 
-// HostOf, bir URL'in limiter anahtarını döndürür. Ayrıştırılamayan URL'ler
-// tek bir kovaya düşer; sessizce sınırsız bırakmaktan iyidir.
+// HostOf returns the limiter key of a URL. Unparseable URLs fall into a
+// single bucket; that beats silently leaving them unlimited.
 func HostOf(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
@@ -83,14 +111,13 @@ func (l *HostLimiter) slot(host string) chan struct{} {
 	return c
 }
 
-// TryAcquire, host için EN FAZLA want yuva alır, hiç beklemeden. Kaç yuva
-// aldığını ve hepsini bırakan fonksiyonu döndürür.
+// TryAcquire takes AT MOST want slots for the host, without waiting. It
+// returns how many it got and a function that releases all of them.
 //
-// Parçalı indirme için: bir dosyayı N bağlantıyla çekmek, o host'a N
-// bağlantı açmak demek. Host sınırı bağlantı sayısını sınırlıyor, indirme
-// sayısını değil; yani ek parçalar ancak boş yuva varsa açılıyor. Aksi halde
-// max_concurrent=4 ve 4 parça, host'a 16 bağlantı olurdu — bunkr'ın 429
-// verdiği yer tam orası.
+// For segmented downloads: a file's extra connections come out of the
+// host's connection budget (max_connections minus the file slots), and only
+// when free slots exist: waiting for one would hold up the download that
+// could run on the connection it already has.
 func (l *HostLimiter) TryAcquire(host string, want int) (int, func()) {
 	c := l.slot(host)
 	got := 0
@@ -113,8 +140,8 @@ func (l *HostLimiter) TryAcquire(host string, want int) (int, func()) {
 	}
 }
 
-// Acquire, host için bir yuva alır. Dönen fonksiyon yuvayı bırakır ve
-// çağrılmak zorundadır (defer).
+// Acquire takes one slot for the host. The returned function releases the
+// slot and must be called (defer).
 func (l *HostLimiter) Acquire(ctx context.Context, host string) (func(), error) {
 	c := l.slot(host)
 	select {
@@ -126,22 +153,22 @@ func (l *HostLimiter) Acquire(ctx context.Context, host string) (func(), error) 
 	}
 }
 
-// Backoff, jitter'lı üstel geri çekilme üretir.
+// Backoff produces exponential backoff with jitter.
 //
-// cenkalti/backoff alınmadı: bu kadar kod bir bağımlılık ve v4/v5 geçişi
-// taşımaya değmez.
+// cenkalti/backoff was not used: this much code isn't worth a dependency and
+// a v4/v5 migration.
 type Backoff struct {
-	Base time.Duration // ilk bekleme
-	Max  time.Duration // üst sınır
+	Base time.Duration // first delay
+	Max  time.Duration // upper bound
 }
 
-// Delay, attempt (0 tabanlı) için bekleme süresini döndürür.
+// Delay returns the delay for attempt (0-based).
 //
-// Yarım jitter kullanılıyor: bekleme [d/2, d) aralığından seçiliyor, d ise
-// üstel olarak büyüyor. Tam jitter ([0, d)) sıfıra yakın değerler üretip bir
-// denemeyi boşa harcayabiliyor; sabit gecikme ise aynı anda limite çarpan
-// istekleri aynı anda geri getirip sürüyü yeniden oluşturuyor. Yarım jitter
-// ikisinin arasında: ilerleme garantili, eşzamanlılık dağıtılmış.
+// Half jitter is used: the delay is chosen from [d/2, d), with d growing
+// exponentially. Full jitter ([0, d)) can produce values near zero and waste
+// an attempt; a fixed delay brings requests that hit the limit together back
+// together and re-forms the herd. Half jitter sits between the two: progress
+// is guaranteed, concurrency is spread.
 func (b Backoff) Delay(attempt int) time.Duration {
 	base := b.Base
 	if base <= 0 {
@@ -169,7 +196,7 @@ func (b Backoff) Delay(attempt int) time.Duration {
 	return half + time.Duration(rand.Int64N(int64(half)))
 }
 
-// Sleep, ctx'e saygı duyarak bekler.
+// Sleep waits while respecting ctx.
 func Sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()
@@ -184,30 +211,32 @@ func Sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// ErrStop, koşunun tamamının durması gerektiğini bildirir.
-// Captcha bu sınıfa girer: beklemek çözmez, kullanıcıya söylemek gerekir ve
-// kapsam sınırı gereği captcha çözmeye çalışmıyoruz.
-var ErrStop = errors.New("koşu durduruluyor")
+// ErrStop reports that the whole run must stop.
+// Captcha falls into this class: waiting doesn't solve it, the user has to be
+// told, and by scope we don't try to solve captchas.
+var ErrStop = errors.New("stopping the run")
 
-// ErrExhausted, deneme bütçesi tükendiğinde döner. Item "kalıcı başarısız".
-var ErrExhausted = errors.New("deneme bütçesi tükendi")
+// ErrExhausted is returned when the retry budget is used up. The item is a
+// "permanent failure".
+var ErrExhausted = errors.New("retry budget exhausted")
 
-// Bu iki arayüz, hataların kendi yeniden deneme semantiğini taşımasını sağlar.
-// Böylece net paketi site'ı veya dl'i import etmek zorunda kalmıyor; döngü
-// yok ve sınıflandırma hatanın yanında duruyor.
+// These two interfaces let errors carry their own retry semantics. That way
+// the net package doesn't have to import site or dl; there is no cycle and
+// the classification lives next to the error.
 type retryableError interface{ Retryable() bool }
 type captchaError interface{ CaptchaRequired() bool }
 
-// Policy, item başına yeniden deneme bütçesidir.
+// Policy is the per-item retry budget.
 //
-// İki ayrı üst sınır var ve ikisi de gerekli: MaxAttempts hızlı ve tekrarlayan
-// hatalara karşı, MaxElapsed ise her denemesi uzun süren hatalara karşı. Yalnız
-// biri olsa, yavaş bir hata 5 denemede saatler harcardı.
+// There are two separate upper bounds and both are needed: MaxAttempts guards
+// against fast, repeating errors, MaxElapsed against errors where each attempt
+// takes a long time. With only one of them, a slow error would burn hours in
+// 5 attempts.
 type Policy struct {
 	MaxAttempts int
 	MaxElapsed  time.Duration
 	Backoff     Backoff
-	// Logf nil olabilir.
+	// Logf may be nil.
 	Logf func(format string, a ...any)
 }
 
@@ -217,10 +246,10 @@ func (p Policy) logf(format string, a ...any) {
 	}
 }
 
-// Do, op'u bütçe tükenene veya kalıcı bir hata gelene kadar dener.
+// Do tries op until the budget runs out or a permanent error arrives.
 //
-// Sınıflandırma sırası önemli: captcha her şeyden önce gelir, çünkü beklemek
-// onu çözmez ve denemeye devam etmek durumu kötüleştirir.
+// Classification order matters: captcha comes before everything, because
+// waiting doesn't solve it and continuing makes things worse.
 func (p Policy) Do(ctx context.Context, op func(attempt int) error) error {
 	attempts := p.MaxAttempts
 	if attempts < 1 {
@@ -242,19 +271,19 @@ func (p Policy) Do(ctx context.Context, op func(attempt int) error) error {
 		}
 		last = err
 
-		// Context iptali yeniden denenmez; kullanıcı durmamızı istedi.
+		// Context cancellation is not retried; the user asked us to stop.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 
 		var capt captchaError
 		if errors.As(err, &capt) && capt.CaptchaRequired() {
-			return fmt.Errorf("%w: captcha isteniyor, çözmeye çalışmıyoruz: %w", ErrStop, err)
+			return fmt.Errorf("%w: captcha required, not attempting to solve it: %w", ErrStop, err)
 		}
 
 		var rt retryableError
 		if !errors.As(err, &rt) || !rt.Retryable() {
-			return err // kalıcı
+			return err // permanent
 		}
 
 		if attempt == attempts-1 {
@@ -262,13 +291,13 @@ func (p Policy) Do(ctx context.Context, op func(attempt int) error) error {
 		}
 		d := p.Backoff.Delay(attempt)
 		if !deadline.IsZero() && time.Now().Add(d).After(deadline) {
-			p.logf("bütçe bitti (%s), beklenmiyor", p.MaxElapsed)
+			p.logf("budget exhausted (%s), not waiting", p.MaxElapsed)
 			break
 		}
-		p.logf("deneme %d/%d başarısız (%v), %s sonra tekrar", attempt+1, attempts, err, d.Round(time.Millisecond))
+		p.logf("attempt %d/%d failed (%v), retrying in %s", attempt+1, attempts, err, d.Round(time.Millisecond))
 		if serr := Sleep(ctx, d); serr != nil {
 			return serr
 		}
 	}
-	return fmt.Errorf("%w (%d deneme): %w", ErrExhausted, attempts, last)
+	return fmt.Errorf("%w (%d attempts): %w", ErrExhausted, attempts, last)
 }

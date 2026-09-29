@@ -2,21 +2,22 @@ package site
 
 import "strings"
 
-// MatchHost, bir host'un desen listesinden herhangi birine uyup uymadığını söyler.
+// MatchHost reports whether a host matches any pattern in the list.
 //
-// Desenler ya birebir bir host ("pixeldrain.com") ya da tek yıldızlı bir joker
-// olabilir ("bunkr.*", "*.bunkr.la"). Joker TAM OLARAK BİR etiket karşılar:
-// karşıladığı kısım boş olamaz ve nokta içeremez.
+// A pattern is either an exact host ("pixeldrain.com") or a wildcard with a
+// single star ("bunkr.*", "*.bunkr.la"). The wildcard matches EXACTLY ONE
+// label: the part it covers can be neither empty nor contain a dot.
 //
-// Tek etiket kuralı bir güvenlik sınırıdır, kolaylık değil. Joker çok etiketli
-// olsaydı "bunkr.*" deseni "bunkr.attacker.com" ile eşleşirdi ve girdi
-// listesindeki düşmanca bir link güvenilen site sayılıp çekilirdi. Çok parçalı
-// bir TLD gerekirse ("bunkr.co.uk") açıkça listeye eklenir; kamu son ek listesi
-// olmadan bunu jokerle güvenli biçimde ifade etmenin yolu yok.
+// The single-label rule is a security boundary, not a convenience. If the
+// wildcard could span labels, "bunkr.*" would match "bunkr.attacker.com" and
+// a hostile link in the input list would be treated as a trusted site and
+// fetched. If a multi-part TLD is needed ("bunkr.co.uk") it is added to the
+// list explicitly; without the public suffix list there is no safe way to
+// express that with a wildcard.
 //
-// Joker desteği kasıtlı: gallery-dl 2024-08-24'te bunkr TLD'lerini saymaktan
-// vazgeçip joker seçeneği ekledi, cyberdrop-dl de "bunkr.*" kullanıyor. Liste
-// tutmak bu sitede kaybedilmiş bir savaş.
+// Wildcard support is deliberate: gallery-dl gave up enumerating bunkr TLDs
+// on 2024-08-24 and added a wildcard option, and cyberdrop-dl also uses
+// "bunkr.*". Keeping a list for this site is a lost battle.
 func MatchHost(host string, patterns []string) bool {
 	host = normalizeHost(host)
 	if host == "" {
@@ -33,14 +34,14 @@ func MatchHost(host string, patterns []string) bool {
 func normalizeHost(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
 	h = strings.TrimSuffix(h, ".")
-	// Yaygın bir yazım kolaylığı: desende şema veya yol verilmişse at.
+	// A common convenience: drop a scheme or path given in the pattern.
 	if i := strings.Index(h, "://"); i >= 0 {
 		h = h[i+3:]
 	}
 	if i := strings.IndexAny(h, "/?#"); i >= 0 {
 		h = h[:i]
 	}
-	// Port varsa at (IPv6 köşeli parantezli hali dokunulmadan bırakılır).
+	// Drop a port if present (bracketed IPv6 is left untouched).
 	if !strings.HasPrefix(h, "[") {
 		if i := strings.LastIndex(h, ":"); i >= 0 && strings.Count(h, ":") == 1 {
 			h = h[:i]
@@ -66,11 +67,11 @@ func hostMatchesPattern(host, pattern string) bool {
 	}
 	middle := host[len(prefix) : len(host)-len(suffix)]
 
-	// Jokerin karşıladığı kısım boş olamaz: "bunkr.*" host "bunkr." ile eşleşmesin.
+	// The wildcard part cannot be empty: "bunkr.*" must not match host "bunkr.".
 	if middle == "" {
 		return false
 	}
-	// Tam olarak bir etiket: nokta içeremez. "bunkr.attacker.com" burada elenir.
+	// Exactly one label: no dots. "bunkr.attacker.com" is rejected here.
 	if strings.Contains(middle, ".") {
 		return false
 	}

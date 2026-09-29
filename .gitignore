@@ -3,7 +3,8 @@
 *.exe
 *.part
 *.part.state
+*.part.stmp
 done.jsonl
 
-# Yerel oturum izinleri; makineye ozel, paylasilmaz.
+# Local session permissions; machine-specific, not shared.
 .claude/settings.local.json

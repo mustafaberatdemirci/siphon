@@ -1,16 +1,16 @@
 package config
 
-// Kod incelemesinde bulunan config hataları için regresyon testleri.
+// Regression tests for config bugs found in code review.
 
 import (
 	"strings"
 	"testing"
 )
 
-// BULGU 10a. remove() ham string karşılaştırıyordu, eşleştirme tarafı
-// (site.MatchHost) ise host'u küçük harfe çevirip sondaki noktayı atıyor.
-// Sonuç: `domains_remove = ["PixelDrain.COM"]` yazan bir silme sessizce
-// hiçbir şey yapmıyordu.
+// FINDING 10a. remove() compared raw strings, while the matching side
+// (site.MatchHost) lowercases the host and drops a trailing dot. Result: a
+// removal written as `domains_remove = ["PixelDrain.COM"]` silently did
+// nothing.
 func TestDomainsRemoveIsCaseAndDotInsensitive(t *testing.T) {
 	cases := []string{"PixelDrain.COM", "pixeldrain.com.", "  PIXELDRAIN.com  "}
 	for _, form := range cases {
@@ -21,21 +21,21 @@ func TestDomainsRemoveIsCaseAndDotInsensitive(t *testing.T) {
 		}
 		for _, d := range cfgs[0].Domains {
 			if strings.EqualFold(strings.TrimSuffix(d, "."), "pixeldrain.com") {
-				t.Errorf("%q ile silme çalışmadı; domains = %v", form, cfgs[0].Domains)
+				t.Errorf("removal with %q did not work; domains = %v", form, cfgs[0].Domains)
 			}
 		}
 	}
 }
 
-// BULGU 10b. Silme mergeSite içinde uygulanıyordu, ama dış dosyanın YENİ
-// tanımladığı bir site o dala hiç girmiyor. Sonuç: yeni sitenin kendi
-// domains_remove alanı sessizce yok sayılıyordu.
+// FINDING 10b. Removal was applied inside mergeSite, but a site NEWLY defined
+// by the external file never enters that branch. Result: the new site's own
+// domains_remove was silently ignored.
 func TestNewSiteOwnDomainsRemoveIsApplied(t *testing.T) {
 	ext := `
 [[site]]
-name = "yenisite"
-domains = ["bir.com", "iki.com", "uc.com"]
-domains_remove = ["iki.com"]
+name = "newsite"
+domains = ["one.com", "two.com", "three.com"]
+domains_remove = ["two.com"]
 `
 	cfgs, _, err := Load([]byte(baseTOML), writeTemp(t, ext))
 	if err != nil {
@@ -43,25 +43,25 @@ domains_remove = ["iki.com"]
 	}
 	var found *struct{ domains []string }
 	for _, c := range cfgs {
-		if c.Name == "yenisite" {
+		if c.Name == "newsite" {
 			found = &struct{ domains []string }{c.Domains}
 		}
 	}
 	if found == nil {
-		t.Fatal("yenisite kurulmadı")
+		t.Fatal("newsite was not built")
 	}
 	for _, d := range found.domains {
-		if d == "iki.com" {
-			t.Fatalf("yeni sitenin domains_remove'u uygulanmadı: %v", found.domains)
+		if d == "two.com" {
+			t.Fatalf("the new site's domains_remove was not applied: %v", found.domains)
 		}
 	}
 	if len(found.domains) != 2 {
-		t.Fatalf("domains = %v, iki eleman bekleniyordu", found.domains)
+		t.Fatalf("domains = %v, expected two entries", found.domains)
 	}
 }
 
-// Silme tüm domainleri süpürürse bu bir kullanım hatasıdır: domains boş bir
-// resolver hiçbir URL'e uymaz ve araç sessizce hiçbir şey indirmez.
+// If removal sweeps away every domain that is a usage error: a resolver with
+// empty domains matches no URL and the tool silently downloads nothing.
 func TestRemovingAllDomainsIsUsageError(t *testing.T) {
 	ext := `
 [[site]]
@@ -70,11 +70,11 @@ domains_remove = ["pixeldrain.com", "pixeldra.in"]
 `
 	_, _, err := Load([]byte(baseTOML), writeTemp(t, ext))
 	if err == nil {
-		t.Fatal("tüm domainler silindiğinde hata bekleniyordu")
+		t.Fatal("expected an error when every domain is removed")
 	}
 }
 
-// cdn_patterns_remove de aynı yoldan geçmeli.
+// cdn_patterns_remove must go through the same path.
 func TestCDNPatternsRemoveApplied(t *testing.T) {
 	ext := `
 [[site]]
@@ -88,10 +88,10 @@ cdn_patterns_remove = ["CDN-A"]
 	}
 	for _, c := range cfgs[0].CDNPatterns {
 		if strings.EqualFold(c, "cdn-a") {
-			t.Fatalf("cdn_patterns_remove uygulanmadı: %v", cfgs[0].CDNPatterns)
+			t.Fatalf("cdn_patterns_remove was not applied: %v", cfgs[0].CDNPatterns)
 		}
 	}
 	if len(cfgs[0].CDNPatterns) != 1 || cfgs[0].CDNPatterns[0] != "cdn-b" {
-		t.Fatalf("cdn_patterns = %v, sadece cdn-b kalmalıydı", cfgs[0].CDNPatterns)
+		t.Fatalf("cdn_patterns = %v, only cdn-b should remain", cfgs[0].CDNPatterns)
 	}
 }
