@@ -41,8 +41,8 @@ checksums of every archive.
 - **macOS:** the binaries aren't signed; the first time, right-click
   `siphon-gui` and choose *Open*, or run
   `xattr -d com.apple.quarantine siphon-gui`.
-- **Linux:** the window version needs OpenGL and X11 libraries, present on
-  any desktop install.
+- **Linux:** the window version needs the OpenGL, X11 and Wayland client
+  libraries, present on any desktop install.
 
 To build it yourself instead, see [Building](#building).
 
@@ -168,7 +168,8 @@ Requirements:
 
 - Go 1.27 or newer.
 - For the GUI only: a C compiler, because Fyne uses cgo. On Windows, MinGW-w64
-  works.
+  works. On Debian or Ubuntu:
+  `sudo apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev`.
 
 ```sh
 # Command-line tool (static, no cgo needed)

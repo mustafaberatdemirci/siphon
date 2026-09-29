@@ -23,10 +23,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The window version is Fyne, which needs cgo and OpenGL/X11 headers.
+      # The window version is Fyne, which needs cgo and OpenGL/X11 headers;
+      # its GLFW (3.4) builds the Wayland backend too.
       - name: Install GUI build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
 
       - name: gofmt
         if: runner.os == 'Linux'
