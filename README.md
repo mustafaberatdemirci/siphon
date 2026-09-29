@@ -1,19 +1,47 @@
 # Siphon
 
-Siphon is a bulk downloader for **pixeldrain**, **bunkr** and **mega.nz**
-links, and for plain direct file links. Paste album, folder or file links and
-it fetches every file into a folder: resumable, verified, and with a clear
-explanation when something goes wrong.
+[![CI](https://github.com/mustafaberatdemirci/siphon/actions/workflows/ci.yml/badge.svg)](https://github.com/mustafaberatdemirci/siphon/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mustafaberatdemirci/siphon)](https://github.com/mustafaberatdemirci/siphon/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**A fast, single-file downloader for mega.nz, pixeldrain, bunkr and direct
+links.** No Java, no Python, nothing to install: download one file and run it.
+
+- **mega over 8 connections**, decrypted on the fly, and when the transfer
+  quota runs out it **resumes by itself seconds after you switch VPN
+  servers**.
+- **A persistent queue** in a window: pause, resume, cancel, several downloads
+  at once; closing the window keeps it running in the notification area.
+- **It tells you why a site stopped working.** `siphon doctor` checks each site
+  layer by layer (DNS, TLS, Cloudflare challenge, fetch, parse, item page,
+  CDN) and names the layer that broke, instead of "0 files downloaded".
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Siphon's download queue: four files downloading over 8, 8, 3 and 4 connections with speed and time left, two queued, one paused" width="820" />
+</p>
 
 It comes as two programs that share one download pipeline:
 
 - **`siphon-gui`**: a window with a persistent download queue (IDM-style).
 - **`siphon`**: a command-line tool for scripts and batch runs.
 
-When a site changes and downloads stop working, the tool tells you why: the
-`doctor` command checks each site layer by layer (DNS, TLS, Cloudflare
-challenge, fetch, parse, item page, CDN) and names the layer that broke. So
-you don't just see "0 files downloaded".
+## Install
+
+Download the archive for your system from the
+[latest release](https://github.com/mustafaberatdemirci/siphon/releases/latest),
+unpack it and run `siphon-gui` (or `siphon` in a terminal). Each program is a
+single file; there is nothing to install. `SHA256SUMS.txt` lists the
+checksums of every archive.
+
+- **Windows:** SmartScreen may warn about an unknown publisher the first
+  time; choose *More info → Run anyway*.
+- **macOS:** the binaries aren't signed; the first time, right-click
+  `siphon-gui` and choose *Open*, or run
+  `xattr -d com.apple.quarantine siphon-gui`.
+- **Linux:** the window version needs OpenGL and X11 libraries, present on
+  any desktop install.
+
+To build it yourself instead, see [Building](#building).
 
 ## Features
 
@@ -94,8 +122,8 @@ go build -ldflags -H=windowsgui -o siphon-gui.exe ./cmd/siphon-gui
 ```
 
 Each result is a single file with the site definitions embedded; nothing
-else needs to be installed. Development and live testing happen on Windows;
-the code has non-Windows fallbacks, but other platforms are less tested.
+else needs to be installed. Live testing happens on Windows; CI builds and
+tests Linux and macOS too.
 
 ## Using the window version
 
@@ -306,4 +334,23 @@ go test -race ./...
 
 The tests run offline against local `httptest` servers. They cover the
 resolvers, resume and segmented downloads, the mega crypto, the queue engine
-and the GUI's view model. `-race` needs cgo, which means a C compiler.
+and the GUI's view model. `-race` needs cgo, which means a C compiler. CI runs
+them on Windows, Linux and macOS for every push and pull request.
+
+The screenshot above is drawn by a test, off screen, with sample jobs; after
+changing the window, regenerate it with
+`SIPHON_SCREENSHOT=1 go test ./cmd/siphon-gui -run READMEScreenshot`.
+
+**Releasing:** push a tag such as `v1.0.0`. The release workflow builds both
+programs for Windows, Linux and macOS, stamps the version into them
+(`siphon -version`) and publishes the archives with their checksums.
+
+## Responsible use
+
+Siphon downloads what the sites serve to anyone with the link; it doesn't
+bypass logins, paywalls, DRM or captchas. You are responsible for respecting
+copyright and each site's terms of service.
+
+## License
+
+[MIT](LICENSE)
