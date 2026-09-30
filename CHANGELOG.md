@@ -2,6 +2,23 @@
 
 Each version's section is also its release notes on GitHub.
 
+## 0.1.1
+
+**Fixes**
+
+- Files inside subfolders (mega, gofile and mediafire folders) showed 0%
+  with no transfer rate, time left or connections while they downloaded.
+  The downloads themselves were fine; the window now shows their progress.
+- The counts next to the categories on the left are readable again, on the
+  dark and the light theme.
+
+**Downloads**
+
+Windows (x64, also runs on Windows 11 on ARM), macOS (one app for Apple
+Silicon and Intel) and Linux (x64 and ARM64). The programs aren't
+code-signed or notarized yet: on first launch Windows SmartScreen and macOS
+warn; the README's *Install* section says how to open them.
+
 ## 0.1.0
 
 The first public release: one download queue for the file hosts people
