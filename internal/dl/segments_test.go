@@ -183,6 +183,10 @@ func TestPlanSegments(t *testing.T) {
 // sha256, and the server must really see four separate ranges.
 func TestSegmentedDownloadIsCorrect(t *testing.T) {
 	s := newSegServer(t, 1<<20)
+	// Each segment waits before its data, so they overlap. MEASURED: on a
+	// fast macOS runner each 256 KB segment was served before the next one
+	// connected and the test saw no parallelism.
+	s.slow = 40 * time.Millisecond
 	out := tempDir(t)
 	d := &Downloader{Client: s.srv.Client(), Segments: 4, MinSegmentSize: 64 << 10}
 	it := segItem(s, "large.bin")
