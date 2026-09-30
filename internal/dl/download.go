@@ -354,9 +354,11 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		return Result{}, fmt.Errorf("unusable file name: %q (%s)", it.Filename, it.SourcePage)
 	}
 	it.Filename = name
-	it.Dir = DirPath(it.Dir) // may stay empty; means the root
 
-	dir := filepath.Join(outRoot, it.Dir)
+	// it.Dir stays as the caller gave it: Progress and Connections pass the
+	// item back, and the queue finds its job by SourcePage and Dir. Only the
+	// path on disk is sanitized (an empty result means the root).
+	dir := filepath.Join(outRoot, DirPath(it.Dir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Result{}, fmt.Errorf("could not create folder: %w", err)
 	}

@@ -396,12 +396,13 @@ func newTreeItem(bool) fyne.CanvasObject {
 	count := widget.NewLabel("")
 	count.Alignment = fyne.TextAlignTrailing
 	count.Importance = widget.LowImportance
-	return container.NewBorder(nil, nil, nil, count, name)
+	return container.NewBorder(nil, nil, nil, container.NewThemeOverride(count, countTheme{newCompactTheme()}), name)
 }
 
 func setTreeItem(o fyne.CanvasObject, label string, n int) {
 	c := o.(*fyne.Container)
-	name, count := c.Objects[0].(*widget.Label), c.Objects[1].(*widget.Label)
+	name := c.Objects[0].(*widget.Label)
+	count := c.Objects[1].(*container.ThemeOverride).Content.(*widget.Label)
 	name.SetText(label)
 	if n > 0 {
 		count.SetText(strconv.Itoa(n))

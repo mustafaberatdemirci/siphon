@@ -719,6 +719,42 @@ func TestSegmentedReportsConnections(t *testing.T) {
 	}
 }
 
+// Progress and Connections carry the item as the caller gave it: the queue
+// finds its job by SourcePage and Dir. MEASURED: the folder went through
+// DirPath first, so a nested "Vids/Clips" came back as "Vids\Clips" on
+// Windows, no job matched and every row of a mega folder sat at 0% with no
+// speed. A character DirPath replaces does the same on every system.
+func TestHooksGetTheCallersItem(t *testing.T) {
+	s := newSegServer(t, 1<<20)
+	for _, segments := range []int{4, 1} {
+		it := segItem(s, fmt.Sprintf("hooks-%d.bin", segments))
+		it.Dir = "Vids/Clips: 2024"
+		var mu sync.Mutex
+		var got []site.Item
+		record := func(x site.Item) { mu.Lock(); got = append(got, x); mu.Unlock() }
+		d := &Downloader{
+			Client: s.srv.Client(), Segments: segments, MinSegmentSize: 64 << 10,
+			Progress:    func(x site.Item, _, _ int64) { record(x) },
+			Connections: func(x site.Item, _ int) { record(x) },
+		}
+		if _, err := d.Download(context.Background(), tempDir(t), it); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		if len(got) == 0 {
+			t.Errorf("%d connections: no hook was called", segments)
+		}
+		for _, x := range got {
+			if x.Dir != it.Dir || x.SourcePage != it.SourcePage {
+				t.Errorf("%d connections: a hook got Dir %q, SourcePage %q; want %q, %q",
+					segments, x.Dir, x.SourcePage, it.Dir, it.SourcePage)
+				break
+			}
+		}
+		mu.Unlock()
+	}
+}
+
 // A download interrupted with four segments, resumed after the user dropped
 // to one connection: it continues the segments already on disk (not from
 // scratch) and opens only one connection at a time.

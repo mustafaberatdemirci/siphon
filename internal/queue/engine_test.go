@@ -168,6 +168,8 @@ type fakeResolver struct {
 	// If prefix is set only "<prefix>album://" and "<prefix>file://" are
 	// recognized: to build two different sites in the same engine.
 	prefix string
+	// dir is the album folder of every item; "" means "Album".
+	dir string
 }
 
 // failNextResolveOne fails the next n re-resolutions with err.
@@ -213,10 +215,14 @@ func (r *fakeResolver) item(name string) site.Item {
 	r.f.mu.Lock()
 	gen := r.f.gen
 	r.f.mu.Unlock()
+	dir := r.dir
+	if dir == "" {
+		dir = "Album"
+	}
 	return site.Item{
 		URL:        r.f.srv.URL + "/f/" + name + "?gen=" + fmt.Sprint(gen),
 		SourcePage: "file://" + name,
-		Dir:        "Album",
+		Dir:        dir,
 		Filename:   name,
 		Size:       int64(len(r.f.files[name])),
 	}
@@ -1695,6 +1701,51 @@ func TestRunningJobReportsConnections(t *testing.T) {
 	}
 	if j.Conns != 0 {
 		t.Errorf("a finished job still reports %d connections", j.Conns)
+	}
+}
+
+// A job in a nested folder (mega, gofile and mediafire keep subfolders) gets
+// its progress and connections while it runs. MEASURED: on Windows the
+// downloader reported "Vids\Clips" for the job's "Vids/Clips", nothing
+// matched, and every row sat at 0% with no speed, time left or connections.
+func TestNestedFolderJobGetsProgress(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	f.delay = 150 * time.Millisecond
+	cfg := site.SiteConfig{Name: "fake", MaxConcurrent: 8, MaxSegments: 4, MaxRetries: 2}.WithDefaults()
+	var mu sync.Mutex
+	var done int64
+	var conns int
+	e, err := New(Options{
+		MaxActive: 1,
+		Client:    f.srv.Client(),
+		Resolvers: []site.Resolver{&fakeResolver{f: f, dir: "Album/Clips: 2024"}},
+		Configs:   []site.SiteConfig{cfg},
+		OnChange: func(j Job) {
+			if j.State != StateRunning {
+				return
+			}
+			mu.Lock()
+			done = max(done, j.Done)
+			conns = max(conns, j.Conns)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.workers["fake"].Down.MinSegmentSize = 16 << 10
+	h := &harness{t: t, f: f, e: e, out: testutil.TempDir(t)}
+	h.start()
+	defer h.stop()
+
+	if _, err := e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.waitState(jobByName(e, "a.bin").ID, StateDone, 10*time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	if done == 0 || conns == 0 {
+		t.Errorf("while running the job showed %d bytes over %d connections; want both above 0", done, conns)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"image/color"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +12,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
@@ -293,4 +297,58 @@ func TestResolveLinksKeepsTheFailedOnes(t *testing.T) {
 	if q.pending != "https://list.test/kept" {
 		t.Errorf("pending = %q", q.pending)
 	}
+}
+
+// The category tree's counts are drawn readable: the item shows the number,
+// and on both variants its colour stands out from the background at least
+// 4.5:1 (it was the disabled colour, about 1.6:1 on the dark theme).
+func TestTreeCountsAreReadable(t *testing.T) {
+	test.NewTempApp(t)
+	o := newTreeItem(false)
+	setTreeItem(o, "All downloads", 520)
+	count := o.(*fyne.Container).Objects[1].(*container.ThemeOverride).Content.(*widget.Label)
+	if count.Text != "520" {
+		t.Fatalf("count shows %q", count.Text)
+	}
+	setTreeItem(o, "Done", 0)
+	if count.Text != "" {
+		t.Errorf("an empty category shows %q", count.Text)
+	}
+	th := countTheme{newCompactTheme()}
+	for _, v := range []fyne.ThemeVariant{theme.VariantDark, theme.VariantLight} {
+		bg := th.Color(theme.ColorNameBackground, v)
+		fg := over(th.Color(theme.ColorNameDisabled, v), bg)
+		if c := contrast(fg, bg); c < 4.5 {
+			t.Errorf("variant %d: count contrast %.1f:1, want at least 4.5:1", v, c)
+		}
+	}
+}
+
+// over paints a translucent colour onto an opaque background.
+func over(c, bg color.Color) color.Color {
+	f := color.NRGBAModel.Convert(c).(color.NRGBA)
+	b := color.NRGBAModel.Convert(bg).(color.NRGBA)
+	a := float64(f.A) / 0xff
+	mix := func(x, y uint8) uint8 { return uint8(a*float64(x) + (1-a)*float64(y) + 0.5) }
+	return color.NRGBA{R: mix(f.R, b.R), G: mix(f.G, b.G), B: mix(f.B, b.B), A: 0xff}
+}
+
+// contrast is the WCAG contrast ratio of two opaque colours.
+func contrast(a, b color.Color) float64 {
+	lum := func(c color.Color) float64 {
+		r, g, b, _ := c.RGBA()
+		ch := func(v uint32) float64 {
+			s := float64(v) / 0xffff
+			if s <= 0.03928 {
+				return s / 12.92
+			}
+			return math.Pow((s+0.055)/1.055, 2.4)
+		}
+		return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b)
+	}
+	la, lb := lum(a), lum(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
 }
