@@ -59,7 +59,8 @@ func TestREADMEScreenshot(t *testing.T) {
 	}
 	vm.mu.Lock()
 	for i, j := range jobs {
-		job := queue.Job{ID: string(rune('a' + i)), Filename: j.name, State: j.st, Done: j.done, Size: j.size, Conns: j.conns}
+		job := queue.Job{ID: string(rune('a' + i)), Filename: j.name, State: j.st, Done: j.done, Size: j.size, Conns: j.conns,
+			AddedAt: now.Add(-time.Duration(len(jobs)-i) * 7 * time.Minute)}
 		if j.st == queue.StateFailed {
 			job.Error = "HTTP 404: the file was removed from the server"
 		}

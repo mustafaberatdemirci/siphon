@@ -148,6 +148,7 @@ func main() {
 		diag.SetOnClosed(func() { diag = nil })
 		diag.Show()
 	}
+	w.SetMainMenu(q.mainMenu(quit))
 	w.SetContent(queueView)
 
 	if statePath == "" {

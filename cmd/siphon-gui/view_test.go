@@ -27,9 +27,9 @@ func ids(rows []row) string {
 	return strings.Join(out, ",")
 }
 
-// Every state is under All, and under exactly one of the other filters
-// except Unfinished, which gathers what isn't over.
-func TestFiltersCoverEveryState(t *testing.T) {
+// The tree's states under Unfinished, with Finished, split every state
+// between them: each job is under exactly one.
+func TestTreeStatesCoverEveryState(t *testing.T) {
 	states := []queue.State{queue.StateQueued, queue.StateRunning, queue.StatePaused, queue.StateDone,
 		queue.StateFailed, queue.StateSkipped, queue.StateStopped, queue.StateWaiting}
 	for _, s := range states {
@@ -37,13 +37,13 @@ func TestFiltersCoverEveryState(t *testing.T) {
 			t.Errorf("%s isn't under All", s)
 		}
 		n := 0
-		for _, f := range filters {
-			if f != filterAll && f != filterUnfinished && f.matches(s) {
+		for _, f := range append(append([]filter{}, stateNodes...), filterFinished) {
+			if f.matches(s) {
 				n++
 			}
 		}
 		if n != 1 {
-			t.Errorf("%s is under %d specific filters, want 1", s, n)
+			t.Errorf("%s is under %d of the states and Finished, want 1", s, n)
 		}
 		if filterUnfinished.matches(s) == s.Finished() {
 			t.Errorf("%s: Unfinished = %v", s, filterUnfinished.matches(s))
@@ -51,23 +51,123 @@ func TestFiltersCoverEveryState(t *testing.T) {
 	}
 }
 
-func TestViewFiltersAndCounts(t *testing.T) {
+func named(id string, st queue.State, name string) queue.Job {
+	j := job(id, st, 0, 10)
+	j.Filename = name
+	return j
+}
+
+func TestCategoryViewAndCounts(t *testing.T) {
 	vm := vmWith(
-		job("a", queue.StateRunning, 1, 10),
-		job("b", queue.StateDone, 10, 10),
-		job("c", queue.StateFailed, 0, 10),
-		job("d", queue.StateQueued, 0, 10),
-		job("e", queue.StateSkipped, 10, 10),
+		named("a", queue.StateRunning, "clip.mp4"),
+		named("b", queue.StateDone, "photo.jpg"),
+		named("c", queue.StateFailed, "setup.exe"),
+		named("d", queue.StateQueued, "film.mkv"),
+		named("e", queue.StateSkipped, "album.part01.rar"),
 	)
-	if got := ids(vm.View(filterFinished, sortOrder{})); got != "b,e" {
-		t.Errorf("Finished shows %s", got)
+	cases := map[string]string{
+		nodeAll:                               "a,b,c,d,e",
+		nodeFinished:                          "b,e",
+		nodeUnfinished:                        "a,c,d",
+		kindNodeID(nodeAll, kindVideo):        "a,d",
+		kindNodeID(nodeFinished, kindArchive): "e",
+		kindNodeID(nodeUnfinished, kindVideo): "a,d",
+		stateNodeID(filterFailed):             "c",
+		stateNodeID(filterActive):             "a",
 	}
-	if got := ids(vm.View(filterUnfinished, sortOrder{})); got != "a,c,d" {
-		t.Errorf("Unfinished shows %s", got)
+	for id, want := range cases {
+		if got := ids(vm.ViewCategory(categoryOf(id), sortOrder{})); got != want {
+			t.Errorf("%s (%s) shows %s, want %s", id, categoryLabel(id), got, want)
+		}
 	}
-	c := vm.Counts()
-	if c[filterAll] != 5 || c[filterFinished] != 2 || c[filterFailed] != 1 || c[filterUnfinished] != 3 || c[filterPaused] != 0 {
+	c := vm.CategoryCounts()
+	if c[nodeAll] != 5 || c[nodeFinished] != 2 || c[nodeUnfinished] != 3 ||
+		c[kindNodeID(nodeAll, kindImage)] != 1 || c[stateNodeID(filterPaused)] != 0 {
 		t.Errorf("counts = %v", c)
+	}
+}
+
+func TestCategoryIDs(t *testing.T) {
+	for _, id := range []string{nodeAll, nodeUnfinished, nodeFinished,
+		stateNodeID(filterPaused), kindNodeID(nodeFinished, kindAudio), kindNodeID(nodeUnfinished, kindProgram)} {
+		c := categoryOf(id)
+		if categoryLabel(id) == "" {
+			t.Errorf("%s has no label", id)
+		}
+		switch {
+		case id == stateNodeID(filterPaused) && (c.f != filterPaused || c.k != kindAny),
+			id == kindNodeID(nodeFinished, kindAudio) && (c.f != filterFinished || c.k != kindAudio):
+			t.Errorf("%s reads as %+v", id, c)
+		}
+	}
+	if c := categoryOf("nonsense/kind/3"); c.f != filterAll || c.k != kindAny {
+		t.Errorf("an unknown id reads as %+v, want All downloads", c)
+	}
+}
+
+func TestKindOf(t *testing.T) {
+	cases := map[string]fileKind{
+		"Holiday.MP4": kindVideo, "a.webm": kindVideo, "photo.jpeg": kindImage, "song.flac": kindAudio,
+		"backup.zip": kindArchive, "disk.iso": kindArchive, "x.part01.rar": kindArchive, "x.7z.001": kindArchive,
+		"book.epub": kindDocument, "setup.exe": kindProgram, "app.apk": kindProgram,
+		"README": kindOther, "data.bin": kindOther, "notes.001": kindOther,
+	}
+	for name, want := range cases {
+		if got := kindOf(name); got != want {
+			t.Errorf("kindOf(%q) = %s, want %s", name, got.label(), want.label())
+		}
+	}
+}
+
+// Kinds and states with nothing in them stay out of the tree, unless the
+// node is the one selected (it mustn't vanish under the user).
+func TestTreeChildren(t *testing.T) {
+	counts := map[string]int{
+		kindNodeID(nodeAll, kindVideo):        2,
+		stateNodeID(filterActive):             1,
+		kindNodeID(nodeUnfinished, kindVideo): 1,
+	}
+	if got := treeChildren("", counts, nodeAll); strings.Join(got, ",") != "all,unfinished,finished" {
+		t.Errorf("top = %v", got)
+	}
+	if got := treeChildren(nodeAll, counts, nodeAll); len(got) != 1 || got[0] != kindNodeID(nodeAll, kindVideo) {
+		t.Errorf("under All: %v", got)
+	}
+	// Unfinished lists states only, and Finished nothing: a short tree.
+	if got := treeChildren(nodeUnfinished, counts, nodeAll); strings.Join(got, ",") != stateNodeID(filterActive) {
+		t.Errorf("under Unfinished: %v", got)
+	}
+	if got := treeChildren(nodeFinished, counts, nodeAll); got != nil || isTreeBranch(nodeFinished) {
+		t.Errorf("Finished has children: %v", got)
+	}
+	waiting := stateNodeID(filterWaiting)
+	if got := treeChildren(nodeUnfinished, counts, waiting); !strings.Contains(strings.Join(got, ","), waiting) {
+		t.Errorf("the selected node vanished: %v", got)
+	}
+	if got := treeChildren(kindNodeID(nodeAll, kindVideo), counts, nodeAll); got != nil {
+		t.Errorf("a leaf has children: %v", got)
+	}
+}
+
+func TestColumnTextsAddedAndConns(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local)
+	if got := addedText(time.Date(2026, 6, 17, 23, 4, 0, 0, time.Local), now); got != "Jun 17 23:04" {
+		t.Errorf("this year: %q", got)
+	}
+	if got := addedText(time.Date(2025, 12, 1, 9, 0, 0, 0, time.Local), now); got != "Dec 1 2025" {
+		t.Errorf("last year: %q", got)
+	}
+	if got := addedText(time.Time{}, now); got != "" {
+		t.Errorf("no time: %q", got)
+	}
+	j := job("a", queue.StateRunning, 1, 10)
+	j.Conns = 8
+	if got := connsText(j); got != "8" {
+		t.Errorf("running with 8: %q", got)
+	}
+	j.State = queue.StatePaused
+	if got := connsText(j); got != "" {
+		t.Errorf("paused: %q", got)
 	}
 }
 
@@ -114,10 +214,11 @@ func TestViewSorts(t *testing.T) {
 		{sortOrder{key: sortSpeed, desc: true}, "d,a,b,c"},
 		// d: 10 bytes at 50 B/s; a: 50 bytes at 10 B/s; the rest have none and go last.
 		{sortOrder{key: sortETA}, "d,a,b,c"},
-		{sortOrder{key: sortStatus}, "a,d,c,b"},
+		// Same state: further along first.
+		{sortOrder{key: sortStatus}, "d,a,c,b"},
 	}
 	for _, tc := range cases {
-		if got := ids(vm.View(filterAll, tc.o)); got != tc.want {
+		if got := ids(vm.ViewCategory(category{f: filterAll}, tc.o)); got != tc.want {
 			t.Errorf("%+v: %s, want %s", tc.o, got, tc.want)
 		}
 	}
@@ -175,28 +276,6 @@ func TestActionsForSelection(t *testing.T) {
 	}
 	if got := counted("Remove", 1); got != "Remove" {
 		t.Errorf("counted = %q", got)
-	}
-}
-
-// "Waiting for quota" is mega's alone: it only shows while something waits,
-// or while it is the filter on screen (it mustn't vanish under the user).
-func TestSidebarEntries(t *testing.T) {
-	has := func(es []sidebarEntry, f filter) bool {
-		for _, e := range es {
-			if e.f == f {
-				return true
-			}
-		}
-		return false
-	}
-	if has(sidebarEntries(map[filter]int{}, filterAll), filterWaiting) {
-		t.Error("Waiting shown with nothing waiting")
-	}
-	if !has(sidebarEntries(map[filter]int{filterWaiting: 2}, filterAll), filterWaiting) {
-		t.Error("Waiting hidden while jobs wait")
-	}
-	if !has(sidebarEntries(map[filter]int{}, filterWaiting), filterWaiting) {
-		t.Error("the selected filter vanished")
 	}
 }
 

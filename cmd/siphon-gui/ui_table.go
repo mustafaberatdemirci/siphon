@@ -24,20 +24,22 @@ type column struct {
 	align fyne.TextAlign
 }
 
-// columns: Name and Status take what the fixed ones leave; a long name or
-// error is cut with an ellipsis instead of widening the table.
+// columns, in a download manager's order. File name and Status take what
+// the fixed ones leave; a long name or error is cut with an ellipsis instead
+// of widening the table.
 var columns = []column{
-	{title: "Name", key: sortName, share: 0.52, align: fyne.TextAlignLeading},
-	{title: "Size", key: sortSize, width: 80, align: fyne.TextAlignTrailing},
-	{title: "Progress", key: sortProgress, width: 120, align: fyne.TextAlignCenter},
-	{title: "Speed", key: sortSpeed, width: 86, align: fyne.TextAlignTrailing},
-	{title: "Time left", key: sortETA, width: 74, align: fyne.TextAlignTrailing},
-	{title: "Status", key: sortStatus, share: 0.48, align: fyne.TextAlignLeading},
+	{title: "File name", key: sortName, share: 0.6, align: fyne.TextAlignLeading},
+	{title: "Size", key: sortSize, width: 74, align: fyne.TextAlignTrailing},
+	{title: "Status", key: sortStatus, share: 0.4, align: fyne.TextAlignLeading},
+	{title: "Time left", key: sortETA, width: 66, align: fyne.TextAlignTrailing},
+	{title: "Transfer rate", key: sortSpeed, width: 90, align: fyne.TextAlignTrailing},
+	{title: "Conn.", key: sortConns, width: 44, align: fyne.TextAlignCenter},
+	{title: "Added", key: sortAdded, width: 104, align: fyne.TextAlignLeading},
 }
 
 const (
 	colGap       = 6
-	minShareArea = 220 // Name and Status together never get less
+	minShareArea = 240 // File name and Status together never get less
 )
 
 // columnLayout places one object per column side by side. The header and
@@ -72,14 +74,8 @@ func (columnLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 		if i >= len(objs) {
 			return
 		}
-		// Each cell keeps its own height, centered: a progress bar stretched
-		// to the row's height would look like a block.
-		h := objs[i].MinSize().Height
-		if h > size.Height {
-			h = size.Height
-		}
-		objs[i].Resize(fyne.NewSize(w, h))
-		objs[i].Move(fyne.NewPos(x, (size.Height-h)/2))
+		objs[i].Resize(fyne.NewSize(w, size.Height))
+		objs[i].Move(fyne.NewPos(x, 0))
 		x += w + colGap
 	}
 }
@@ -136,6 +132,82 @@ func newHeader(onSort func(sortKey)) (obj fyne.CanvasObject, update func(sortOrd
 	return container.NewVBox(container.New(columnLayout{}, cells...), widget.NewSeparator()), update
 }
 
+// ---------- Status cell ----------
+
+// statusCell is the Status column: the text, and under it a thin line
+// showing how far the download is.
+type statusCell struct {
+	widget.BaseWidget
+	label *widget.Label
+	track *canvas.Rectangle
+	fill  *canvas.Rectangle
+	value float64 // 0..1; <0 hides the line
+}
+
+func newStatusCell() *statusCell {
+	c := &statusCell{
+		label: widget.NewLabel(""),
+		track: canvas.NewRectangle(theme.Color(theme.ColorNameInputBorder)),
+		fill:  canvas.NewRectangle(theme.Color(theme.ColorNamePrimary)),
+		value: -1,
+	}
+	c.label.Truncation = fyne.TextTruncateEllipsis
+	c.ExtendBaseWidget(c)
+	return c
+}
+
+func (c *statusCell) set(text string, imp widget.Importance, value float64) {
+	c.label.Importance = imp
+	c.label.SetText(text)
+	c.value = value
+	c.Refresh()
+}
+
+func (c *statusCell) CreateRenderer() fyne.WidgetRenderer {
+	return &statusCellRenderer{c: c, objs: []fyne.CanvasObject{c.label, c.track, c.fill}}
+}
+
+type statusCellRenderer struct {
+	c    *statusCell
+	objs []fyne.CanvasObject
+}
+
+func (r *statusCellRenderer) Layout(size fyne.Size) {
+	r.c.label.Resize(size)
+	r.c.label.Move(fyne.NewPos(0, 0))
+	const h, margin = 3, 2
+	pad := theme.InnerPadding()
+	w := size.Width - 2*pad
+	if w < 0 {
+		w = 0
+	}
+	y := size.Height - h - margin
+	r.c.track.Resize(fyne.NewSize(w, h))
+	r.c.track.Move(fyne.NewPos(pad, y))
+	fw := w * float32(r.c.value)
+	if fw < 0 {
+		fw = 0
+	}
+	r.c.fill.Resize(fyne.NewSize(fw, h))
+	r.c.fill.Move(fyne.NewPos(pad, y))
+}
+
+func (r *statusCellRenderer) MinSize() fyne.Size { return r.c.label.MinSize() }
+
+func (r *statusCellRenderer) Refresh() {
+	show := r.c.value >= 0
+	r.c.track.Hidden, r.c.fill.Hidden = !show, !show
+	r.c.track.FillColor = theme.Color(theme.ColorNameInputBorder)
+	r.c.fill.FillColor = theme.Color(theme.ColorNamePrimary)
+	r.Layout(r.c.Size())
+	r.c.label.Refresh()
+	r.c.track.Refresh()
+	r.c.fill.Refresh()
+}
+
+func (r *statusCellRenderer) Objects() []fyne.CanvasObject { return r.objs }
+func (r *statusCellRenderer) Destroy()                     {}
+
 // ---------- Row ----------
 
 // jobRow is one row of the table. Fyne recycles rows, so set rebinds it.
@@ -144,18 +216,18 @@ func newHeader(onSort func(sortKey)) (obj fyne.CanvasObject, update func(sortOrd
 // actions for them.
 type jobRow struct {
 	widget.BaseWidget
-	q       *queueTab
-	id      string
-	bg      *canvas.Rectangle
-	icon    *widget.Icon
-	name    *widget.Label
-	size    *widget.Label
-	bar     *widget.ProgressBar
-	barText string
-	speed   *widget.Label
-	eta     *widget.Label
-	status  *widget.Label
-	root    fyne.CanvasObject
+	q      *queueTab
+	id     string
+	bg     *canvas.Rectangle
+	icon   *widget.Icon
+	name   *widget.Label
+	size   *widget.Label
+	status *statusCell
+	eta    *widget.Label
+	speed  *widget.Label
+	conns  *widget.Label
+	added  *widget.Label
+	root   fyne.CanvasObject
 }
 
 func newJobRow(q *queueTab) *jobRow {
@@ -171,16 +243,15 @@ func newJobRow(q *queueTab) *jobRow {
 		icon:   widget.NewIcon(nil),
 		name:   label(fyne.TextAlignLeading),
 		size:   label(fyne.TextAlignTrailing),
-		bar:    widget.NewProgressBar(),
-		speed:  label(fyne.TextAlignTrailing),
+		status: newStatusCell(),
 		eta:    label(fyne.TextAlignTrailing),
-		status: label(fyne.TextAlignLeading),
+		speed:  label(fyne.TextAlignTrailing),
+		conns:  label(fyne.TextAlignCenter),
+		added:  label(fyne.TextAlignLeading),
 	}
-	r.bar.TextFormatter = func() string { return r.barText }
-	r.bg.CornerRadius = theme.SelectionRadiusSize()
 	cells := container.New(columnLayout{},
 		container.NewBorder(nil, nil, r.icon, nil, r.name),
-		r.size, r.bar, r.speed, r.eta, r.status)
+		r.size, r.status, r.eta, r.speed, r.conns, r.added)
 	r.root = container.NewStack(r.bg, cells)
 	r.ExtendBaseWidget(r)
 	return r
@@ -197,23 +268,18 @@ func (r *jobRow) set(rw row, selected bool) {
 		r.bg.FillColor = color.Transparent
 	}
 	r.bg.Refresh()
-	r.icon.SetResource(stateIcon(j.State))
+	r.icon.SetResource(iconFor(kindOf(j.Filename)))
 	r.name.SetText(j.Filename)
 	r.size.SetText(sizeText(j))
-	// A job with nothing to show (not started, or no size known) gets no
-	// bar: a column of empty bars is only clutter.
-	r.barText = progressText(j)
-	if r.barText == "" {
-		r.bar.Hide()
-	} else {
-		r.bar.Show()
-		r.bar.SetValue(rowProgress(j))
-		r.bar.Refresh() // the text may change while the value doesn't
+	bar := -1.0
+	if (j.State == queue.StateRunning || j.State == queue.StatePaused) && j.Size > 0 {
+		bar = rowProgress(j)
 	}
-	r.speed.SetText(speedText(rw))
+	r.status.set(statusText(rw, time.Now()), statusImportance(j.State), bar)
 	r.eta.SetText(etaText(rw))
-	r.status.Importance = statusImportance(j.State)
-	r.status.SetText(statusText(rw, time.Now()))
+	r.speed.SetText(speedText(rw))
+	r.conns.SetText(connsText(j))
+	r.added.SetText(addedText(j.AddedAt, time.Now()))
 }
 
 // MouseDown selects: a click one row, Ctrl-click adds or removes one,
@@ -242,27 +308,31 @@ func (r *jobRow) DoubleTapped(*fyne.PointEvent) {
 	}
 }
 
-// stateIcon marks a row's state at a glance.
-func stateIcon(s queue.State) fyne.Resource {
-	switch s {
-	case queue.StateRunning:
-		return theme.DownloadIcon()
-	case queue.StateQueued:
-		return theme.HistoryIcon()
-	case queue.StatePaused, queue.StateStopped:
-		return theme.MediaPauseIcon()
-	case queue.StateWaiting:
-		return theme.WarningIcon()
-	case queue.StateFailed:
-		return theme.ErrorIcon()
-	case queue.StateDone, queue.StateSkipped:
-		return theme.ConfirmIcon()
+// kindIcons are the file kinds' icons in the name column: a shape per
+// kind, colored for the ones people look for most.
+var kindIcons = map[fileKind]fyne.Resource{
+	kindVideo:    theme.NewColoredResource(theme.MediaVideoIcon(), theme.ColorNamePrimary),
+	kindImage:    theme.NewColoredResource(theme.MediaPhotoIcon(), theme.ColorNameSuccess),
+	kindAudio:    theme.NewColoredResource(theme.MediaMusicIcon(), theme.ColorNameWarning),
+	kindArchive:  theme.StorageIcon(),
+	kindDocument: theme.DocumentIcon(),
+	kindProgram:  theme.ComputerIcon(),
+	kindOther:    theme.FileIcon(),
+}
+
+func iconFor(k fileKind) fyne.Resource {
+	if r, ok := kindIcons[k]; ok {
+		return r
 	}
 	return theme.FileIcon()
 }
 
+// statusImportance colors the Status column: running blue, waiting amber,
+// failed red, done green.
 func statusImportance(s queue.State) widget.Importance {
 	switch s {
+	case queue.StateRunning:
+		return widget.HighImportance
 	case queue.StateFailed:
 		return widget.DangerImportance
 	case queue.StateWaiting:
@@ -273,43 +343,123 @@ func statusImportance(s queue.State) widget.Importance {
 	return widget.MediumImportance
 }
 
-// ---------- Sidebar ----------
+// ---------- Category tree ----------
 
-// sidebarEntry is one line of the sidebar.
-type sidebarEntry struct {
-	f     filter
-	count int
-}
-
-// sidebarEntries lists the filters with their counts. "Waiting for quota"
-// only shows while something waits (it is mega's alone), unless it is the
-// one selected.
-func sidebarEntries(counts map[filter]int, current filter) []sidebarEntry {
-	out := make([]sidebarEntry, 0, len(filters))
-	for _, f := range filters {
-		if f == filterWaiting && counts[f] == 0 && current != filterWaiting {
-			continue
-		}
-		out = append(out, sidebarEntry{f: f, count: counts[f]})
-	}
-	return out
-}
-
-func newSidebarItem() fyne.CanvasObject {
+func newTreeItem(bool) fyne.CanvasObject {
 	name := widget.NewLabel("")
 	name.Truncation = fyne.TextTruncateEllipsis
 	count := widget.NewLabel("")
 	count.Alignment = fyne.TextAlignTrailing
+	count.Importance = widget.LowImportance
 	return container.NewBorder(nil, nil, nil, count, name)
 }
 
-func setSidebarItem(o fyne.CanvasObject, e sidebarEntry) {
+func setTreeItem(o fyne.CanvasObject, label string, n int) {
 	c := o.(*fyne.Container)
 	name, count := c.Objects[0].(*widget.Label), c.Objects[1].(*widget.Label)
-	name.SetText(e.f.label())
-	if e.count > 0 {
-		count.SetText(strconv.Itoa(e.count))
+	name.SetText(label)
+	if n > 0 {
+		count.SetText(strconv.Itoa(n))
 	} else {
 		count.SetText("")
 	}
 }
+
+// ---------- Toolbar ----------
+
+// toolItem is a toolbar button in a download manager's style: the icon
+// above, the label under it, flat until the pointer is over it.
+type toolItem struct {
+	widget.BaseWidget
+	icon     fyne.Resource
+	text     string
+	tapped   func()
+	disabled bool
+	hovered  bool
+
+	bg    *canvas.Rectangle
+	img   *widget.Icon
+	label *canvas.Text
+}
+
+func newToolItem(text string, icon fyne.Resource, tapped func()) *toolItem {
+	t := &toolItem{icon: icon, text: text, tapped: tapped,
+		bg: canvas.NewRectangle(color.Transparent), img: widget.NewIcon(icon), label: canvas.NewText(text, theme.Color(theme.ColorNameForeground))}
+	t.bg.CornerRadius = theme.InputRadiusSize()
+	t.label.Alignment = fyne.TextAlignCenter
+	t.label.TextSize = 12
+	t.ExtendBaseWidget(t)
+	return t
+}
+
+func (t *toolItem) SetText(s string)        { t.text = s; t.Refresh() }
+func (t *toolItem) SetIcon(r fyne.Resource) { t.icon = r; t.Refresh() }
+func (t *toolItem) Disabled() bool          { return t.disabled }
+func (t *toolItem) Enable()                 { t.disabled = false; t.Refresh() }
+func (t *toolItem) Disable()                { t.disabled = true; t.hovered = false; t.Refresh() }
+func (t *toolItem) MouseIn(*desktop.MouseEvent) {
+	if !t.disabled {
+		t.hovered = true
+		t.Refresh()
+	}
+}
+func (t *toolItem) MouseMoved(*desktop.MouseEvent) {}
+func (t *toolItem) MouseOut()                      { t.hovered = false; t.Refresh() }
+
+func (t *toolItem) Tapped(*fyne.PointEvent) {
+	if !t.disabled && t.tapped != nil {
+		t.tapped()
+	}
+}
+
+func (t *toolItem) CreateRenderer() fyne.WidgetRenderer {
+	return &toolItemRenderer{t: t, objs: []fyne.CanvasObject{t.bg, t.img, t.label}}
+}
+
+type toolItemRenderer struct {
+	t    *toolItem
+	objs []fyne.CanvasObject
+}
+
+const toolIconSize = 26
+
+func (r *toolItemRenderer) MinSize() fyne.Size {
+	ts := fyne.MeasureText(r.t.text, r.t.label.TextSize, fyne.TextStyle{})
+	w := ts.Width + 16
+	if w < 58 {
+		w = 58
+	}
+	return fyne.NewSize(w, toolIconSize+ts.Height+12)
+}
+
+func (r *toolItemRenderer) Layout(size fyne.Size) {
+	r.t.bg.Resize(size)
+	r.t.img.Resize(fyne.NewSize(toolIconSize, toolIconSize))
+	r.t.img.Move(fyne.NewPos((size.Width-toolIconSize)/2, 4))
+	ts := fyne.MeasureText(r.t.text, r.t.label.TextSize, fyne.TextStyle{})
+	r.t.label.Resize(fyne.NewSize(size.Width, ts.Height))
+	r.t.label.Move(fyne.NewPos(0, 4+toolIconSize+2))
+}
+
+func (r *toolItemRenderer) Refresh() {
+	t := r.t
+	t.label.Text = t.text
+	if t.disabled {
+		t.img.SetResource(theme.NewDisabledResource(t.icon))
+		t.label.Color = theme.Color(theme.ColorNameDisabled)
+	} else {
+		t.img.SetResource(t.icon)
+		t.label.Color = theme.Color(theme.ColorNameForeground)
+	}
+	if t.hovered {
+		t.bg.FillColor = theme.Color(theme.ColorNameHover)
+	} else {
+		t.bg.FillColor = color.Transparent
+	}
+	r.Layout(t.Size())
+	t.bg.Refresh()
+	t.label.Refresh()
+}
+
+func (r *toolItemRenderer) Objects() []fyne.CanvasObject { return r.objs }
+func (r *toolItemRenderer) Destroy()                     {}

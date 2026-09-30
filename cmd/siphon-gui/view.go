@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -24,9 +25,6 @@ const (
 	filterFinished
 	filterFailed
 )
-
-// filters is the sidebar, top to bottom.
-var filters = []filter{filterAll, filterUnfinished, filterActive, filterQueued, filterPaused, filterWaiting, filterFinished, filterFailed}
 
 func (f filter) label() string {
 	switch f {
@@ -79,6 +77,8 @@ const (
 	sortSpeed
 	sortETA
 	sortStatus
+	sortConns
+	sortAdded
 )
 
 type sortOrder struct {
@@ -98,38 +98,6 @@ func (o sortOrder) next(k sortKey) sortOrder {
 	return sortOrder{}
 }
 
-// View returns the rows a filter shows, in the order asked for. Equal rows,
-// and every row under sortNone, keep queue order.
-func (vm *viewModel) View(f filter, o sortOrder) []row {
-	vm.mu.Lock()
-	out := make([]row, 0, len(vm.order))
-	for _, id := range vm.order {
-		j := vm.jobs[id]
-		if f.matches(j.State) {
-			out = append(out, row{Job: j, Rate: vm.rate[id]})
-		}
-	}
-	vm.mu.Unlock()
-	sortRows(out, o)
-	return out
-}
-
-// Counts is how many jobs each filter shows.
-func (vm *viewModel) Counts() map[filter]int {
-	vm.mu.Lock()
-	defer vm.mu.Unlock()
-	c := make(map[filter]int, len(filters))
-	for _, id := range vm.order {
-		s := vm.jobs[id].State
-		for _, f := range filters {
-			if f.matches(s) {
-				c[f]++
-			}
-		}
-	}
-	return c
-}
-
 func sortRows(rows []row, o sortOrder) {
 	if o.key == sortNone {
 		return
@@ -147,7 +115,14 @@ func sortRows(rows []row, o sortOrder) {
 		case sortETA:
 			return etaSeconds(a) < etaSeconds(b)
 		case sortStatus:
-			return stateRank(a.Job.State) < stateRank(b.Job.State)
+			if ra, rb := stateRank(a.Job.State), stateRank(b.Job.State); ra != rb {
+				return ra < rb
+			}
+			return rowProgress(a.Job) > rowProgress(b.Job)
+		case sortConns:
+			return a.Job.Conns < b.Job.Conns
+		case sortAdded:
+			return a.Job.AddedAt.Before(b.Job.AddedAt)
 		}
 		return false
 	}
@@ -274,24 +249,53 @@ func etaText(r row) string {
 	return humanETA(r.Job.Size-r.Job.Done, r.Rate)
 }
 
-// statusText is the Status column: the state, and what a person would want
-// to know about it (connections, the error, when a quota wait ends).
+// statusText is the Status column, the way a download manager words it:
+// how far a download is, or what state it is in, and for a failed job why.
 func statusText(r row, now time.Time) string {
 	j := r.Job
 	switch j.State {
 	case queue.StateRunning:
-		if c := connsLabel(j.Conns); c != "" {
-			return "Downloading  ·  " + c
+		if p := progressText(j); p != "" {
+			return p
 		}
 		return "Downloading"
+	case queue.StatePaused:
+		if p := progressText(j); p != "" {
+			return "Paused  ·  " + p
+		}
+		return "Paused"
 	case queue.StateWaiting:
 		return capitalize(waitingMeta(j, now))
 	case queue.StateFailed, queue.StateStopped:
 		if msg := firstLine(j.Error); msg != "" {
 			return capitalize(stateLabel(j.State)) + ": " + msg
 		}
+	case queue.StateDone:
+		return "Complete"
 	}
 	return capitalize(stateLabel(j.State))
+}
+
+// connsText is the Connections column: how many a running download really
+// has.
+func connsText(j queue.Job) string {
+	if j.State != queue.StateRunning || j.Conns <= 0 {
+		return ""
+	}
+	return itoa(j.Conns)
+}
+
+// addedText is the Added column: month, day and time this year, the year
+// otherwise.
+func addedText(t, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	t = t.Local()
+	if t.Year() == now.Local().Year() {
+		return t.Format("Jan 2 15:04")
+	}
+	return t.Format("Jan 2 2006")
 }
 
 func capitalize(s string) string {
@@ -336,4 +340,218 @@ func counted(label string, n int) string {
 		return fmt.Sprintf("%s (%d)", label, n)
 	}
 	return label
+}
+
+// --- File kinds and the category tree ---
+
+// fileKind groups files by what they are, the way a download manager's
+// categories do.
+type fileKind int
+
+const (
+	kindAny fileKind = iota
+	kindVideo
+	kindImage
+	kindAudio
+	kindArchive
+	kindDocument
+	kindProgram
+	kindOther
+)
+
+// kinds is the order they appear in under a category.
+var kinds = []fileKind{kindVideo, kindImage, kindAudio, kindArchive, kindDocument, kindProgram, kindOther}
+
+func (k fileKind) label() string {
+	switch k {
+	case kindVideo:
+		return "Video"
+	case kindImage:
+		return "Images"
+	case kindAudio:
+		return "Music"
+	case kindArchive:
+		return "Compressed"
+	case kindDocument:
+		return "Documents"
+	case kindProgram:
+		return "Programs"
+	case kindOther:
+		return "Other"
+	}
+	return "All"
+}
+
+var kindByExt = func() map[string]fileKind {
+	m := map[string]fileKind{}
+	add := func(k fileKind, exts ...string) {
+		for _, e := range exts {
+			m[e] = k
+		}
+	}
+	add(kindVideo, "mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "ts", "mpg", "mpeg", "3gp", "m2ts")
+	add(kindImage, "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "avif", "svg", "psd", "raw", "cr2", "nef")
+	add(kindAudio, "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "alac", "aiff", "ape")
+	add(kindArchive, "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "iso", "img", "dmg", "vpk", "cab")
+	add(kindDocument, "pdf", "epub", "mobi", "azw3", "cbz", "cbr", "txt", "md", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "rtf", "csv", "djvu")
+	add(kindProgram, "exe", "msi", "apk", "appimage", "deb", "rpm", "pkg", "bat", "cmd", "sh", "jar")
+	return m
+}()
+
+// kindOf tells a file's kind from its extension. Split archives
+// ("x.part01.rar", "x.7z.001") count as compressed.
+func kindOf(name string) fileKind {
+	lower := strings.ToLower(name)
+	ext := strings.TrimPrefix(filepath.Ext(lower), ".")
+	if k, ok := kindByExt[ext]; ok {
+		return k
+	}
+	if len(ext) == 3 && strings.Trim(ext, "0123456789") == "" {
+		if inner := strings.TrimPrefix(filepath.Ext(strings.TrimSuffix(lower, "."+ext)), "."); kindByExt[inner] == kindArchive {
+			return kindArchive
+		}
+	}
+	return kindOther
+}
+
+// category is a node of the sidebar tree: a state group and a file kind.
+type category struct {
+	f filter
+	k fileKind
+}
+
+func (c category) matches(j queue.Job) bool {
+	return c.f.matches(j.State) && (c.k == kindAny || kindOf(j.Filename) == c.k)
+}
+
+// The tree, a download manager's: All downloads with the file kinds under
+// it, Unfinished with the states, and Finished:
+//
+//	all            all/kind/1 …           (kinds)
+//	unfinished     unfinished/state/2 …   (states)
+//	finished
+const (
+	nodeAll        = "all"
+	nodeUnfinished = "unfinished"
+	nodeFinished   = "finished"
+)
+
+var topNodes = []string{nodeAll, nodeUnfinished, nodeFinished}
+
+var topFilter = map[string]filter{nodeAll: filterAll, nodeUnfinished: filterUnfinished, nodeFinished: filterFinished}
+
+// stateNodes are the states listed under Unfinished.
+var stateNodes = []filter{filterActive, filterQueued, filterPaused, filterWaiting, filterFailed}
+
+func stateNodeID(f filter) string { return nodeUnfinished + "/state/" + itoa(int(f)) }
+func kindNodeID(top string, k fileKind) string {
+	return top + "/kind/" + itoa(int(k))
+}
+
+func itoa(n int) string { return fmt.Sprint(n) }
+
+// categoryOf reads a node id; unknown ids are All downloads.
+func categoryOf(id string) category {
+	top, rest, _ := strings.Cut(id, "/")
+	c := category{f: topFilter[top], k: kindAny}
+	if _, ok := topFilter[top]; !ok {
+		return category{f: filterAll}
+	}
+	part, num, _ := strings.Cut(rest, "/")
+	var n int
+	fmt.Sscan(num, &n)
+	switch part {
+	case "state":
+		c.f = filter(n)
+	case "kind":
+		c.k = fileKind(n)
+	}
+	return c
+}
+
+// categoryLabel is how a node reads in the tree.
+func categoryLabel(id string) string {
+	switch id {
+	case nodeAll:
+		return "All downloads"
+	case nodeUnfinished:
+		return "Unfinished"
+	case nodeFinished:
+		return "Finished"
+	}
+	c := categoryOf(id)
+	if c.k != kindAny {
+		return c.k.label()
+	}
+	return c.f.label()
+}
+
+// treeChildren lists a node's children. Kinds and states with nothing in
+// them are left out, as is Waiting for quota (mega's alone), unless the
+// node is the one selected: it mustn't vanish under the user.
+func treeChildren(id string, counts map[string]int, selected string) []string {
+	if id == "" {
+		return topNodes
+	}
+	var out []string
+	keep := func(child string) {
+		if counts[child] > 0 || child == selected {
+			out = append(out, child)
+		}
+	}
+	switch id {
+	case nodeAll:
+		for _, k := range kinds {
+			keep(kindNodeID(id, k))
+		}
+	case nodeUnfinished:
+		for _, f := range stateNodes {
+			keep(stateNodeID(f))
+		}
+	}
+	return out
+}
+
+// isTreeBranch: All downloads and Unfinished open; Finished is a leaf.
+func isTreeBranch(id string) bool {
+	return id == "" || id == nodeAll || id == nodeUnfinished
+}
+
+// CategoryCounts is how many jobs every tree node shows.
+func (vm *viewModel) CategoryCounts() map[string]int {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	c := map[string]int{}
+	for _, id := range vm.order {
+		j := vm.jobs[id]
+		k := kindOf(j.Filename)
+		for _, top := range topNodes {
+			if !topFilter[top].matches(j.State) {
+				continue
+			}
+			c[top]++
+			c[kindNodeID(top, k)]++
+		}
+		for _, f := range stateNodes {
+			if f.matches(j.State) {
+				c[stateNodeID(f)]++
+			}
+		}
+	}
+	return c
+}
+
+// ViewCategory returns the rows a tree node shows, in the order asked for.
+func (vm *viewModel) ViewCategory(c category, o sortOrder) []row {
+	vm.mu.Lock()
+	out := make([]row, 0, len(vm.order))
+	for _, id := range vm.order {
+		j := vm.jobs[id]
+		if c.matches(j) {
+			out = append(out, row{Job: j, Rate: vm.rate[id]})
+		}
+	}
+	vm.mu.Unlock()
+	sortRows(out, o)
+	return out
 }

@@ -20,7 +20,7 @@ from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl)
   CDN) and names the layer that broke, instead of "0 files downloaded".
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Siphon's download queue as a table with status filters on the left: four files downloading over 8, 8, 3 and 4 connections with speed and time left, two queued, one paused, two done and one failed" width="880" />
+  <img src="docs/screenshot.png" alt="Siphon's window laid out like a download manager: big toolbar buttons, a category tree (all downloads by kind, unfinished by state, finished) and a compact table with four files downloading over 8, 8, 3 and 4 connections, two queued, one paused, two complete and one failed" width="880" />
 </p>
 
 It comes as two programs that share one download pipeline:
@@ -193,11 +193,15 @@ tests Linux and macOS too.
    continue where they stopped. Links that couldn't be added are waiting in
    the dialog the next time it opens.
 
-The queue is a table: name, size, progress, speed, time left and status,
-with the connections each download really has. Click a column title to sort
-by it (again to reverse, a third time for queue order; names sort the way
-people number them, `Day 2` before `Day 10`). The list on the left filters
-it: all, unfinished, downloading, queued, paused, finished, failed.
+The window is laid out like a download manager's. The queue is a compact
+table: file name, size, status (how far it is, with a thin progress line),
+time left, transfer rate, the connections a download really has, and when it
+was added. Click a column title to sort by it (again to reverse, a third time
+for queue order; names sort the way people number them, `Day 2` before
+`Day 10`). The category tree on the left narrows it down: **All downloads**
+by kind (video, images, music, compressed, documents, programs),
+**Unfinished** by state (downloading, queued, paused, waiting for quota,
+failed), and **Finished**.
 
 - **Select** rows with a click, several with Ctrl-click, a range with
   Shift-click, all shown with Ctrl+A.
@@ -209,17 +213,22 @@ it: all, unfinished, downloading, queued, paused, finished, failed.
 
 The toolbar has:
 
-| Control | What it does |
+| Button | What it does |
 | --- | --- |
 | Add links | Opens the dialog for links and the folder they go to. |
 | Resume / Pause / Remove | Act on the selected rows. |
 | Pause all / Resume all | Stops starting new downloads and pauses running ones; press again to resume. |
-| More → Retry failed | Puts every failed job back in the queue. |
-| More → Clear finished | Removes finished rows from the list (the files stay). |
-| More → Cancel all… | Stops and removes every unfinished download. It asks first and offers to delete the partial files. Finished files are never touched. |
-| More → Open download folder | Opens the selected download's folder, or else the folder of the last finished file, with the file selected. |
-| Diagnose | Opens a window with the same layer check as `siphon doctor`, the external tools found, and **Install tools…**. |
+| Clear done | Removes finished rows from the list (the files stay). |
 | Settings | Download folder, speed limit, downloads at once, connections per file and the VPN switch command. |
+| Diagnose | Opens a window with the same layer check as `siphon doctor`, the external tools found, and **Install tools…**. |
+
+The menu bar has the rest:
+
+| Menu | Items |
+| --- | --- |
+| Tasks | Add links, Open download folder (the selected download's, or the last finished file's), Settings, Quit. |
+| Downloads | Resume, Pause, Remove, Select all; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
+| Help | Diagnose, Install tools, About Siphon. |
 
 In **Settings**, changes take effect right away:
 

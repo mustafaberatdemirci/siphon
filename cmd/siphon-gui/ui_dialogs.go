@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -313,4 +314,19 @@ func (q *queueTab) tryQuotaCommand() {
 			}
 		})
 	}()
+}
+
+// showAbout names the program, its version and where it lives.
+func (q *queueTab) showAbout() {
+	title := widget.NewLabelWithStyle("Siphon "+version, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	desc := widget.NewLabel("A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop and direct links.")
+	desc.Wrapping = fyne.TextWrapWord
+	content := container.NewVBox(title, desc)
+	if u, err := url.Parse("https://github.com/mustafaberatdemirci/siphon"); err == nil {
+		content.Add(widget.NewHyperlink("github.com/mustafaberatdemirci/siphon", u))
+	}
+	content.Add(widget.NewLabel("MIT License"))
+	d := dialog.NewCustom("About Siphon", "Close", content, q.win)
+	d.Resize(fyne.NewSize(460, 0))
+	d.Show()
 }

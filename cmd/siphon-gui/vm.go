@@ -220,7 +220,7 @@ func (vm *viewModel) Summary() string {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	if len(vm.order) == 0 {
-		return "The queue is empty. Paste links and press Add."
+		return "The queue is empty. Press Add links, or Ctrl+V to paste links."
 	}
 	var active, queued, waiting, paused, done, failed int
 	var total float64

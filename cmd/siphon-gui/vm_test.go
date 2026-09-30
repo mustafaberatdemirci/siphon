@@ -231,7 +231,7 @@ func TestCellTextsByState(t *testing.T) {
 	if got := statusText(row{Job: failed}, now); !strings.HasPrefix(got, "Failed: ") || !strings.Contains(got, "quota") || strings.Contains(got, "second") {
 		t.Errorf("a failed row must show the first line: %q", got)
 	}
-	if got := statusText(row{Job: job("d", queue.StateDone, 10, 10)}, now); got != "Done" {
+	if got := statusText(row{Job: job("d", queue.StateDone, 10, 10)}, now); got != "Complete" {
 		t.Errorf("finished row: %q", got)
 	}
 	if got := statusText(row{Job: job("k", queue.StateSkipped, 10, 10)}, now); got != "Already downloaded" {
@@ -289,21 +289,23 @@ func TestParseSpeedLimit(t *testing.T) {
 
 // --- Connections ---
 
-// A running row shows the connections its download really got; nothing while unknown.
-func TestStatusShowsConnections(t *testing.T) {
+// The Status column says how far a download is, the way download managers
+// do; the connections have a column of their own.
+func TestStatusShowsProgress(t *testing.T) {
 	now := time.Now()
 	j := job("a", queue.StateRunning, 20<<20, 100<<20)
 	j.Conns = 8
-	if got := statusText(row{Job: j, Rate: 10 << 20}, now); got != "Downloading  ·  8 connections" {
-		t.Errorf("running row with 8 connections: %q", got)
+	if got := statusText(row{Job: j, Rate: 10 << 20}, now); got != "20%" {
+		t.Errorf("running row: %q", got)
 	}
-	j.Conns = 1
-	if got := statusText(row{Job: j}, now); !strings.Contains(got, "1 connection") || strings.Contains(got, "connections") {
-		t.Errorf("running row with 1 connection: %q", got)
+	if got := statusText(row{Job: job("u", queue.StateRunning, 5, -1)}, now); got != "Downloading" {
+		t.Errorf("running row without a size: %q", got)
 	}
-	j.Conns = 0
-	if got := statusText(row{Job: j}, now); got != "Downloading" {
-		t.Errorf("a connection count was made up: %q", got)
+	if got := statusText(row{Job: job("p", queue.StatePaused, 20, 100)}, now); got != "Paused  ·  20%" {
+		t.Errorf("paused row: %q", got)
+	}
+	if got := statusText(row{Job: job("q", queue.StatePaused, 0, 100)}, now); got != "Paused" {
+		t.Errorf("paused before starting: %q", got)
 	}
 }
 

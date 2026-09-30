@@ -131,14 +131,11 @@ func TestTableFilterKeepsSelectionToWhatIsShown(t *testing.T) {
 	q.render()
 
 	q.sel.all(q.visibleIDs)
-	for i, e := range q.entries {
-		if e.f == filterPaused {
-			if e.count != 1 {
-				t.Errorf("Paused counts %d", e.count)
-			}
-			q.sidebar.Select(i)
-		}
+	paused := stateNodeID(filterPaused)
+	if n := q.counts[paused]; n != 1 {
+		t.Errorf("Paused counts %d", n)
 	}
+	q.tree.Select(paused)
 	if len(q.visible) != 1 || q.visible[0].Job.ID != a {
 		t.Fatalf("Paused shows %d rows", len(q.visible))
 	}
@@ -241,19 +238,40 @@ func TestKeysLeaveTheTableAloneUnderADialog(t *testing.T) {
 	}
 }
 
-func TestMoreMenuOffersWhatApplies(t *testing.T) {
+// The menu bar holds what the toolbar leaves out; its Quit is Siphon's own
+// (saving unfinished jobs), so Fyne doesn't add one that wouldn't.
+func TestMainMenu(t *testing.T) {
 	q, _, _ := newTestQueue(t, "a.bin")
-	on := map[string]bool{}
-	for _, it := range q.moreMenu().Items {
-		if !it.IsSeparator {
-			on[it.Label] = !it.Disabled
+	labels := func(m *fyne.MainMenu) map[string]*fyne.MenuItem {
+		out := map[string]*fyne.MenuItem{}
+		for _, menu := range m.Items {
+			for _, it := range menu.Items {
+				if !it.IsSeparator {
+					out[menu.Label+" > "+it.Label] = it
+				}
+			}
+		}
+		return out
+	}
+	quit := false
+	got := labels(q.mainMenu(func() { quit = true }))
+	for _, want := range []string{"Tasks > Add links…", "Tasks > Settings…", "Tasks > Quit",
+		"Downloads > Retry failed", "Downloads > Clear finished", "Downloads > Cancel all…",
+		"Help > Diagnose…", "Help > Install tools…", "Help > About Siphon"} {
+		if got[want] == nil {
+			t.Errorf("%q missing from the menu bar", want)
 		}
 	}
-	want := map[string]bool{"Retry failed": false, "Clear finished": false, "Cancel all…": true, "Open download folder": true}
-	for label, enabled := range want {
-		if got, ok := on[label]; !ok || got != enabled {
-			t.Errorf("%q: present %v, enabled %v; want enabled %v", label, ok, got, enabled)
-		}
+	if it := got["Tasks > Quit"]; it == nil || !it.IsQuit {
+		t.Fatal("Quit isn't marked as the app's quit item")
+	} else {
+		it.Action()
+	}
+	if !quit {
+		t.Error("Quit didn't call Siphon's quit")
+	}
+	if labels(q.mainMenu(nil))["Tasks > Quit"] != nil {
+		t.Error("a Quit without a quit function")
 	}
 }
 

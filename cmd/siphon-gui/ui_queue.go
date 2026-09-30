@@ -26,7 +26,7 @@ import (
 const refreshEvery = 150 * time.Millisecond
 
 // sidebarWidth is the width of the filter list left of the table.
-const sidebarWidth = 190
+const sidebarWidth = 200
 
 // autoRefresh starts the loop that redraws on engine events; tests draw by
 // hand instead, so the loop doesn't draw alongside them.
@@ -40,9 +40,10 @@ const (
 	prefQuotaCmd   = "quota_command"
 )
 
-// queueTab is the main window's content: a one-line toolbar, the queue
-// table with its filters, and the status line. Adding links and the
-// settings open in their own dialogs, so the table gets the window.
+// queueTab is the main window's content, laid out like a download
+// manager's: a toolbar of big buttons, the category tree on the left, the
+// downloads table, and the status line. Adding links and the settings open
+// in their own dialogs.
 type queueTab struct {
 	win   fyne.Window
 	prefs fyne.Preferences
@@ -59,13 +60,14 @@ type queueTab struct {
 
 	banner     *fyne.Container
 	bannerText *widget.Label
-	addBtn     *widget.Button
-	resumeSel  *widget.Button
-	pauseSel   *widget.Button
-	removeSel  *widget.Button
-	pauseAll   *widget.Button
+	addBtn     *toolItem
+	resumeSel  *toolItem
+	pauseSel   *toolItem
+	removeSel  *toolItem
+	pauseAll   *toolItem
+	clearDone  *toolItem
 	list       *widget.List
-	sidebar    *widget.List
+	tree       *widget.Tree
 	status     *widget.Label
 	sortArrows func(sortOrder)
 
@@ -74,14 +76,16 @@ type queueTab struct {
 	pending string
 	// addEntry is the open Add dialog's link box; nil when it is closed.
 	addEntry *widget.Entry
+	// captchaShown is the captcha hold last told on the status line.
+	captchaShown string
 
 	// What the table shows, taken on the UI thread at each render so the
-	// list's callbacks read one consistent picture.
-	filter     filter
+	// list's and the tree's callbacks read one consistent picture.
+	cat        string // the tree node selected
 	order      sortOrder
 	visible    []row
 	visibleIDs []string
-	entries    []sidebarEntry
+	counts     map[string]int
 	sel        *selection
 
 	// shown reports whether the table is on screen: the keyboard shortcuts
@@ -97,33 +101,22 @@ type queueTab struct {
 }
 
 func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm *viewModel, onQuota func(bool)) (*queueTab, fyne.CanvasObject) {
-	q := &queueTab{win: win, prefs: prefs, eng: eng, vm: vm, onQuota: onQuota, sel: newSelection()}
+	q := &queueTab{win: win, prefs: prefs, eng: eng, vm: vm, onQuota: onQuota, sel: newSelection(), cat: nodeAll}
 	q.settings = q.buildSettings()
 
 	// --- Toolbar ---
 	// Add links; what acts on the selected rows (as the row menu does); the
-	// queue as a whole; then the rarely used under More. Diagnose and
-	// Settings on the right.
-	q.addBtn = widget.NewButtonWithIcon("Add links", theme.ContentAddIcon(), func() { q.showAddDialog("") })
-	q.addBtn.Importance = widget.HighImportance
-	q.resumeSel = toolButton("Resume", theme.MediaPlayIcon(), q.resumeSelected)
-	q.pauseSel = toolButton("Pause", theme.MediaPauseIcon(), q.pauseSelected)
-	q.removeSel = toolButton("Remove", theme.DeleteIcon(), q.removeSelected)
-	q.pauseAll = toolButton("Pause all", theme.MediaPauseIcon(), q.togglePauseAll)
-	more := toolButton("More", theme.MoreHorizontalIcon(), nil)
-	more.OnTapped = func() {
-		widget.ShowPopUpMenuAtRelativePosition(q.moreMenu(), win.Canvas(), fyne.NewPos(0, more.Size().Height), more)
-	}
-	diagnose := toolButton("Diagnose", theme.InfoIcon(), func() {
-		if q.openDiagnose != nil {
-			q.openDiagnose()
-		}
-	})
-	settings := toolButton("Settings", theme.SettingsIcon(), q.showSettings)
-	toolbar := container.NewBorder(nil, nil,
-		container.NewHBox(q.addBtn, widget.NewSeparator(), q.resumeSel, q.pauseSel, q.removeSel,
-			widget.NewSeparator(), q.pauseAll, more),
-		container.NewHBox(diagnose, settings))
+	// queue as a whole; Settings and Diagnose. The rest is in the menus.
+	q.addBtn = newToolItem("Add links", theme.NewPrimaryThemedResource(theme.ContentAddIcon()), func() { q.showAddDialog("") })
+	q.resumeSel = newToolItem("Resume", theme.MediaPlayIcon(), q.resumeSelected)
+	q.pauseSel = newToolItem("Pause", theme.MediaPauseIcon(), q.pauseSelected)
+	q.removeSel = newToolItem("Remove", theme.DeleteIcon(), q.removeSelected)
+	q.pauseAll = newToolItem("Pause all", theme.MediaStopIcon(), q.togglePauseAll)
+	q.clearDone = newToolItem("Clear done", theme.ContentClearIcon(), q.clearFinished)
+	settings := newToolItem("Settings", theme.SettingsIcon(), q.showSettings)
+	diagnose := newToolItem("Diagnose", theme.InfoIcon(), q.diagnose)
+	toolbar := container.NewHBox(q.addBtn, toolGap(), q.resumeSel, q.pauseSel, q.removeSel, toolGap(),
+		q.pauseAll, q.clearDone, toolGap(), settings, diagnose)
 
 	// --- Quota banner ---
 	// Sits above the table while jobs wait for quota; independent of the
@@ -158,71 +151,127 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	)
 	table := container.NewBorder(header, nil, nil, nil, q.list)
 
-	// --- Sidebar: filters with counts ---
-	q.sidebar = widget.NewList(
-		func() int { return len(q.entries) },
-		newSidebarItem,
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			if i >= 0 && i < len(q.entries) {
-				setSidebarItem(o, q.entries[i])
-			}
+	// --- Category tree ---
+	q.tree = widget.NewTree(
+		func(id widget.TreeNodeID) []widget.TreeNodeID { return treeChildren(id, q.counts, q.cat) },
+		isTreeBranch,
+		newTreeItem,
+		func(id widget.TreeNodeID, _ bool, o fyne.CanvasObject) {
+			setTreeItem(o, categoryLabel(id), q.counts[id])
 		},
 	)
-	q.sidebar.OnSelected = func(i widget.ListItemID) {
-		if i < 0 || i >= len(q.entries) || q.entries[i].f == q.filter {
+	q.tree.OnSelected = func(id widget.TreeNodeID) {
+		if id == q.cat {
 			return
 		}
-		q.filter = q.entries[i].f
+		q.cat = id
 		q.render()
 		q.list.ScrollToTop()
 	}
 	width := canvas.NewRectangle(color.Transparent)
 	width.SetMinSize(fyne.NewSize(sidebarWidth, 0))
-	sidebar := container.NewStack(width, q.sidebar)
+	tree := container.NewStack(width, q.tree)
 
 	q.status = widget.NewLabel(vm.StatusLine())
 	q.status.Wrapping = fyne.TextWrapWord
 
+	// The tree and the table are desktop-dense; dialogs keep the default
+	// sizes.
+	body := container.NewThemeOverride(
+		container.NewBorder(nil, nil, container.NewHBox(tree, widget.NewSeparator()), nil, table),
+		newCompactTheme())
 	top := container.NewVBox(toolbar, widget.NewSeparator(), q.banner)
-	body := container.NewBorder(nil, nil, container.NewHBox(sidebar, widget.NewSeparator()), nil, table)
 	bottom := container.NewVBox(widget.NewSeparator(), q.status)
 	root := container.NewBorder(top, bottom, nil, nil, body)
 
 	q.bindKeys()
 	q.render()
+	q.tree.OpenAllBranches()
+	q.tree.Select(q.cat)
 	if autoRefresh {
 		go q.refreshLoop()
 	}
 	return q, root
 }
 
-// toolButton is a flat toolbar button.
-func toolButton(label string, icon fyne.Resource, tapped func()) *widget.Button {
-	b := widget.NewButtonWithIcon(label, icon, tapped)
-	b.Importance = widget.LowImportance
-	return b
+// toolGap separates groups of toolbar buttons.
+func toolGap() fyne.CanvasObject {
+	return container.NewPadded(widget.NewSeparator())
 }
 
-// moreMenu holds the queue-wide actions used now and then.
-func (q *queueTab) moreMenu() *fyne.Menu {
-	c := q.vm.Counts()
-	retry := fyne.NewMenuItem("Retry failed", func() {
-		q.eng.RetryFailed()
-		q.vm.Replace(q.eng.Jobs())
-		q.render()
-	})
-	retry.Icon, retry.Disabled = theme.ViewRefreshIcon(), c[filterFailed] == 0
-	clear := fyne.NewMenuItem("Clear finished", func() {
-		q.eng.ClearFinished()
-		q.vm.Replace(q.eng.Jobs())
-		q.render()
-	})
-	clear.Icon, clear.Disabled = theme.ContentClearIcon(), c[filterFinished] == 0
-	cancel := fyne.NewMenuItem("Cancel all…", q.confirmCancelAll)
-	cancel.Icon, cancel.Disabled = theme.CancelIcon(), c[filterUnfinished] == 0
-	open := fyne.NewMenuItem("Open download folder", q.openFolder)
-	open.Icon = theme.FolderOpenIcon()
-	return fyne.NewMenu("", retry, clear, cancel, fyne.NewMenuItemSeparator(), open)
+func (q *queueTab) diagnose() {
+	if q.openDiagnose != nil {
+		q.openDiagnose()
+	}
+}
+
+func (q *queueTab) clearFinished() {
+	q.eng.ClearFinished()
+	q.vm.Replace(q.eng.Jobs())
+	q.render()
+}
+
+func (q *queueTab) retryFailed() {
+	q.eng.RetryFailed()
+	q.vm.Replace(q.eng.Jobs())
+	q.render()
+}
+
+func (q *queueTab) selectAll() {
+	q.sel.all(q.visibleIDs)
+	q.renderSelection()
+}
+
+// mainMenu is the window's menu bar. quit ends the app the way the
+// notification area's Quit does (saving unfinished jobs); nil leaves Quit
+// out.
+func (q *queueTab) mainMenu(quit func()) *fyne.MainMenu {
+	item := func(label string, icon fyne.Resource, action func()) *fyne.MenuItem {
+		it := fyne.NewMenuItem(label, action)
+		it.Icon = icon
+		return it
+	}
+	tasks := []*fyne.MenuItem{
+		item("Add links…", theme.ContentAddIcon(), func() { q.showAddDialog("") }),
+		item("Open download folder", theme.FolderOpenIcon(), q.openFolder),
+		fyne.NewMenuItemSeparator(),
+		item("Settings…", theme.SettingsIcon(), q.showSettings),
+	}
+	if quit != nil {
+		tasks = append(tasks, fyne.NewMenuItemSeparator(), &fyne.MenuItem{Label: "Quit", IsQuit: true, Action: quit})
+	}
+	downloads := []*fyne.MenuItem{
+		item("Resume", theme.MediaPlayIcon(), q.resumeSelected),
+		item("Pause", theme.MediaPauseIcon(), q.pauseSelected),
+		item("Remove", theme.DeleteIcon(), q.removeSelected),
+		item("Select all", nil, q.selectAll),
+		fyne.NewMenuItemSeparator(),
+		item("Resume all", theme.MediaPlayIcon(), func() {
+			q.eng.ResumeAll()
+			q.vm.Replace(q.eng.Jobs())
+			q.render()
+		}),
+		item("Pause all", theme.MediaStopIcon(), func() {
+			q.eng.PauseAll()
+			q.vm.Replace(q.eng.Jobs())
+			q.render()
+		}),
+		fyne.NewMenuItemSeparator(),
+		item("Retry failed", theme.ViewRefreshIcon(), q.retryFailed),
+		item("Clear finished", theme.ContentClearIcon(), q.clearFinished),
+		item("Cancel all…", theme.CancelIcon(), q.confirmCancelAll),
+	}
+	help := []*fyne.MenuItem{
+		item("Diagnose…", theme.InfoIcon(), q.diagnose),
+		item("Install tools…", theme.DownloadIcon(), func() { showInstallTools(q.win, func() {}) }),
+		fyne.NewMenuItemSeparator(),
+		item("About Siphon", theme.HelpIcon(), q.showAbout),
+	}
+	return fyne.NewMainMenu(
+		fyne.NewMenu("Tasks", tasks...),
+		fyne.NewMenu("Downloads", downloads...),
+		fyne.NewMenu("Help", help...),
+	)
 }
 
 // onTable reports whether keys typed now are meant for the table: it is on
@@ -247,8 +296,7 @@ func (q *queueTab) bindKeys() {
 	})
 	c.AddShortcut(&fyne.ShortcutSelectAll{}, func(fyne.Shortcut) {
 		if q.onTable() {
-			q.sel.all(q.visibleIDs)
-			q.renderSelection()
+			q.selectAll()
 		}
 	})
 	c.AddShortcut(&fyne.ShortcutPaste{}, func(sc fyne.Shortcut) {
@@ -282,24 +330,20 @@ func (q *queueTab) refreshLoop() {
 // render takes a fresh picture of the queue and redraws what depends on it.
 // UI thread only.
 func (q *queueTab) render() {
-	q.visible = q.vm.View(q.filter, q.order)
+	q.visible = q.vm.ViewCategory(categoryOf(q.cat), q.order)
 	q.visibleIDs = q.visibleIDs[:0]
 	for _, r := range q.visible {
 		q.visibleIDs = append(q.visibleIDs, r.Job.ID)
 	}
 	q.sel.keepOnly(q.visibleIDs)
 
-	q.entries = sidebarEntries(q.vm.Counts(), q.filter)
-	q.sidebar.Refresh()
-	for i, e := range q.entries {
-		if e.f == q.filter {
-			q.sidebar.Select(i)
-		}
-	}
+	q.counts = q.vm.CategoryCounts()
+	q.tree.Refresh()
 
 	q.list.Refresh()
 	q.updateSelectionButtons()
 	q.status.SetText(q.vm.StatusLine())
+	enable(q.clearDone, q.counts[nodeFinished] > 0)
 
 	banner := q.vm.QuotaBanner()
 	if banner == "" {
@@ -319,11 +363,18 @@ func (q *queueTab) render() {
 		// The reason must be visible: a captcha held that site's jobs (the
 		// other sites go on); it resumes when the user resumes one of that
 		// site's jobs or presses here.
-		q.pauseAll.SetText("Captcha: " + strings.Join(captcha, ", ") + " paused — resume")
+		q.pauseAll.SetText("Resume " + strings.Join(captcha, ", "))
 		q.pauseAll.SetIcon(theme.MediaPlayIcon())
+		if held := strings.Join(captcha, ", "); held != q.captchaShown {
+			q.captchaShown = held
+			q.vm.Notify("Captcha: " + held + " paused. Solve it in a browser, then resume.")
+		}
 	default:
 		q.pauseAll.SetText("Pause all")
-		q.pauseAll.SetIcon(theme.MediaPauseIcon())
+		q.pauseAll.SetIcon(theme.MediaStopIcon())
+	}
+	if len(q.eng.CaptchaHeld()) == 0 {
+		q.captchaShown = ""
 	}
 }
 
@@ -340,7 +391,10 @@ func (q *queueTab) updateSelectionButtons() {
 	enable(q.removeSel, a.count > 0)
 }
 
-func enable(b *widget.Button, on bool) {
+func enable(b interface {
+	Enable()
+	Disable()
+}, on bool) {
 	if on {
 		b.Enable()
 	} else {
