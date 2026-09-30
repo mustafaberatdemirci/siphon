@@ -31,18 +31,29 @@ It comes as two programs that share one download pipeline:
 ## Install
 
 Download the archive for your system from the
-[latest release](https://github.com/mustafaberatdemirci/siphon/releases/latest),
-unpack it and run `siphon-gui` (or `siphon` in a terminal). Each program is a
-single file; there is nothing to install. `SHA256SUMS.txt` lists the
-checksums of every archive.
+[latest release](https://github.com/mustafaberatdemirci/siphon/releases/latest)
+and unpack it. Each archive has the window version and `siphon`, the command
+line tool; there is nothing to install. `SHA256SUMS.txt` lists the checksums
+of every archive.
+
+| System | Archive | Run |
+| --- | --- | --- |
+| Windows | `siphon-<version>-windows-amd64.zip` | `siphon-gui.exe` |
+| macOS (Apple Silicon and Intel) | `siphon-<version>-macos-universal.zip` | `Siphon.app` (drag it to Applications) |
+| Linux, x86-64 | `siphon-<version>-linux-amd64.tar.gz` | `siphon-gui` |
+| Linux, ARM64 (Raspberry Pi 4/5, …) | `siphon-<version>-linux-arm64.tar.gz` | `siphon-gui` |
 
 - **Windows:** SmartScreen may warn about an unknown publisher the first
-  time; choose *More info → Run anyway*.
-- **macOS:** the binaries aren't signed; the first time, right-click
-  `siphon-gui` and choose *Open*, or run
-  `xattr -d com.apple.quarantine siphon-gui`.
+  time; choose *More info → Run anyway*. Windows 11 on ARM runs the same
+  download.
+- **macOS:** the app isn't notarized by Apple, so macOS refuses it the first
+  time. On macOS 15 and later open *System Settings → Privacy & Security* and
+  choose *Open Anyway*; on earlier versions right-click `Siphon.app` and
+  choose *Open*. Or once, in a terminal:
+  `xattr -dr com.apple.quarantine /Applications/Siphon.app`.
 - **Linux:** the window version needs the OpenGL, X11 and Wayland client
-  libraries, present on any desktop install.
+  libraries, present on any desktop install. `siphon.png` is its icon, for a
+  launcher entry.
 
 To build it yourself instead, see [Building](#building).
 
@@ -478,11 +489,19 @@ is still missing with
 Messages from the sites and the Diagnose report stay in English on purpose:
 they are technical, and searching for them should find the same words.
 
+The app icon is drawn in code (`cmd/siphon-gui/icon.go`); the release
+packages use it as `docs/icon.png`, which a test keeps in step. After
+changing the drawing, write it again with
+`SIPHON_WRITE_ICON=1 go test ./cmd/siphon-gui -run IconFile`.
+
 **Releasing:** add a `## 1.0.0` section to [CHANGELOG.md](CHANGELOG.md),
 then push a tag such as `v1.0.0`. The release workflow builds both programs
-for Windows, Linux and macOS, stamps the version into them
-(`siphon -version`) and publishes the archives with their checksums, with
-that section as the release notes.
+for Windows (with the icon and version details Explorer shows), Linux (x64
+and ARM64) and macOS (a universal `Siphon.app`), stamps the version into
+them (`siphon -version`) and publishes the archives with their checksums,
+with that section as the release notes. A tag with a dash, such as
+`v1.0.0-rc.1`, publishes a pre-release: a way to try the whole release out
+before announcing it.
 
 ## Responsible use
 

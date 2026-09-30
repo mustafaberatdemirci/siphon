@@ -51,7 +51,9 @@ actually share links from, in a single file with nothing to install.
 
 **Downloads**
 
-Windows, Linux and macOS (Apple Silicon) archives below, each with
-`siphon-gui` (window) and `siphon` (command line). `SHA256SUMS.txt` lists
-their checksums. The programs aren't code-signed yet: Windows SmartScreen and
-some antivirus programs may warn about an unknown program the first time.
+Below: Windows (x64, also runs on Windows 11 on ARM), macOS (one app for
+Apple Silicon and Intel) and Linux (x64 and ARM64), each with the window
+version and `siphon`, the command line tool. `SHA256SUMS.txt` lists their
+checksums. The programs aren't code-signed or notarized yet: Windows
+SmartScreen, macOS and some antivirus programs may warn the first time; the
+README's *Install* section says what to do.

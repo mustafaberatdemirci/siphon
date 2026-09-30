@@ -1,0 +1,39 @@
+name: Support a new site
+description: Ask for a file host Siphon doesn't download from yet.
+labels: [site request]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Pages that yt-dlp or gallery-dl know already work through them (see the README), so a request is most useful for file hosts they don't cover.
+  - type: input
+    id: site
+    attributes:
+      label: Site
+      placeholder: example-host.com
+    validations:
+      required: true
+  - type: textarea
+    id: links
+    attributes:
+      label: Public test links
+      description: |
+        A file and, if the site has them, a folder or album, that anyone may download and that stay up. They are used to build and test the support, and to check it keeps working.
+        Please only links to neutral, legal content: nothing private, adult or pirated.
+    validations:
+      required: true
+  - type: dropdown
+    id: tools
+    attributes:
+      label: Do yt-dlp or gallery-dl handle it?
+      options:
+        - "No"
+        - "Yes, but slowly or badly"
+        - I don't know
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Does it need an account, show a captcha, limit downloads per day?

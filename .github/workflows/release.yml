@@ -1,7 +1,8 @@
 name: Release
 
 # Push a tag such as v1.0.0 and this builds both programs for Windows, Linux
-# and macOS and publishes them as a GitHub release.
+# and macOS and publishes them as a GitHub release. A tag with a dash
+# (v1.0.0-rc.1) is published as a pre-release, to try the release out.
 on:
   push:
     tags: ["v*"]
@@ -11,19 +12,25 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.goos }})
+    name: build (${{ matrix.target }})
     strategy:
       matrix:
         include:
           - os: windows-latest
-            goos: windows
+            target: windows-amd64
           - os: ubuntu-latest
-            goos: linux
+            target: linux-amd64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
           - os: macos-latest
-            goos: darwin
+            target: macos-universal
     # The window version needs cgo, so every system builds on its own runner
-    # instead of cross-compiling.
+    # instead of cross-compiling (macOS builds both of its architectures on
+    # one: Apple's compiler targets either).
     runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ github.ref_name }}
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,41 +38,105 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Fyne's GLFW builds its X11 and Wayland backends.
       - name: Install GUI build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
 
-      - name: Build
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
         shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
-          GOOS_NAME: ${{ matrix.goos }}
         run: |
           set -euo pipefail
-          ext=""
-          gui_ldflags=""
-          if [ "$GOOS_NAME" = "windows" ]; then
-            ext=".exe"
-            gui_ldflags="-H=windowsgui" # no console window behind the GUI
-          fi
-          name="siphon-${VERSION}-${GOOS_NAME}-$(go env GOARCH)"
+          ver="${VERSION#v}"
+          name="siphon-${VERSION}-${TARGET}"
           mkdir -p "dist/$name"
+          # The icon and version details Explorer shows, as a resource the
+          # Go linker picks up from the package folder.
+          winres() {
+            (cd "$1" && go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 --out rsrc \
+              --icon "$GITHUB_WORKSPACE/docs/icon.png" --manifest none \
+              --product-name Siphon --product-version "$ver" --file-version "${ver%%-*}" \
+              --file-description "$3" --original-filename "$2" \
+              --copyright "Copyright (c) 2026 Mustafa Berat Demirci")
+          }
+          winres . siphon.exe "Siphon command line"
+          winres cmd/siphon-gui siphon-gui.exe "Siphon"
           # The command line tool is static: no cgo, runs anywhere.
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
-            -o "dist/$name/siphon${ext}" .
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} ${gui_ldflags}" \
-            -o "dist/$name/siphon-gui${ext}" ./cmd/siphon-gui
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon.exe" .
+          # -H=windowsgui: no console window behind the window.
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -H=windowsgui" -o "dist/$name/siphon-gui.exe" ./cmd/siphon-gui
           cp LICENSE README.md "dist/$name/"
-          cd dist
-          if [ "$GOOS_NAME" = "windows" ]; then
-            7z a -tzip "$name.zip" "$name" > /dev/null
-          else
-            tar czf "$name.tar.gz" "$name"
-          fi
+          cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          name="siphon-${VERSION}-${TARGET}"
+          mkdir -p "dist/$name"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon" .
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon-gui" ./cmd/siphon-gui
+          cp LICENSE README.md "dist/$name/"
+          cp docs/icon.png "dist/$name/siphon.png"
+          cd dist && tar czf "$name.tar.gz" "$name"
+
+      # One download for every Mac: both programs are universal binaries
+      # (Apple Silicon and Intel), and the window version is Siphon.app.
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          ver="${VERSION#v}"
+          name="siphon-${VERSION}-${TARGET}"
+          mkdir -p build "dist/$name"
+          for arch in arm64 amd64; do
+            CGO_ENABLED=0 GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "build/siphon-$arch" .
+            CGO_ENABLED=1 GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "build/siphon-gui-$arch" ./cmd/siphon-gui
+          done
+          lipo -create -output "dist/$name/siphon" build/siphon-arm64 build/siphon-amd64
+
+          app="dist/$name/Siphon.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/Siphon" build/siphon-gui-arm64 build/siphon-gui-amd64
+          iconset=build/Siphon.iconset
+          mkdir -p "$iconset"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s docs/icon.png --out "$iconset/icon_${s}x${s}.png" > /dev/null
+            sips -z $((s * 2)) $((s * 2)) docs/icon.png --out "$iconset/icon_${s}x${s}@2x.png" > /dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/Siphon.icns"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Siphon</string>
+            <key>CFBundleDisplayName</key><string>Siphon</string>
+            <key>CFBundleIdentifier</key><string>io.github.mustafaberatdemirci.siphon</string>
+            <key>CFBundleExecutable</key><string>Siphon</string>
+            <key>CFBundleIconFile</key><string>Siphon</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${ver%%-*}</string>
+            <key>CFBundleVersion</key><string>${ver%%-*}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$app/Contents/Info.plist"
+          # Not notarized (that needs a paid Apple account), but signed
+          # ad hoc: an unsigned app downloaded from the web is reported as
+          # "damaged" instead of "from an unidentified developer".
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep "$app"
+          cp LICENSE README.md "dist/$name/"
+          # ditto keeps the app bundle intact; a .zip is what Finder opens.
+          cd dist && ditto -c -k --keepParent "$name" "$name.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: siphon-${{ matrix.goos }}
+          name: siphon-${{ matrix.target }}
           path: |
             dist/*.zip
             dist/*.tar.gz
@@ -89,13 +160,15 @@ jobs:
         run: cd dist && sha256sum * > SHA256SUMS.txt
 
       # The release text is this version's section of CHANGELOG.md (from its
-      # "## <version>" heading to the next one); GitHub's list of changes is
-      # added below it. Without a section, only that list.
+      # "## <version>" heading to the next one; a pre-release such as
+      # v1.0.0-rc.1 uses 1.0.0's); GitHub's list of changes is added below
+      # it. Without a section, only that list.
       - name: Release notes
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          awk -v v="${VERSION#v}" '/^## /{on = ($2 == v); next} on' CHANGELOG.md > notes.md
+          ver="${VERSION#v}"
+          awk -v v="${ver%%-*}" '/^## /{on = ($2 == v); next} on' CHANGELOG.md > notes.md
           echo "release notes from CHANGELOG.md: $(grep -c . notes.md || true) lines"
 
       - uses: softprops/action-gh-release@v2
@@ -103,3 +176,4 @@ jobs:
           files: dist/*
           body_path: notes.md
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

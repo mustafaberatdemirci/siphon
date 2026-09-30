@@ -18,13 +18,13 @@ func TestIconsDecode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", r.Name(), err)
 		}
-		if b := img.Bounds(); b.Dx() != 64 || b.Dy() != 64 {
+		if b := img.Bounds(); b.Dx() != 256 || b.Dy() != 256 {
 			t.Errorf("%s is %dx%d", r.Name(), b.Dx(), b.Dy())
 		}
 		if _, _, _, a := img.At(0, 0).RGBA(); a != 0 {
 			t.Errorf("%s: the corner isn't transparent", r.Name())
 		}
-		if _, _, _, a := img.At(32, 32).RGBA(); a == 0 {
+		if _, _, _, a := img.At(128, 128).RGBA(); a == 0 {
 			t.Errorf("%s: the middle is empty", r.Name())
 		}
 	}

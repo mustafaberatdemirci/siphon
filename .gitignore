@@ -1,6 +1,8 @@
 /dist/
 /recordings/
 *.exe
+# Windows resources (icon, version); the release workflow makes them.
+rsrc_windows_*.syso
 *.part
 *.part.state
 *.part.stmp

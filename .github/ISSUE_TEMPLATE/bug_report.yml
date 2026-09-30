@@ -1,0 +1,71 @@
+name: Bug report
+description: Something doesn't download, or doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The report `siphon doctor` makes is usually the fastest way to the cause, so please include it.
+
+        **Don't paste private links** (a mega link with its key, a password-protected folder) or anything you wouldn't show publicly: issues are public.
+  - type: input
+    id: version
+    attributes:
+      label: Siphon version
+      description: In the window's title bar, or from `siphon -version`.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: dropdown
+    id: program
+    attributes:
+      label: Program
+      options:
+        - Window version (siphon-gui)
+        - Command line (siphon)
+    validations:
+      required: true
+  - type: dropdown
+    id: site
+    attributes:
+      label: Site
+      options:
+        - mega
+        - gofile
+        - mediafire
+        - pixeldrain
+        - bunkr
+        - cyberdrop
+        - A direct file link
+        - A page handed to yt-dlp or gallery-dl
+        - Not about a site
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw (the status or error text), and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnose report
+      description: Run `siphon doctor <site> -v` (or press Diagnose in the window) and paste the report.
+      render: text
+  - type: input
+    id: link
+    attributes:
+      label: A public link that shows the problem (optional)
+      description: Only a link anyone may see. Leave it empty if the files are private.
