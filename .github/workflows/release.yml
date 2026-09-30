@@ -32,9 +32,9 @@ jobs:
       VERSION: ${{ github.ref_name }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -134,7 +134,7 @@ jobs:
           # ditto keeps the app bundle intact; a .zip is what Finder opens.
           cd dist && ditto -c -k --keepParent "$name" "$name.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: siphon-${{ matrix.target }}
           path: |
@@ -146,12 +146,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: CHANGELOG.md
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -171,7 +171,7 @@ jobs:
           awk -v v="${ver%%-*}" '/^## /{on = ($2 == v); next} on' CHANGELOG.md > notes.md
           echo "release notes from CHANGELOG.md: $(grep -c . notes.md || true) lines"
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           body_path: notes.md
