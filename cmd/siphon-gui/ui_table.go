@@ -3,6 +3,7 @@ package main
 import (
 	"image/color"
 	"strconv"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -28,13 +29,13 @@ type column struct {
 // the fixed ones leave; a long name or error is cut with an ellipsis instead
 // of widening the table.
 var columns = []column{
-	{title: "File name", key: sortName, share: 0.6, align: fyne.TextAlignLeading},
-	{title: "Size", key: sortSize, width: 74, align: fyne.TextAlignTrailing},
-	{title: "Status", key: sortStatus, share: 0.4, align: fyne.TextAlignLeading},
-	{title: "Time left", key: sortETA, width: 66, align: fyne.TextAlignTrailing},
-	{title: "Transfer rate", key: sortSpeed, width: 90, align: fyne.TextAlignTrailing},
-	{title: "Conn.", key: sortConns, width: 44, align: fyne.TextAlignCenter},
-	{title: "Added", key: sortAdded, width: 104, align: fyne.TextAlignLeading},
+	{title: msg("File name"), key: sortName, share: 0.6, align: fyne.TextAlignLeading},
+	{title: msg("Size"), key: sortSize, width: 74, align: fyne.TextAlignTrailing},
+	{title: msg("Status"), key: sortStatus, share: 0.4, align: fyne.TextAlignLeading},
+	{title: msg("Time left"), key: sortETA, width: 66, align: fyne.TextAlignTrailing},
+	{title: msg("Transfer rate"), key: sortSpeed, width: 90, align: fyne.TextAlignTrailing},
+	{title: msg("Conn."), key: sortConns, width: 44, align: fyne.TextAlignCenter},
+	{title: msg("Added"), key: sortAdded, width: 104, align: fyne.TextAlignLeading},
 }
 
 const (
@@ -46,11 +47,48 @@ const (
 // every row use it, so their columns line up.
 type columnLayout struct{}
 
+// headerFloors are the widths the fixed columns need for their titles in
+// the current language, the sort arrow included: German titles are longer
+// than the English ones the widths were picked for, and a title wider than
+// its column ran into the next one.
+var (
+	floorsMu    sync.Mutex
+	floorsCache = map[language][]float32{}
+)
+
+func headerFloors() []float32 {
+	floorsMu.Lock()
+	defer floorsMu.Unlock()
+	if f, ok := floorsCache[current]; ok {
+		return f
+	}
+	f := make([]float32, len(columns))
+	for i, c := range columns {
+		if c.width > 0 {
+			// The header is a button in the compact theme: bold 13 pt text
+			// with inner padding on both sides.
+			f[i] = fyne.MeasureText(T(c.title)+" ▼", 13, fyne.TextStyle{Bold: true}).Width + 20
+		}
+	}
+	floorsCache[current] = f
+	return f
+}
+
+// fixedWidth is a fixed column's width: its own, or its title's if wider.
+func fixedWidth(i int) float32 {
+	if f := headerFloors()[i]; f > columns[i].width {
+		return f
+	}
+	return columns[i].width
+}
+
 func columnWidths(total float32) []float32 {
 	fixed := float32(colGap * (len(columns) - 1))
 	var shares float32
-	for _, c := range columns {
-		fixed += c.width
+	for i, c := range columns {
+		if c.width > 0 {
+			fixed += fixedWidth(i)
+		}
 		shares += c.share
 	}
 	rest := total - fixed
@@ -60,7 +98,7 @@ func columnWidths(total float32) []float32 {
 	w := make([]float32, len(columns))
 	for i, c := range columns {
 		if c.width > 0 {
-			w[i] = c.width
+			w[i] = fixedWidth(i)
 		} else {
 			w[i] = rest * c.share / shares
 		}
@@ -103,7 +141,7 @@ func newHeader(onSort func(sortKey)) (obj fyne.CanvasObject, update func(sortOrd
 	cells := make([]fyne.CanvasObject, len(columns))
 	for i, c := range columns {
 		key := c.key
-		b := widget.NewButton(c.title, func() { onSort(key) })
+		b := widget.NewButton(T(c.title), func() { onSort(key) })
 		b.Importance = widget.LowImportance
 		switch c.align {
 		case fyne.TextAlignTrailing:
@@ -117,7 +155,7 @@ func newHeader(onSort func(sortKey)) (obj fyne.CanvasObject, update func(sortOrd
 	}
 	update = func(o sortOrder) {
 		for i, c := range columns {
-			title := c.title
+			title := T(c.title)
 			if o.key == c.key {
 				if o.desc {
 					title += " ▼"
@@ -272,7 +310,7 @@ func (r *jobRow) set(rw row, selected bool) {
 	r.name.SetText(j.Filename)
 	r.size.SetText(sizeText(j))
 	bar := -1.0
-	if (j.State == queue.StateRunning || j.State == queue.StatePaused) && j.Size > 0 {
+	if (j.State == queue.StateRunning || j.State == queue.StatePaused && j.Done > 0) && j.Size > 0 {
 		bar = rowProgress(j)
 	}
 	r.status.set(statusText(rw, time.Now()), statusImportance(j.State), bar)
@@ -309,18 +347,25 @@ func (r *jobRow) DoubleTapped(*fyne.PointEvent) {
 }
 
 // kindIcons are the file kinds' icons in the name column: a shape per
-// kind, colored for the ones people look for most.
-var kindIcons = map[fileKind]fyne.Resource{
-	kindVideo:    theme.NewColoredResource(theme.MediaVideoIcon(), theme.ColorNamePrimary),
-	kindImage:    theme.NewColoredResource(theme.MediaPhotoIcon(), theme.ColorNameSuccess),
-	kindAudio:    theme.NewColoredResource(theme.MediaMusicIcon(), theme.ColorNameWarning),
-	kindArchive:  theme.StorageIcon(),
-	kindDocument: theme.DocumentIcon(),
-	kindProgram:  theme.ComputerIcon(),
-	kindOther:    theme.FileIcon(),
-}
+// kind, colored for the ones people look for most. Made on first use:
+// theme icons made before the app starts log an error each.
+var (
+	kindIconsOnce sync.Once
+	kindIcons     map[fileKind]fyne.Resource
+)
 
 func iconFor(k fileKind) fyne.Resource {
+	kindIconsOnce.Do(func() {
+		kindIcons = map[fileKind]fyne.Resource{
+			kindVideo:    theme.NewColoredResource(theme.MediaVideoIcon(), theme.ColorNamePrimary),
+			kindImage:    theme.NewColoredResource(theme.MediaPhotoIcon(), theme.ColorNameSuccess),
+			kindAudio:    theme.NewColoredResource(theme.MediaMusicIcon(), theme.ColorNameWarning),
+			kindArchive:  theme.StorageIcon(),
+			kindDocument: theme.DocumentIcon(),
+			kindProgram:  theme.ComputerIcon(),
+			kindOther:    theme.FileIcon(),
+		}
+	})
 	if r, ok := kindIcons[k]; ok {
 		return r
 	}

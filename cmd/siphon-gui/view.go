@@ -29,21 +29,21 @@ const (
 func (f filter) label() string {
 	switch f {
 	case filterUnfinished:
-		return "Unfinished"
+		return T("Unfinished")
 	case filterActive:
-		return "Downloading"
+		return T("Downloading")
 	case filterQueued:
-		return "Queued"
+		return T("Queued")
 	case filterPaused:
-		return "Paused"
+		return T("Paused")
 	case filterWaiting:
-		return "Waiting for quota"
+		return T("Waiting for quota")
 	case filterFinished:
-		return "Finished"
+		return T("Finished")
 	case filterFailed:
-		return "Failed"
+		return T("Failed")
 	}
-	return "All"
+	return T("All")
 }
 
 func (f filter) matches(s queue.State) bool {
@@ -258,22 +258,41 @@ func statusText(r row, now time.Time) string {
 		if p := progressText(j); p != "" {
 			return p
 		}
-		return "Downloading"
 	case queue.StatePaused:
 		if p := progressText(j); p != "" {
-			return "Paused  ·  " + p
+			return Tf("Paused  ·  %s", p)
 		}
-		return "Paused"
 	case queue.StateWaiting:
-		return capitalize(waitingMeta(j, now))
+		return waitingMeta(j, now)
 	case queue.StateFailed, queue.StateStopped:
 		if msg := firstLine(j.Error); msg != "" {
-			return capitalize(stateLabel(j.State)) + ": " + msg
+			return stateTitle(j.State) + ": " + msg
 		}
-	case queue.StateDone:
-		return "Complete"
 	}
-	return capitalize(stateLabel(j.State))
+	return stateTitle(j.State)
+}
+
+// stateTitle is a state as the window names it.
+func stateTitle(s queue.State) string {
+	switch s {
+	case queue.StateQueued:
+		return T("Queued")
+	case queue.StateRunning:
+		return T("Downloading")
+	case queue.StatePaused:
+		return T("Paused")
+	case queue.StateDone:
+		return T("Complete")
+	case queue.StateFailed:
+		return T("Failed")
+	case queue.StateSkipped:
+		return T("Already downloaded")
+	case queue.StateStopped:
+		return T("Stopped")
+	case queue.StateWaiting:
+		return T("Waiting for quota")
+	}
+	return string(s)
 }
 
 // connsText is the Connections column: how many a running download really
@@ -293,18 +312,10 @@ func addedText(t, now time.Time) string {
 	}
 	t = t.Local()
 	if t.Year() == now.Local().Year() {
-		return t.Format("Jan 2 15:04")
+		// The layout is translated too: day before month where people write it so.
+		return t.Format(T("Jan 2 15:04"))
 	}
-	return t.Format("Jan 2 2006")
-}
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	r := []rune(s)
-	r[0] = unicode.ToUpper(r[0])
-	return string(r)
+	return t.Format(T("Jan 2 2006"))
 }
 
 // selActions is what the toolbar and the row menu offer for the selected
@@ -365,21 +376,21 @@ var kinds = []fileKind{kindVideo, kindImage, kindAudio, kindArchive, kindDocumen
 func (k fileKind) label() string {
 	switch k {
 	case kindVideo:
-		return "Video"
+		return T("Video")
 	case kindImage:
-		return "Images"
+		return T("Images")
 	case kindAudio:
-		return "Music"
+		return T("Music")
 	case kindArchive:
-		return "Compressed"
+		return T("Compressed")
 	case kindDocument:
-		return "Documents"
+		return T("Documents")
 	case kindProgram:
-		return "Programs"
+		return T("Programs")
 	case kindOther:
-		return "Other"
+		return T("Other")
 	}
-	return "All"
+	return T("All")
 }
 
 var kindByExt = func() map[string]fileKind {
@@ -473,11 +484,11 @@ func categoryOf(id string) category {
 func categoryLabel(id string) string {
 	switch id {
 	case nodeAll:
-		return "All downloads"
+		return T("All downloads")
 	case nodeUnfinished:
-		return "Unfinished"
+		return T("Unfinished")
 	case nodeFinished:
-		return "Finished"
+		return T("Finished")
 	}
 	c := categoryOf(id)
 	if c.k != kindAny {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -26,15 +25,15 @@ func newDoctorTab(win fyne.Window) (*doctorTab, fyne.CanvasObject) {
 	d := &doctorTab{}
 	d.out = widget.NewMultiLineEntry()
 	d.out.Wrapping = fyne.TextWrapOff
-	d.out.SetText("Press Diagnose: seven layers are checked for each site\n" +
-		"(DNS, TLS, Challenge, Fetch, Parse, ItemPage, CDN).")
+	d.out.SetText(T("Press Diagnose: seven layers are checked for each site\n" +
+		"(DNS, TLS, Challenge, Fetch, Parse, ItemPage, CDN)."))
 
-	d.btn = widget.NewButton("Diagnose", d.run)
+	d.btn = widget.NewButton(T("Diagnose"), d.run)
 	d.btn.Importance = widget.HighImportance
 
 	d.tools = widget.NewLabel(toolsStatus())
 	d.tools.TextStyle = fyne.TextStyle{Monospace: true}
-	install := widget.NewButton("Install tools…", func() {
+	install := widget.NewButton(T("Install tools…"), func() {
 		showInstallTools(win, func() { d.tools.SetText(toolsStatus()) })
 	})
 
@@ -44,14 +43,14 @@ func newDoctorTab(win fyne.Window) (*doctorTab, fyne.CanvasObject) {
 
 func (d *doctorTab) run() {
 	d.btn.Disable()
-	d.out.SetText("Diagnosing...")
+	d.out.SetText(T("Diagnosing..."))
 
 	go func() {
 		var out strings.Builder
 		cfgs, resolvers, err := run.Setup(run.Events{}, "", nil, nil, nil)
 		if err != nil {
 			fyne.Do(func() {
-				d.out.SetText("Configuration error:\n" + err.Error())
+				d.out.SetText(T("Configuration error:") + "\n" + err.Error())
 				d.btn.Enable()
 			})
 			return
@@ -65,10 +64,10 @@ func (d *doctorTab) run() {
 		}
 		reports := doctor.Run(context.Background(), named)
 		worst := doctor.Format(&out, reports)
-		fmt.Fprintf(&out, "\nResult: %s\n", worst)
+		out.WriteString("\n" + Tf("Result: %s", worst) + "\n")
 		if worst == site.StatusWarn {
-			out.WriteString("WARN is not a failure: an unknown CDN host\n" +
-				"doesn't stop the download, it is only reported.\n")
+			out.WriteString(T("WARN is not a failure: an unknown CDN host\n"+
+				"doesn't stop the download, it is only reported.") + "\n")
 		}
 
 		fyne.Do(func() {

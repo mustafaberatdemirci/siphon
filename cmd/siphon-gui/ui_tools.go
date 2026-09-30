@@ -19,23 +19,23 @@ import (
 
 // toolsStatus is the "tools" block of the Diagnose tab: what was found.
 func toolsStatus() string {
-	return "tools (for pages of sites Siphon doesn't know)\n" +
+	return T("tools (for pages of sites Siphon doesn't know)") + "\n" +
 		strings.Join(external.Find(run.ToolPaths("")).Lines(), "\n")
 }
 
 // toolLabel is one line of the install dialog: the tool, its size once the
 // release was asked, what it is for, and whether it is already there.
 func toolLabel(p external.Package, foundPath string, resolveErr error) string {
-	size := "size unknown"
+	size := T("size unknown")
 	if p.Size > 0 {
 		size = humanBytes(p.Size)
 	}
 	s := fmt.Sprintf("%s (%s) — %s", p.Tool, size, p.Purpose)
 	switch {
 	case resolveErr != nil:
-		s += " — can't be installed now: " + firstLine(resolveErr.Error())
+		s += " — " + Tf("can't be installed now: %s", firstLine(resolveErr.Error()))
 	case foundPath != "":
-		s += " — installed; tick to update"
+		s += " — " + T("installed; tick to update")
 	}
 	return s
 }
@@ -46,13 +46,13 @@ func toolLabel(p external.Package, foundPath string, resolveErr error) string {
 func showInstallTools(win fyne.Window, onDone func()) {
 	pkgs := external.Packages(runtime.GOOS, runtime.GOARCH)
 	if len(pkgs) == 0 {
-		dialog.ShowInformation("Install tools",
-			"Siphon has no official builds to install on this system.\nInstall yt-dlp, gallery-dl and ffmpeg with your package manager.", win)
+		showInfo(T("Install tools"),
+			T("Siphon has no official builds to install on this system.\nInstall yt-dlp, gallery-dl and ffmpeg with your package manager."), win)
 		return
 	}
 	dir, err := external.ToolsDir()
 	if err != nil {
-		dialog.ShowError(fmt.Errorf("no folder for the tools: %w", err), win)
+		showInfo(T("Install tools"), Tf("No folder for the tools: %s", err.Error()), win)
 		return
 	}
 	found := external.Find(run.ToolPaths(""))
@@ -65,8 +65,8 @@ func showInstallTools(win fyne.Window, onDone func()) {
 		checks[i].SetChecked(found.Path(p.Tool) == "")
 		list.Add(checks[i])
 	}
-	intro := widget.NewLabel("Each tool is downloaded from its own official release, checked against the " +
-		"SHA-256 published with it, and put in\n" + dir + "\nNothing is installed if a check fails.")
+	intro := widget.NewLabel(Tf("Each tool is downloaded from its own official release, checked against the "+
+		"SHA-256 published with it, and put in\n%s\nNothing is installed if a check fails.", dir))
 	intro.Wrapping = fyne.TextWrapWord
 
 	// Ask the releases for sizes (and checksums) while the user reads.
@@ -94,7 +94,7 @@ func showInstallTools(win fyne.Window, onDone func()) {
 		}
 	}()
 
-	d := dialog.NewCustomConfirm("Install tools", "Install", "Cancel", container.NewVBox(intro, list), func(ok bool) {
+	d := dialog.NewCustomConfirm(T("Install tools"), T("Install"), T("Cancel"), container.NewVBox(intro, list), func(ok bool) {
 		cancel()
 		if !ok {
 			return
@@ -119,7 +119,7 @@ func installTools(win fyne.Window, dir string, chosen []external.Package, onDone
 	status := widget.NewLabel("")
 	bar := widget.NewProgressBar()
 	ctx, cancel := context.WithCancel(context.Background())
-	pd := dialog.NewCustom("Installing tools", "Cancel", container.NewVBox(status, bar), win)
+	pd := dialog.NewCustom(T("Installing tools"), T("Cancel"), container.NewVBox(status, bar), win)
 	pd.SetOnClosed(cancel)
 	pd.Resize(fyne.NewSize(480, 0))
 	pd.Show()
@@ -134,7 +134,7 @@ func installTools(win fyne.Window, dir string, chosen []external.Package, onDone
 					continue
 				}
 			}
-			label := fmt.Sprintf("Downloading %s (%s)…", p.Tool, humanBytes(p.Size))
+			label := Tf("Downloading %s (%s)…", p.Tool, humanBytes(p.Size))
 			fyne.Do(func() {
 				status.SetText(label)
 				bar.SetValue(0)
@@ -150,11 +150,11 @@ func installTools(win fyne.Window, dir string, chosen []external.Package, onDone
 			})
 			switch {
 			case ctx.Err() != nil:
-				report = append(report, p.Tool+": canceled")
+				report = append(report, p.Tool+": "+T("canceled"))
 			case err != nil:
 				report = append(report, firstLine(err.Error()))
 			default:
-				report = append(report, p.Tool+": installed, SHA-256 checked")
+				report = append(report, p.Tool+": "+T("installed, SHA-256 checked"))
 			}
 			if ctx.Err() != nil {
 				break
@@ -162,7 +162,7 @@ func installTools(win fyne.Window, dir string, chosen []external.Package, onDone
 		}
 		fyne.Do(func() {
 			pd.Hide()
-			dialog.ShowInformation("Install tools", strings.Join(report, "\n"), win)
+			showInfo(T("Install tools"), strings.Join(report, "\n"), win)
 			if onDone != nil {
 				onDone()
 			}

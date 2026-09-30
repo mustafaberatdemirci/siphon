@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -94,10 +93,10 @@ func humanETA(remaining int64, bps float64) string {
 	d := time.Duration(secs) * time.Second
 	switch {
 	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+		return Tf("%ds", int(d.Seconds()))
 	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
+		return Tf("%dm", int(d.Minutes()))
 	default:
-		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+		return Tf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 	}
 }

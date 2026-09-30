@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -162,10 +161,10 @@ func (vm *viewModel) quotaBanner(now time.Time) string {
 	}
 	when := ""
 	if !earliest.IsZero() && earliest.After(now) {
-		when = fmt.Sprintf("; if you don't, they'll be retried automatically at %s (in %s)",
+		when = Tf("; if you don't, they'll be retried automatically at %s (in %s)",
 			earliest.Local().Format("15:04"), site.FormatWait(earliest.Sub(now)))
 	}
-	return fmt.Sprintf("%s quota exceeded — %d files waiting. Switch your VPN location; downloads resume by themselves once it changes%s.",
+	return Tf("%s quota exceeded — %d files waiting. Switch your VPN location; downloads resume by themselves once it changes%s.",
 		siteName, n, when)
 }
 
@@ -220,7 +219,7 @@ func (vm *viewModel) Summary() string {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	if len(vm.order) == 0 {
-		return "The queue is empty. Press Add links, or Ctrl+V to paste links."
+		return T("The queue is empty. Press Add links, or Ctrl+V to paste links.")
 	}
 	var active, queued, waiting, paused, done, failed int
 	var total float64
@@ -244,22 +243,22 @@ func (vm *viewModel) Summary() string {
 	}
 	var parts []string
 	if active > 0 {
-		parts = append(parts, fmt.Sprintf("%d active", active))
+		parts = append(parts, Tf("%d active", active))
 	}
 	if queued > 0 {
-		parts = append(parts, fmt.Sprintf("%d queued", queued))
+		parts = append(parts, Tf("%d queued", queued))
 	}
 	if waiting > 0 {
-		parts = append(parts, fmt.Sprintf("%d waiting for quota", waiting))
+		parts = append(parts, Tf("%d waiting for quota", waiting))
 	}
 	if paused > 0 {
-		parts = append(parts, fmt.Sprintf("%d paused", paused))
+		parts = append(parts, Tf("%d paused", paused))
 	}
 	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
+		parts = append(parts, Tf("%d failed", failed))
 	}
 	if done > 0 {
-		parts = append(parts, fmt.Sprintf("%d done", done))
+		parts = append(parts, Tf("%d done", done))
 	}
 	if r := humanRate(total); r != "" {
 		parts = append(parts, r)
@@ -269,63 +268,28 @@ func (vm *viewModel) Summary() string {
 
 // --- Row formatting (pure) ---
 
-// stateLabel is the display label of a state.
-func stateLabel(s queue.State) string {
-	switch s {
-	case queue.StateQueued:
-		return "queued"
-	case queue.StateRunning:
-		return "downloading"
-	case queue.StatePaused:
-		return "paused"
-	case queue.StateDone:
-		return "done"
-	case queue.StateFailed:
-		return "failed"
-	case queue.StateSkipped:
-		return "already downloaded"
-	case queue.StateStopped:
-		return "stopped"
-	case queue.StateWaiting:
-		return "waiting for quota"
-	}
-	return string(s)
-}
-
 // waitingMeta is the row of a job waiting for quota: when it will be retried
 // by itself and what the user can do. The time is written ABSOLUTE ("at
 // 20:31"): the list is only drawn on changes, so a countdown would stay frozen.
 func waitingMeta(j queue.Job, now time.Time) string {
 	if j.RetryAt.IsZero() {
-		return "quota exceeded  ·  resume to try now"
+		return T("Quota exceeded  ·  resume to try now")
 	}
 	left := j.RetryAt.Sub(now)
 	if left < time.Minute {
-		return "quota exceeded  ·  retrying shortly"
+		return T("Quota exceeded  ·  retrying shortly")
 	}
-	return fmt.Sprintf("quota exceeded  ·  resumes when the VPN changes or at %s (%s)  ·  resume to try now",
+	return Tf("Quota exceeded  ·  resumes when the VPN changes or at %s (%s)  ·  resume to try now",
 		j.RetryAt.Local().Format("15:04"), site.FormatWait(left))
 }
 
 // quotaHoldMessage is the body of the quota notification: what happened, what can be done.
 func quotaHoldMessage(retryAt, now time.Time) string {
 	if retryAt.IsZero() || retryAt.Before(now) {
-		return "If you switch VPN server, downloads resume by themselves."
+		return T("If you switch VPN server, downloads resume by themselves.")
 	}
-	return fmt.Sprintf("If you switch VPN server, downloads resume by themselves; otherwise they'll be retried at %s (in %s).",
+	return Tf("If you switch VPN server, downloads resume by themselves; otherwise they'll be retried at %s (in %s).",
 		retryAt.Local().Format("15:04"), site.FormatWait(retryAt.Sub(now)))
-}
-
-// connsLabel is "1 connection" / "8 connections"; empty while unknown.
-func connsLabel(n int) string {
-	switch {
-	case n <= 0:
-		return ""
-	case n == 1:
-		return "1 connection"
-	default:
-		return fmt.Sprintf("%d connections", n)
-	}
 }
 
 // segmentsNotice explains a new "Connections per file" choice: the number is a
@@ -335,13 +299,13 @@ func segmentsNotice(n int, ceilings []queue.SiteCeiling) string {
 	var capped []string
 	for _, c := range ceilings {
 		if c.Max < n {
-			capped = append(capped, fmt.Sprintf("%d on %s", c.Max, c.Site))
+			capped = append(capped, Tf("%d on %s", c.Max, c.Site))
 		}
 	}
 	if len(capped) == 0 {
-		return fmt.Sprintf("Connections per file: %d.", n)
+		return Tf("Connections per file: %d.", n)
 	}
-	return fmt.Sprintf("Connections per file: %d (site limits: %s). Each row shows what its download really gets.",
+	return Tf("Connections per file: %d (site limits: %s). Each row shows what its download really gets.",
 		n, strings.Join(capped, ", "))
 }
 

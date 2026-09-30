@@ -37,10 +37,10 @@ func setupTray(a fyne.App, w fyne.Window, prefs fyne.Preferences, quit func()) *
 	}
 	t := &tray{w: w, desk: desk, prefs: prefs, quit: quit, normal: appIcon(), quota: quotaIcon()}
 	desk.SetSystemTrayMenu(fyne.NewMenu("Siphon",
-		fyne.NewMenuItem("Show Siphon", t.show),
+		fyne.NewMenuItem(T("Show Siphon"), t.show),
 		// Our own Quit, marked IsQuit so Fyne doesn't add its own: Fyne's
 		// would exit without waiting for unfinished jobs to be saved.
-		&fyne.MenuItem{Label: "Quit", IsQuit: true, Action: quit},
+		&fyne.MenuItem{Label: T("Quit"), IsQuit: true, Action: quit},
 	))
 	desk.SetSystemTrayIcon(t.normal)
 	desk.SetSystemTrayWindow(w) // left click on the icon shows the window
@@ -64,11 +64,11 @@ func (t *tray) hide() {
 		return
 	}
 	t.prefs.SetBool(prefTrayHintShown, true)
-	msg := widget.NewLabel("Closing the window doesn't stop Siphon: it keeps running in the notification area " +
+	msg := widget.NewLabel(T("Closing the window doesn't stop Siphon: it keeps running in the notification area " +
 		"next to the clock (on Windows 11 it may be under the ^ arrow), and downloads continue.\n\n" +
-		"Click its icon to open this window again. To exit, right-click the icon and choose Quit.")
+		"Click its icon to open this window again. To exit, right-click the icon and choose Quit."))
 	msg.Wrapping = fyne.TextWrapWord
-	d := dialog.NewCustomConfirm("Siphon keeps running", "Hide", "Quit Siphon", msg, func(hide bool) {
+	d := dialog.NewCustomConfirm(T("Siphon keeps running"), T("Hide"), T("Quit Siphon"), msg, func(hide bool) {
 		if hide {
 			t.w.Hide()
 		} else {

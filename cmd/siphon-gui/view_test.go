@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
+
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
@@ -308,8 +310,22 @@ func TestColumnWidths(t *testing.T) {
 		t.Errorf("widths %v add up to %v, want 1000", w, sum(w))
 	}
 	for i, c := range columns {
-		if c.width > 0 && w[i] != c.width {
-			t.Errorf("%s: %v, want its fixed %v", c.title, w[i], c.width)
+		if c.width > 0 && w[i] != fixedWidth(i) {
+			t.Errorf("%s: %v, want its fixed %v", c.title, w[i], fixedWidth(i))
+		}
+	}
+	// A fixed column is never narrower than its title, in any language.
+	defer func(l language) { current = l }(current)
+	for _, l := range []language{langEnglish, langTurkish, langGerman} {
+		current = l
+		for i, c := range columns {
+			if c.width == 0 {
+				continue
+			}
+			need := fyne.MeasureText(T(c.title), 13, fyne.TextStyle{Bold: true}).Width
+			if got := columnWidths(1000)[i]; got < need {
+				t.Errorf("%s: %q needs %v, the column has %v", l, T(c.title), need, got)
+			}
 		}
 	}
 	if w[0] <= w[len(w)-1] {

@@ -230,10 +230,12 @@ The menu bar has the rest:
 | Downloads | Resume, Pause, Remove, Select all; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
 | Help | Diagnose, Install tools, About Siphon. |
 
-In **Settings**, changes take effect right away:
+In **Settings**, changes take effect right away (the language after a
+restart, which Siphon offers to do on the spot):
 
 | Setting | What it does |
 | --- | --- |
+| Language | English, Türkçe (Turkish) or Deutsch (German). **Automatic** (the default) follows the system's language when Siphon speaks it, English otherwise. |
 | Download folder | Where new links are saved; the Add dialog can change it for a batch, and remembers it. |
 | Speed limit | Total limit in MB/s across all downloads (empty or 0 = unlimited). |
 | Downloads at once | How many files download at the same time (default 4). |
@@ -463,6 +465,18 @@ SIPHON_LIVE=1 go test ./internal/site -run Live -v
 The screenshot above is drawn by a test, off screen, with sample jobs; after
 changing the window, regenerate it with
 `SIPHON_SCREENSHOT=1 go test ./cmd/siphon-gui -run READMEScreenshot`.
+
+**Translations.** The window's texts are written in English in the code and
+wrapped in `T(...)` (or `Tf(...)` with format verbs); the English text is the
+key. Each language is a map in `cmd/siphon-gui/translations_<code>.go`. A
+test checks that every text has a translation in every catalog, with the
+same format verbs, and that no catalog keeps a text the code no longer uses.
+To add a language, copy `translations_de.go`, translate it, register it in
+`catalogs` and `languageChoices` (`cmd/siphon-gui/i18n.go`), and list what
+is still missing with
+`SIPHON_I18N_MISSING=1 go test ./cmd/siphon-gui -run PrintMissing`.
+Messages from the sites and the Diagnose report stay in English on purpose:
+they are technical, and searching for them should find the same words.
 
 **Releasing:** add a `## 1.0.0` section to [CHANGELOG.md](CHANGELOG.md),
 then push a tag such as `v1.0.0`. The release workflow builds both programs

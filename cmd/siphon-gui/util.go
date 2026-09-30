@@ -85,11 +85,11 @@ func pickOpenTarget(lastPath, lastDir, outDir string) (target string, selectFile
 	fi, err := os.Stat(outDir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return "", false, "The folder doesn't exist yet: " + outDir + " — it will be created when a download starts."
+		return "", false, Tf("The folder doesn't exist yet: %s — it will be created when a download starts.", outDir)
 	case err != nil:
-		return "", false, "Could not access the folder: " + err.Error()
+		return "", false, Tf("Could not access the folder: %s", err.Error())
 	case !fi.IsDir():
-		return "", false, "This is not a folder: " + outDir
+		return "", false, Tf("This is not a folder: %s", outDir)
 	}
 	// Given a relative path, explorer would resolve it against ITS OWN working directory.
 	if abs, aerr := filepath.Abs(outDir); aerr == nil {
@@ -158,10 +158,10 @@ func parseSpeedLimit(s string) (int64, error) {
 	}
 	var mbps float64
 	if _, err := fmt.Sscanf(s, "%g", &mbps); err != nil {
-		return 0, fmt.Errorf("could not understand the speed limit: %q", s)
+		return 0, fmt.Errorf("%s", Tf("Could not understand the speed limit: %q", s))
 	}
 	if mbps < 0 {
-		return 0, fmt.Errorf("the speed limit can't be negative")
+		return 0, fmt.Errorf("%s", T("The speed limit can't be negative."))
 	}
 	return int64(mbps * 1024 * 1024), nil
 }

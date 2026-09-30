@@ -35,6 +35,8 @@ actually share links from, in a single file with nothing to install.
   multi-select, pause, resume, cancel, several files at once; paste links
   with Ctrl+V; it keeps running in the notification area when the window is
   closed.
+- The window in English, Turkish or German (Settings → Language), by
+  default in the system's language when Siphon speaks it.
 - Resumable downloads that survive crashes, several connections per file,
   and a per-site ceiling on connections.
 - Integrity: every file is hashed, and compared with the site's hash when it

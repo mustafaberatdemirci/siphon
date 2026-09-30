@@ -13,6 +13,8 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -20,7 +22,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
@@ -32,6 +33,8 @@ const appID = "io.github.mustafaberatdemirci.siphon"
 
 func main() {
 	a := app.NewWithID(appID)
+	// Before anything is built: every label is made in this language.
+	setLanguage(language(a.Preferences().String(prefLanguage)))
 	registerToastIdentity(appID)
 	a.SetIcon(appIcon())
 	w := a.NewWindow("Siphon " + version)
@@ -81,17 +84,17 @@ func main() {
 		// filled it is automatic anyway.
 		OnQuotaHold: func(siteName string, retryAt time.Time) {
 			msg := quotaHoldMessage(retryAt, time.Now())
-			vm.Notify(siteName + " quota exceeded — " + msg)
+			vm.Notify(Tf("%s quota exceeded — %s", siteName, msg))
 			// Three channels, because none is guaranteed on its own:
 			// notifications may be turned off account-wide (measured), the
 			// window may be in the background, the sound may be off.
-			a.SendNotification(fyne.NewNotification("Siphon — "+siteName+" quota exceeded", msg))
+			a.SendNotification(fyne.NewNotification(Tf("Siphon — %s quota exceeded", siteName), msg))
 			fyne.Do(func() { requestAttention(w) })
 		},
 	})
 	if err != nil {
 		// The config couldn't be loaded: open the window but say why.
-		w.SetContent(container.NewCenter(widget.NewLabel("Could not start:\n" + err.Error())))
+		w.SetContent(container.NewCenter(widget.NewLabel(T("Could not start:") + "\n" + err.Error())))
 		w.ShowAndRun()
 		return
 	}
@@ -122,7 +125,7 @@ func main() {
 		})
 	}
 	quit := func() {
-		vm.Notify("Closing, saving unfinished jobs...")
+		vm.Notify(T("Closing, saving unfinished jobs..."))
 		go func() {
 			shutdown()
 			fyne.Do(a.Quit)
@@ -141,20 +144,43 @@ func main() {
 			diag.RequestFocus()
 			return
 		}
-		diag = a.NewWindow("Siphon — Diagnose")
+		diag = a.NewWindow(T("Siphon — Diagnose"))
 		_, view := newDoctorTab(diag)
 		diag.SetContent(view)
 		diag.Resize(fyne.NewSize(900, 640))
 		diag.SetOnClosed(func() { diag = nil })
 		diag.Show()
 	}
+	// Restarting (for a new language) is quitting, then starting again once
+	// this process has let go of the queue and the instance.
+	restartAfter := false
+	q.restart = func() {
+		restartAfter = true
+		quit()
+	}
 	w.SetMainMenu(q.mainMenu(quit))
 	w.SetContent(queueView)
 
 	if statePath == "" {
-		dialog.ShowInformation("Persistence off",
-			"No folder was found for the queue file; the list is limited to this session.", w)
+		showInfo(T("Persistence off"),
+			T("No folder was found for the queue file; the list is limited to this session."), w)
 	}
 	w.ShowAndRun()
 	shutdown()
+	if restartAfter {
+		// The next Siphon claims the instance; this one must have let go.
+		releaseInstance()
+		if err := startAgain(); err != nil {
+			log.Printf("could not start Siphon again: %v", err)
+		}
+	}
+}
+
+// startAgain starts this program anew with the same arguments.
+func startAgain() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return exec.Command(exe, os.Args[1:]...).Start()
 }

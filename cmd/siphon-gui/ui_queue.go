@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
@@ -95,6 +94,10 @@ type queueTab struct {
 	// openDiagnose opens the Diagnose window. May be nil.
 	openDiagnose func()
 
+	// restart quits (saving unfinished jobs) and starts Siphon again, for a
+	// new language. May be nil.
+	restart func()
+
 	// onQuota is told, on the UI thread, whether downloads wait for quota
 	// (the notification-area icon changes). May be nil.
 	onQuota func(waiting bool)
@@ -107,14 +110,14 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	// --- Toolbar ---
 	// Add links; what acts on the selected rows (as the row menu does); the
 	// queue as a whole; Settings and Diagnose. The rest is in the menus.
-	q.addBtn = newToolItem("Add links", theme.NewPrimaryThemedResource(theme.ContentAddIcon()), func() { q.showAddDialog("") })
-	q.resumeSel = newToolItem("Resume", theme.MediaPlayIcon(), q.resumeSelected)
-	q.pauseSel = newToolItem("Pause", theme.MediaPauseIcon(), q.pauseSelected)
-	q.removeSel = newToolItem("Remove", theme.DeleteIcon(), q.removeSelected)
-	q.pauseAll = newToolItem("Pause all", theme.MediaStopIcon(), q.togglePauseAll)
-	q.clearDone = newToolItem("Clear done", theme.ContentClearIcon(), q.clearFinished)
-	settings := newToolItem("Settings", theme.SettingsIcon(), q.showSettings)
-	diagnose := newToolItem("Diagnose", theme.InfoIcon(), q.diagnose)
+	q.addBtn = newToolItem(T("Add links"), theme.NewPrimaryThemedResource(theme.ContentAddIcon()), func() { q.showAddDialog("") })
+	q.resumeSel = newToolItem(T("Resume"), theme.MediaPlayIcon(), q.resumeSelected)
+	q.pauseSel = newToolItem(T("Pause"), theme.MediaPauseIcon(), q.pauseSelected)
+	q.removeSel = newToolItem(T("Remove"), theme.DeleteIcon(), q.removeSelected)
+	q.pauseAll = newToolItem(T("Pause all"), theme.MediaStopIcon(), q.togglePauseAll)
+	q.clearDone = newToolItem(T("Clear done"), theme.ContentClearIcon(), q.clearFinished)
+	settings := newToolItem(T("Settings"), theme.SettingsIcon(), q.showSettings)
+	diagnose := newToolItem(T("Diagnose"), theme.InfoIcon(), q.diagnose)
 	toolbar := container.NewHBox(q.addBtn, toolGap(), q.resumeSel, q.pauseSel, q.removeSel, toolGap(),
 		q.pauseAll, q.clearDone, toolGap(), settings, diagnose)
 
@@ -126,7 +129,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.bannerText = widget.NewLabel("")
 	q.bannerText.Wrapping = fyne.TextWrapWord
 	q.bannerText.TextStyle = fyne.TextStyle{Bold: true}
-	retryBtn := widget.NewButton("Try now", func() {
+	retryBtn := widget.NewButton(T("Try now"), func() {
 		eng.RetryWaiting()
 		vm.Replace(eng.Jobs())
 		q.render()
@@ -232,45 +235,45 @@ func (q *queueTab) mainMenu(quit func()) *fyne.MainMenu {
 		return it
 	}
 	tasks := []*fyne.MenuItem{
-		item("Add links…", theme.ContentAddIcon(), func() { q.showAddDialog("") }),
-		item("Open download folder", theme.FolderOpenIcon(), q.openFolder),
+		item(T("Add links…"), theme.ContentAddIcon(), func() { q.showAddDialog("") }),
+		item(T("Open download folder"), theme.FolderOpenIcon(), q.openFolder),
 		fyne.NewMenuItemSeparator(),
-		item("Settings…", theme.SettingsIcon(), q.showSettings),
+		item(T("Settings…"), theme.SettingsIcon(), q.showSettings),
 	}
 	if quit != nil {
-		tasks = append(tasks, fyne.NewMenuItemSeparator(), &fyne.MenuItem{Label: "Quit", IsQuit: true, Action: quit})
+		tasks = append(tasks, fyne.NewMenuItemSeparator(), &fyne.MenuItem{Label: T("Quit"), IsQuit: true, Action: quit})
 	}
 	downloads := []*fyne.MenuItem{
-		item("Resume", theme.MediaPlayIcon(), q.resumeSelected),
-		item("Pause", theme.MediaPauseIcon(), q.pauseSelected),
-		item("Remove", theme.DeleteIcon(), q.removeSelected),
-		item("Select all", nil, q.selectAll),
+		item(T("Resume"), theme.MediaPlayIcon(), q.resumeSelected),
+		item(T("Pause"), theme.MediaPauseIcon(), q.pauseSelected),
+		item(T("Remove"), theme.DeleteIcon(), q.removeSelected),
+		item(T("Select all"), nil, q.selectAll),
 		fyne.NewMenuItemSeparator(),
-		item("Resume all", theme.MediaPlayIcon(), func() {
+		item(T("Resume all"), theme.MediaPlayIcon(), func() {
 			q.eng.ResumeAll()
 			q.vm.Replace(q.eng.Jobs())
 			q.render()
 		}),
-		item("Pause all", theme.MediaStopIcon(), func() {
+		item(T("Pause all"), theme.MediaStopIcon(), func() {
 			q.eng.PauseAll()
 			q.vm.Replace(q.eng.Jobs())
 			q.render()
 		}),
 		fyne.NewMenuItemSeparator(),
-		item("Retry failed", theme.ViewRefreshIcon(), q.retryFailed),
-		item("Clear finished", theme.ContentClearIcon(), q.clearFinished),
-		item("Cancel all…", theme.CancelIcon(), q.confirmCancelAll),
+		item(T("Retry failed"), theme.ViewRefreshIcon(), q.retryFailed),
+		item(T("Clear finished"), theme.ContentClearIcon(), q.clearFinished),
+		item(T("Cancel all…"), theme.CancelIcon(), q.confirmCancelAll),
 	}
 	help := []*fyne.MenuItem{
-		item("Diagnose…", theme.InfoIcon(), q.diagnose),
-		item("Install tools…", theme.DownloadIcon(), func() { showInstallTools(q.win, func() {}) }),
+		item(T("Diagnose…"), theme.InfoIcon(), q.diagnose),
+		item(T("Install tools…"), theme.DownloadIcon(), func() { showInstallTools(q.win, func() {}) }),
 		fyne.NewMenuItemSeparator(),
-		item("About Siphon", theme.HelpIcon(), q.showAbout),
+		item(T("About Siphon"), theme.HelpIcon(), q.showAbout),
 	}
 	return fyne.NewMainMenu(
-		fyne.NewMenu("Tasks", tasks...),
-		fyne.NewMenu("Downloads", downloads...),
-		fyne.NewMenu("Help", help...),
+		fyne.NewMenu(T("Tasks"), tasks...),
+		fyne.NewMenu(T("Downloads"), downloads...),
+		fyne.NewMenu(T("Help"), help...),
 	)
 }
 
@@ -357,20 +360,20 @@ func (q *queueTab) render() {
 	}
 	switch captcha := q.eng.CaptchaHeld(); {
 	case q.eng.Paused():
-		q.pauseAll.SetText("Resume all")
+		q.pauseAll.SetText(T("Resume all"))
 		q.pauseAll.SetIcon(theme.MediaPlayIcon())
 	case len(captcha) > 0:
 		// The reason must be visible: a captcha held that site's jobs (the
 		// other sites go on); it resumes when the user resumes one of that
 		// site's jobs or presses here.
-		q.pauseAll.SetText("Resume " + strings.Join(captcha, ", "))
+		q.pauseAll.SetText(Tf("Resume %s", strings.Join(captcha, ", ")))
 		q.pauseAll.SetIcon(theme.MediaPlayIcon())
 		if held := strings.Join(captcha, ", "); held != q.captchaShown {
 			q.captchaShown = held
-			q.vm.Notify("Captcha: " + held + " paused. Solve it in a browser, then resume.")
+			q.vm.Notify(Tf("Captcha: %s paused. Solve it in a browser, then resume.", held))
 		}
 	default:
-		q.pauseAll.SetText("Pause all")
+		q.pauseAll.SetText(T("Pause all"))
 		q.pauseAll.SetIcon(theme.MediaStopIcon())
 	}
 	if len(q.eng.CaptchaHeld()) == 0 {
@@ -457,12 +460,12 @@ func (q *queueTab) showError(j queue.Job) {
 	msg.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(msg)
 	if links := sourceLinks([]queue.Job{j}); len(links) > 0 {
-		from := widget.NewLabel("From: " + links[0])
+		from := widget.NewLabel(Tf("From: %s", links[0]))
 		from.Wrapping = fyne.TextWrapBreak
 		from.Importance = widget.LowImportance
 		content.Add(from)
 	}
-	d := dialog.NewCustom(j.Filename, "Close", content, q.win)
+	d := dialog.NewCustom(j.Filename, T("Close"), content, q.win)
 	d.Resize(fyne.NewSize(560, 0))
 	d.Show()
 }
@@ -482,19 +485,19 @@ func (q *queueTab) rowMenu() *fyne.Menu {
 		return nil
 	}
 	a := actionsFor(jobs)
-	resume := fyne.NewMenuItem(counted("Resume", a.resume), q.resumeSelected)
+	resume := fyne.NewMenuItem(counted(T("Resume"), a.resume), q.resumeSelected)
 	resume.Icon, resume.Disabled = theme.MediaPlayIcon(), a.resume == 0
-	pause := fyne.NewMenuItem(counted("Pause", a.pause), q.pauseSelected)
+	pause := fyne.NewMenuItem(counted(T("Pause"), a.pause), q.pauseSelected)
 	pause.Icon, pause.Disabled = theme.MediaPauseIcon(), a.pause == 0
-	show := fyne.NewMenuItem("Show in folder", func() { q.showInFolder(jobs[0]) })
+	show := fyne.NewMenuItem(T("Show in folder"), func() { q.showInFolder(jobs[0]) })
 	show.Icon, show.Disabled = theme.FolderOpenIcon(), len(jobs) != 1
-	showErr := fyne.NewMenuItem("Show error", func() { q.showError(jobs[0]) })
+	showErr := fyne.NewMenuItem(T("Show error"), func() { q.showError(jobs[0]) })
 	showErr.Icon, showErr.Disabled = theme.ErrorIcon(), len(jobs) != 1 || jobs[0].Error == ""
-	copyLinks := fyne.NewMenuItem(counted("Copy link", len(jobs)), q.copySelectedLinks)
+	copyLinks := fyne.NewMenuItem(counted(T("Copy link"), len(jobs)), q.copySelectedLinks)
 	copyLinks.Icon = theme.ContentCopyIcon()
-	remove := fyne.NewMenuItem(counted("Remove", len(jobs)), q.removeSelected)
+	remove := fyne.NewMenuItem(counted(T("Remove"), len(jobs)), q.removeSelected)
 	remove.Icon = theme.DeleteIcon()
-	selectAll := fyne.NewMenuItem("Select all", func() {
+	selectAll := fyne.NewMenuItem(T("Select all"), func() {
 		q.sel.all(q.visibleIDs)
 		q.renderSelection()
 	})
@@ -531,9 +534,9 @@ func (q *queueTab) copySelectedLinks() {
 	}
 	fyne.CurrentApp().Clipboard().SetContent(strings.Join(links, "\n"))
 	if len(links) == 1 {
-		q.vm.Notify("Link copied.")
+		q.vm.Notify(T("Link copied."))
 	} else {
-		q.vm.Notify(fmt.Sprintf("%d links copied.", len(links)))
+		q.vm.Notify(Tf("%d links copied.", len(links)))
 	}
 }
 
@@ -576,16 +579,16 @@ func (q *queueTab) removeSelected() {
 	}
 	what := shortName(jobs[0].Filename)
 	if len(jobs) > 1 {
-		what = fmt.Sprintf("%d downloads", len(jobs))
+		what = Tf("%d downloads", len(jobs))
 	}
-	msg := widget.NewLabel(fmt.Sprintf("Remove %s from the queue?\n%s downloaded so far. Finished files are not touched.", what, humanBytes(a.partial)))
+	msg := widget.NewLabel(Tf("Remove %s from the queue?\n%s downloaded so far. Finished files are not touched.", what, humanBytes(a.partial)))
 	msg.Wrapping = fyne.TextWrapWord
-	wipe := widget.NewCheck("Also delete the partially downloaded files", nil)
+	wipe := widget.NewCheck(T("Also delete the partially downloaded files"), nil)
 	wipe.SetChecked(true)
-	hint := widget.NewLabel("Unchecked, they stay: adding the same link later continues where they stopped.")
+	hint := widget.NewLabel(T("Unchecked, they stay: adding the same link later continues where they stopped."))
 	hint.Wrapping = fyne.TextWrapWord
 	hint.Importance = widget.LowImportance
-	d := dialog.NewCustomConfirm("Remove", "Remove", "Back", container.NewVBox(msg, wipe, hint), func(ok bool) {
+	d := dialog.NewCustomConfirm(T("Remove"), T("Remove"), T("Back"), container.NewVBox(msg, wipe, hint), func(ok bool) {
 		if ok {
 			remove(wipe.Checked)
 		}
@@ -609,7 +612,7 @@ func (q *queueTab) showInFolder(j queue.Job) {
 		sel = false
 	}
 	if err := openInExplorer(target, sel); err != nil {
-		q.vm.Notify("Could not open the folder: " + err.Error())
+		q.vm.Notify(Tf("Could not open the folder: %s", err.Error()))
 	}
 }
 
@@ -668,6 +671,6 @@ func (q *queueTab) openFolder() {
 		return
 	}
 	if err := openInExplorer(target, sel); err != nil {
-		q.vm.Notify("Could not open the folder: " + err.Error())
+		q.vm.Notify(Tf("Could not open the folder: %s", err.Error()))
 	}
 }
