@@ -20,7 +20,7 @@ from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl)
   CDN) and names the layer that broke, instead of "0 files downloaded".
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Siphon's window laid out like a download manager: big toolbar buttons, a category tree (all downloads by kind, unfinished by state, finished) and a compact table with four files downloading over 8, 8, 3 and 4 connections, two queued, one paused, two complete and one failed" width="880" />
+  <img src="docs/demo.gif" alt="A mega folder link is pasted into the Add links dialog; its nine files are queued and three download at a time over 8 connections each; the transfer quota runs out and the jobs wait with a banner saying to switch VPN; after the switch they resume and finish by themselves" width="880" />
 </p>
 
 It comes as two programs that share one download pipeline:
@@ -173,6 +173,26 @@ yt-dlp's own requirements apply: for YouTube, for example, it wants a
 JavaScript runtime (deno, one of the tools Siphon can install) to see every
 format.
 
+## How it compares
+
+Siphon is small on purpose: six file hosts done carefully, plus whatever
+yt-dlp and gallery-dl reach. Other good tools cover more ground; this is
+where each one fits.
+
+| | Siphon | JDownloader 2 | cyberdrop-dl | gallery-dl | MEGAcmd |
+| --- | --- | --- | --- | --- | --- |
+| What you install | one file | an installer; a Java program | Python, then the package | Python and the package, or one exe | MEGA's own client |
+| Interface | window and command line | window | terminal | command line | command line |
+| Sites | mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop; more through yt-dlp and gallery-dl | hundreds of file hosts | all six, and many more | thousands of sites, gofile, bunkr, cyberdrop and pixeldrain among them; not mega or mediafire | mega |
+
+- Need the most hosts, captcha solving or router reconnects: **JDownloader 2**.
+- At home with Python and want one tool for many hosts: **cyberdrop-dl**.
+- Galleries from thousands of sites: **gallery-dl**; Siphon hands such pages
+  to it when it is installed.
+- Only mega, the official way: **MEGAcmd**.
+- One file with nothing to install, a window and a command line, mega's
+  quota waited out, and a clear answer when a site breaks: **Siphon**.
+
 ## Building
 
 Requirements:
@@ -195,6 +215,10 @@ else needs to be installed. Live testing happens on Windows; CI builds and
 tests Linux and macOS too.
 
 ## Using the window version
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Siphon's window laid out like a download manager: big toolbar buttons, a category tree (all downloads by kind, unfinished by state, finished) and a compact table with four files downloading over 8, 8, 3 and 4 connections, two queued, one paused, two complete and one failed" width="880" />
+</p>
 
 1. Press **Add links** (or just press Ctrl+V in the window: the dialog opens
    with what you copied), put in one link per line (blank lines and lines
@@ -473,9 +497,13 @@ for:
 SIPHON_LIVE=1 go test ./internal/site -run Live -v
 ```
 
-The screenshot above is drawn by a test, off screen, with sample jobs; after
-changing the window, regenerate it with
-`SIPHON_SCREENSHOT=1 go test ./cmd/siphon-gui -run READMEScreenshot`.
+The screenshot and the moving picture above are drawn by tests, off screen,
+with sample jobs; after changing the window, regenerate them with
+`SIPHON_SCREENSHOT=1 go test ./cmd/siphon-gui -run READMEScreenshot` and
+`SIPHON_DEMO=1 go test ./cmd/siphon-gui -run READMEDemo`.
+`SIPHON_SOCIAL=1 go test ./cmd/siphon-gui -run SocialPreview` redraws
+`docs/social-preview.png`, the card shown where the repository's link is
+shared; upload it in the repository's settings (Social preview).
 
 **Translations.** The window's texts are written in English in the code and
 wrapped in `T(...)` (or `Tf(...)` with format verbs); the English text is the
@@ -508,6 +536,10 @@ before announcing it.
 Siphon downloads what the sites serve to anyone with the link; it doesn't
 bypass logins, paywalls, DRM or captchas. You are responsible for respecting
 copyright and each site's terms of service.
+
+If Siphon saves you time, a star on GitHub helps other people find it.
+Bugs and site requests go to the
+[issues](https://github.com/mustafaberatdemirci/siphon/issues/new/choose).
 
 ## License
 
