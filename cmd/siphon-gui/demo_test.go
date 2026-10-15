@@ -1,13 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/gif"
+	"image/png"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +35,68 @@ func TestREADMEDemo(t *testing.T) {
 	if os.Getenv("SIPHON_DEMO") == "" {
 		t.Skip("set SIPHON_DEMO=1 to regenerate docs/demo.gif")
 	}
+	frames, durations := drawDemo(t, 1, 1)
+	delays := make([]int, len(durations))
+	for i, d := range durations {
+		delays[i] = int(d / (10 * time.Millisecond))
+	}
+	out := filepath.Join("..", "..", "docs", "demo.gif")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := gif.EncodeAll(f, encodeGIF(frames, delays)); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote %s: %d frames", out, len(frames))
+}
+
+// TestDemoVideoFrames writes the same story for a video (a Reddit post, a
+// release announcement): drawn at twice the size, so it stays sharp full
+// screen, and with three frames for every step of the GIF, so the bars move
+// smoothly. It writes PNG frames and an ffmpeg concat list into the folder
+// named by SIPHON_DEMO_FRAMES; then, in that folder:
+//
+//	ffmpeg -f concat -i frames.txt -vf "fps=30,format=yuv420p" -c:v libx264 -crf 18 -movflags +faststart siphon-demo.mp4
+func TestDemoVideoFrames(t *testing.T) {
+	dir := os.Getenv("SIPHON_DEMO_FRAMES")
+	if dir == "" {
+		t.Skip("set SIPHON_DEMO_FRAMES=<folder> to write the video frames")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	frames, durations := drawDemo(t, 2, 3)
+	var list strings.Builder
+	list.WriteString("ffconcat version 1.0\n")
+	for i, img := range frames {
+		name := fmt.Sprintf("frame%03d.png", i)
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := png.Encode(f, img); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		f.Close()
+		fmt.Fprintf(&list, "file %s\nduration %.3f\n", name, durations[i].Seconds())
+	}
+	// The concat demuxer ignores the last entry's duration unless the file
+	// is listed once more.
+	fmt.Fprintf(&list, "file frame%03d.png\n", len(frames)-1)
+	if err := os.WriteFile(filepath.Join(dir, "frames.txt"), []byte(list.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote %d frames to %s", len(frames), dir)
+}
+
+// drawDemo plays the demo's story and returns its frames with how long each
+// is shown. scale is the canvas scale (2 draws every pixel twice as wide);
+// sub splits every step of progress into that many frames.
+func drawDemo(t *testing.T, scale float32, sub int) ([]*image.NRGBA, []time.Duration) {
+	t.Helper()
 	a := test.NewTempApp(t)
 	test.ApplyTheme(t, theme.DefaultTheme())
 	a.Preferences().SetString(prefOutDir, `D:\Downloads`)
@@ -56,9 +121,12 @@ func TestREADMEDemo(t *testing.T) {
 	cw := test.NewTempWindow(t, container.NewStack(
 		canvas.NewRectangle(color.NRGBA{R: 0x1f, G: 0x4f, B: 0xb8, A: 0xff}), captionBox))
 	cw.Resize(fyne.NewSize(1100, 52))
+	for _, c := range []fyne.Canvas{w.Canvas(), cw.Canvas()} {
+		c.(interface{ SetScale(float32) }).SetScale(scale)
+	}
 
 	var frames []*image.NRGBA
-	var delays []int
+	var durations []time.Duration
 	shot := func(text string, d time.Duration) {
 		q.render()
 		// A real window lays itself out again when the quota banner
@@ -68,7 +136,7 @@ func TestREADMEDemo(t *testing.T) {
 		caption.Text = text
 		captionBox.Refresh() // centres it again for the new width
 		frames = append(frames, stackImages(w.Canvas().Capture(), cw.Canvas().Capture()))
-		delays = append(delays, int(d/(10*time.Millisecond)))
+		durations = append(durations, d)
 	}
 
 	// 1. Paste a link.
@@ -118,7 +186,7 @@ func TestREADMEDemo(t *testing.T) {
 		for i, j := range jobs {
 			vm.apply(j, start)
 			if j.State == queue.StateRunning {
-				vm.rate[j.ID] = rates[i] * wobble[(step+i)%len(wobble)] * mb
+				vm.rate[j.ID] = rates[i] * wobble[(step/sub+i)%len(wobble)] * mb
 				jobs[i].Conns = 8
 			}
 		}
@@ -153,10 +221,10 @@ func TestREADMEDemo(t *testing.T) {
 	const queuedCaption = "Every file is queued and downloads over 8 connections"
 	publish()
 	shot(queuedCaption, 700*time.Millisecond)
-	for i := 0; i < 10; i++ {
-		advance(0.045)
+	for i := 0; i < 10*sub; i++ {
+		advance(0.045 / float64(sub))
 		publish()
-		shot(queuedCaption, 300*time.Millisecond)
+		shot(queuedCaption, 300*time.Millisecond/time.Duration(sub))
 	}
 
 	// 3. The quota runs out: the jobs wait instead of failing.
@@ -176,23 +244,13 @@ func TestREADMEDemo(t *testing.T) {
 		jobs[i].State, jobs[i].RetryAt = queue.StateRunning, time.Time{}
 	}
 	const resumeCaption = "Switch your VPN server and they resume by themselves"
-	for i := 0; i < 14; i++ {
-		advance(0.07)
+	for i := 0; i < 14*sub; i++ {
+		advance(0.07 / float64(sub))
 		publish()
-		shot(resumeCaption, 300*time.Millisecond)
+		shot(resumeCaption, 300*time.Millisecond/time.Duration(sub))
 	}
-	delays[len(delays)-1] = 250 // hold the last frame before the loop
-
-	out := filepath.Join("..", "..", "docs", "demo.gif")
-	f, err := os.Create(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if err := gif.EncodeAll(f, encodeGIF(frames, delays)); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("wrote %s: %d frames", out, len(frames))
+	durations[len(durations)-1] = 2500 * time.Millisecond // hold the last frame before the loop
+	return frames, durations
 }
 
 // stackImages puts b under a, as one image.
