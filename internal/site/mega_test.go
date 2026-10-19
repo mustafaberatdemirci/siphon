@@ -439,7 +439,7 @@ func TestMegaResolveFolder(t *testing.T) {
 	if a := byName["a.mp4"]; a.Dir != "Root Folder" || a.Size != 100 || !bytes.Equal(a.Secret, packedA) {
 		t.Errorf("a = %+v", a)
 	}
-	// A file in the subfolder: path "Root/Sub" (the downloader flattens it with "-").
+	// A file in the subfolder: path "Root/Sub" (the downloader makes a folder per level).
 	if c := byName["c.mp4"]; c.Dir != "Root Folder/Sub" || !bytes.Equal(c.Secret, packedC) {
 		t.Errorf("c = %+v", c)
 	}
@@ -457,6 +457,32 @@ func TestMegaResolveFolder(t *testing.T) {
 	// The folder listing must be 1 call, the download URLs 1 BATCHED call.
 	if api.count("f") != 1 || api.count("g:n=") != 3 {
 		t.Errorf("calls: %v", api.calls)
+	}
+}
+
+// A listing whose parents loop (corrupt, or not from mega at all) must not
+// hang resolution: walking up from a node stops after as many steps as there
+// are nodes.
+func TestMegaFolderWithParentLoopEnds(t *testing.T) {
+	api := newMegaFakeAPI(t)
+	folderKey := randBytes(t, 16)
+	api.folders["FoLdErHa"] = megaFakeFolder{key: folderKey, root: "RoOtNoDe", nodes: []megaFakeNode{
+		{handle: "RoOtNoDe", parent: "OwNeRdIr", name: "Root Folder", isFolder: true, packed: randBytes(t, 16)},
+		{handle: "LoOpAAAA", parent: "LoOpBBBB", name: "A", isFolder: true, packed: randBytes(t, 16)},
+		{handle: "LoOpBBBB", parent: "LoOpAAAA", name: "B", isFolder: true, packed: randBytes(t, 16)},
+		{handle: "NoDeXXXX", parent: "LoOpAAAA", name: "x.mp4", packed: packedKeyFor(t, []byte("x")), size: 1},
+	}}
+	m := newMegaWith(t, api)
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Resolve(context.Background(), "https://mega.nz/folder/FoLdErHa#"+megacrypto.B64Encode(folderKey),
+			func(Item) error { return nil })
+		done <- err
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolving a folder whose parents loop did not end")
 	}
 }
 

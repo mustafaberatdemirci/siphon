@@ -284,7 +284,7 @@ func TestMainMenu(t *testing.T) {
 func TestResolveLinksKeepsTheFailedOnes(t *testing.T) {
 	q, eng, _ := newTestQueue(t, "a.bin")
 	dir := t.TempDir()
-	added, errs, failed := q.resolveLinks([]string{"https://list.test/other", "https://unknown.test/x"}, dir)
+	added, errs, failed := q.resolveLinks(context.Background(), []string{"https://list.test/other", "https://unknown.test/x"}, dir)
 	if added != 1 || len(errs) != 1 || len(failed) != 1 || failed[0] != "https://unknown.test/x" {
 		t.Errorf("added %d, errs %v, failed %v", added, errs, failed)
 	}
@@ -296,6 +296,81 @@ func TestResolveLinksKeepsTheFailedOnes(t *testing.T) {
 	q.addLinks("https://list.test/kept", "   ")
 	if q.pending != "https://list.test/kept" {
 		t.Errorf("pending = %q", q.pending)
+	}
+}
+
+// Links of supported sites copied anywhere open the Add dialog; what was on
+// the clipboard when Siphon started, links of no supported site, a link
+// offered before and the clipboard with the watch turned off are left alone.
+func TestClipboardOffersSupportedLinks(t *testing.T) {
+	q, _, _ := newTestQueue(t, "a.bin")
+	q.checkClipboard("from before: https://list.test/old")
+	if q.addEntry != nil {
+		t.Fatal("what was on the clipboard at start was offered")
+	}
+	q.checkClipboard("see https://list.test/new and https://other.test/page")
+	if q.addEntry == nil || q.addEntry.Text != "https://list.test/new" {
+		t.Fatalf("Add dialog: %v", q.addEntry)
+	}
+	q.checkClipboard("again https://list.test/new")
+	if q.addEntry.Text != "https://list.test/new" {
+		t.Errorf("a link was offered twice: %q", q.addEntry.Text)
+	}
+	q.checkClipboard("https://list.test/second")
+	if q.addEntry.Text != "https://list.test/new\nhttps://list.test/second" {
+		t.Errorf("the open dialog didn't get the new link: %q", q.addEntry.Text)
+	}
+
+	q.prefs.SetBool(prefWatchClipboard, false)
+	q.checkClipboard("https://list.test/third")
+	if strings.Contains(q.addEntry.Text, "third") {
+		t.Error("the clipboard was watched with the watch off")
+	}
+}
+
+// Links handed over from the browser join the open Add dialog, each once.
+func TestReceiveLinksJoinsTheOpenDialog(t *testing.T) {
+	q, _, _ := newTestQueue(t, "a.bin")
+	q.receiveLinks([]string{"https://list.test/a"})
+	q.receiveLinks([]string{"https://list.test/a", "https://list.test/b"})
+	if q.addEntry == nil || q.addEntry.Text != "https://list.test/a\nhttps://list.test/b" {
+		t.Errorf("Add dialog: %v", q.addEntry)
+	}
+}
+
+// Stopping the adding keeps every link not added yet for the next Add
+// dialog, and doesn't count them as errors.
+func TestStopAddingKeepsTheRest(t *testing.T) {
+	q, eng, _ := newTestQueue(t, "a.bin")
+	before := len(eng.Jobs())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	urls := []string{"https://list.test/one", "https://list.test/two"}
+	added, errs, failed := q.resolveLinks(ctx, urls, t.TempDir())
+	if added != 0 || len(errs) != 0 || strings.Join(failed, " ") != strings.Join(urls, " ") {
+		t.Errorf("added %d, errs %v, failed %v", added, errs, failed)
+	}
+	if len(eng.Jobs()) != before {
+		t.Error("jobs were added after the adding was stopped")
+	}
+}
+
+// While links are being resolved the Add button stops the adding; afterwards
+// it is the Add button again.
+func TestAddButtonStopsTheAdding(t *testing.T) {
+	q, _, _ := newTestQueue(t, "a.bin")
+	q.startAdding()
+	if q.addBtn.text != T("Stop adding") {
+		t.Fatalf("while adding the button says %q", q.addBtn.text)
+	}
+	ctx := q.addCtx
+	q.addOrStop()
+	if ctx.Err() == nil {
+		t.Fatal("the button didn't stop the adding")
+	}
+	q.doneAdding()
+	if q.addBtn.text != T("Add links") {
+		t.Errorf("after adding the button says %q", q.addBtn.text)
 	}
 }
 

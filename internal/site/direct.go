@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -63,7 +64,8 @@ func viaTool(u string) (prefix, link string) {
 var errWebPage = errors.New("the link opens a web page, not a file")
 
 // directExtra are the sites.toml [site.extra] keys direct understands: where
-// the external tools are, when they aren't next to Siphon or on PATH.
+// the external tools are, when they aren't in Siphon's tools folder or on
+// PATH. Only absolute paths count (see external.Find).
 var directExtra = map[string]bool{"yt_dlp": true, "gallery_dl": true, "ffmpeg": true, "deno": true}
 
 // direct resolves a plain file link into a single item. Nothing site
@@ -80,9 +82,12 @@ type direct struct {
 }
 
 func NewDirect(cfg SiteConfig) Resolver {
-	for k := range cfg.Extra {
-		if !directExtra[k] {
+	for k, v := range cfg.Extra {
+		switch {
+		case !directExtra[k]:
 			cfg.Logln("direct: unrecognized extra key %q in config — ignored (possibly a typo)", k)
+		case v != "" && !filepath.IsAbs(v):
+			cfg.Logln("direct: %s = %q is not an absolute path — ignored", k, v)
 		}
 	}
 	return &direct{cfg: cfg}

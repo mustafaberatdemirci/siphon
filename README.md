@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain,
-bunkr, cyberdrop and direct links.** No Java, no Python, nothing to install:
+bunkr, cyberdrop, cyberfile and direct links.** No Java, no Python, nothing to install:
 download one file and run it.
 With yt-dlp or gallery-dl installed, it also queues video and gallery pages
 from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl).
@@ -92,7 +92,13 @@ To build it yourself instead, see [Building](#building).
   only skips a file that is still on disk.
 - **Safe file names on Windows.** Siphon handles reserved device names
   (`CON`, `NUL`, `COM1`, …), trailing dots and spaces, and the 255-character
-  limit per path component.
+  limit per path component. Invisible characters that reverse the display
+  order (a name shown as `photoexe.jpg` that really ends in `.exe`) are
+  dropped.
+- **Marked as downloaded (Windows).** Like a browser, Siphon marks every
+  finished file as coming from the internet, so Windows warns before
+  starting a downloaded program and Office opens a downloaded document in
+  Protected View. The mark names the page without its `#key` or `?query`.
 - **Site definitions in a TOML file.** The site definitions are embedded in
   the binary, and a `sites.toml` next to the exe can override them. When a
   site adds a domain or moves an endpoint, you edit a file instead of
@@ -108,6 +114,7 @@ To build it yourself instead, see [Building](#building).
 | pixeldrain | `pixeldrain.com/u/<id>` (file), `pixeldrain.com/l/<id>` (list), and the mirror domains |
 | bunkr | `bunkr.*/a/<id>` (album), `bunkr.*/f/<id>`, `/v/`, `/i/` (single file), across the known bunkr domains |
 | cyberdrop | `cyberdrop.cr/a/<id>` (album), `cyberdrop.cr/f/<id>` (file), the old `.me` / `.to` domains, and download server links |
+| cyberfile | `cyberfile.me/<code>` (file), `cyberfile.me/folder/<hash>` (folder, with subfolders), and download server links |
 | Any direct file link | `https://example.com/files/setup.zip`, or a link that redirects to a file |
 
 Subfolders become folders on disk, under a folder named after the album or
@@ -122,6 +129,12 @@ A few site notes:
 - **cyberdrop** files download over one connection and start over if
   interrupted: its servers name no file version and it gives no hash, so
   pieces fetched at different times couldn't be proven to match.
+- **cyberfile** gives one download connection per IP address: its files
+  download one at a time over one connection (a second one only gets
+  `429 Too Many Requests`). They resume after an interruption. When
+  cyberfile has lost a file's data, its download server answers every
+  valid link with a 404 that still names the file; Siphon says so instead
+  of retrying.
 
 A direct file link is anything the sites above don't recognize. Siphon asks
 the server for the file's first byte to learn its name and size, then
@@ -149,7 +162,8 @@ yt-dlp first, then gallery-dl.
   in a folder named after the playlist. A gallery becomes one job.
 - The tool does the downloading; Siphon runs it in the queue, shows its
   progress, and records the result in the ledger, so the next run skips it.
-  Pause stops the tool, and resuming continues its partial file.
+  Pause stops the tool and every program it started (ffmpeg, for one), and
+  resuming continues its partial file.
 - **Installing them is one click:** **Diagnose → Install tools…** (or
   `siphon tools install`). Siphon lists what it can install with the sizes,
   and only after you confirm downloads each tool from its own official
@@ -158,9 +172,12 @@ yt-dlp first, then gallery-dl.
   to update a tool, install it again. On Windows that covers yt-dlp, ffmpeg,
   gallery-dl and deno; on Linux and macOS, use your package manager for the
   ones Siphon doesn't offer (ffmpeg, and gallery-dl on macOS).
-- Siphon doesn't bundle them. Tools you install yourself work too: next to
-  Siphon, on your PATH, or at paths set in `sites.toml` (the `direct` entry).
+- Siphon doesn't bundle them. Tools you install yourself work too: on your
+  PATH, or at absolute paths set in `sites.toml` (the `direct` entry).
   `siphon tools` (or **Diagnose** in the window) lists which ones were found.
+  Siphon doesn't look for them in its own folder, and it refuses to save a
+  download named like one of these tools (or `sites.toml`) in a folder where
+  it would look for them, so a downloaded file is never started as a tool.
 - Install **ffmpeg** too if you download video: many sites (YouTube among
   them) send picture and sound separately, and only ffmpeg can merge them.
   Without it, Siphon asks yt-dlp for the best single file that has both, and
@@ -175,7 +192,7 @@ format.
 
 ## How it compares
 
-Siphon is small on purpose: six file hosts done carefully, plus whatever
+Siphon is small on purpose: seven file hosts done carefully, plus whatever
 yt-dlp and gallery-dl reach. Other good tools cover more ground; this is
 where each one fits.
 
@@ -183,7 +200,7 @@ where each one fits.
 | --- | --- | --- | --- | --- | --- |
 | What you install | one file | an installer; a Java program | Python, then the package | Python and the package, or one exe | MEGA's own client |
 | Interface | window and command line | window | terminal | command line | command line |
-| Sites | mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop; more through yt-dlp and gallery-dl | hundreds of file hosts | all six, and many more | thousands of sites, gofile, bunkr, cyberdrop and pixeldrain among them; not mega or mediafire | mega |
+| Sites | mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile; more through yt-dlp and gallery-dl | hundreds of file hosts | most of these, and many more | thousands of sites, gofile, bunkr, cyberdrop and pixeldrain among them; not mega or mediafire | mega |
 
 - Need the most hosts, captcha solving or router reconnects: **JDownloader 2**.
 - At home with Python and want one tool for many hosts: **cyberdrop-dl**.
@@ -223,7 +240,10 @@ tests Linux and macOS too.
 1. Press **Add links** (or just press Ctrl+V in the window: the dialog opens
    with what you copied), put in one link per line (blank lines and lines
    starting with `#` are ignored), check the folder and press **Add**.
-2. Siphon resolves each link and queues its files. The queue is saved, so
+2. Siphon resolves each link and queues its files; each one starts as soon
+   as it is queued. While links are being resolved, **Add links** turns into
+   **Stop adding**: the links not added yet wait in the dialog, and more
+   links can be added meanwhile. The queue is saved, so
    closing and reopening the app keeps the list, and unfinished downloads
    continue where they stopped. Links that couldn't be added are waiting in
    the dialog the next time it opens.
@@ -276,6 +296,8 @@ restart, which Siphon offers to do on the spot):
 | Downloads at once | How many files download at the same time (default 4). |
 | Connections per file | How many connections a single file may use; also applies to downloads already running. See below. |
 | VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
+| Watch the clipboard | Links of supported sites you copy anywhere open the Add dialog (on by default). See [Browser integration](#browser-integration). |
+| Browser integration | Lets the Siphon extension hand links and downloads to Siphon; **Install** and **Remove**. See [Browser integration](#browser-integration). |
 
 **Closing the window doesn't stop the downloads.** Siphon hides in the
 notification area next to the clock (on Windows 11 the icon may be under the
@@ -284,6 +306,52 @@ it and choose **Quit** to exit. Unfinished downloads are saved and continue
 the next time you start Siphon. While downloads wait for quota the icon turns
 orange. Only one Siphon runs at a time: starting it again brings up the
 window that is already running.
+
+## Browser integration
+
+Links can reach Siphon from the browser in three ways. Each one opens the
+**Add links** dialog with the links, and nothing is queued before you press
+**Add**.
+
+- **The clipboard.** Copy a link of a supported site anywhere (a chat, a
+  forum, a document) and Siphon opens the dialog with it. Only the sites
+  above count, not every web address you copy, and a link is offered once.
+  Turn it off with **Settings → Watch the clipboard**.
+- **The Siphon extension** for Chrome, Edge, Brave and Firefox:
+  - right-click a link: **Download with Siphon**; or select text with links
+    in it: **Download the selected links with Siphon**;
+  - the toolbar button, or right-click the page: **Send this page's file
+    links to Siphon**. Siphon keeps only the links of supported sites (by
+    its `sites.toml`), not a page's every link;
+  - **downloads**: a download the browser starts goes to Siphon instead when
+    it matches the extension's rules (file types, a smallest size, sites
+    never to capture; right-click the toolbar button, **Options**). The
+    browser's download is paused first and canceled only once Siphon took
+    it; when Siphon can't be reached, the browser keeps it. Siphon fetches the
+    link without the browser's cookies, so add a site whose downloads need
+    you to be signed in to the sites never captured.
+- **A launch with links**: `siphon-gui <link> …` hands them to the running
+  window.
+
+To set the extension up:
+
+1. In Siphon, **Settings → Browser integration → Install**. This registers
+   Siphon's command line program, which must be next to the window version
+   (it is, in every download), as the extension's helper for each browser:
+   a small file in `%AppData%\Siphon\browser` and a registry entry under
+   your user on Windows, a file in each browser's profile folder on Linux
+   and macOS. Only the Siphon extension can start it; web pages can't.
+2. Load the extension from the `browser` folder next to Siphon:
+   - **Chrome, Edge, Brave**: open the extensions page (`chrome://extensions`,
+     `edge://extensions`), turn on **Developer mode**, choose **Load
+     unpacked** and pick the folder.
+   - **Firefox**: open `about:debugging`, **This Firefox**, **Load Temporary
+     Add-on…**, and pick `manifest.json` in the folder. A temporary add-on
+     stays until Firefox restarts.
+3. The extension's **Options** page has **Check the connection to Siphon**.
+
+If Siphon isn't running, the extension starts it. **Remove** in Settings
+takes the registration away again.
 
 ## Using the command line
 
@@ -353,11 +421,12 @@ The **Connections per file** setting is a *request*. Each site has a *ceiling*
 | Site | Ceiling | Why |
 | --- | --- | --- |
 | pixeldrain | 1 | The free tier limits concurrent connections per IP. With a paid account and an API key you can raise it in your own `sites.toml`. |
-| bunkr | 3 | Measured: the CDN answers a fourth connection to the same file with `503`, and more connections did not make downloads faster. |
+| bunkr | 1 | Measured (2026-10-19): the CDN allows one connection per IP, so one file at a time, too. A second connection gets `503`. |
 | mega | 8 | Every byte range is decrypted independently. The meta-MAC is checked once over the finished file. |
 | gofile | 4 | Measured: 10.4 MB/s over one connection, 12.9 MB/s over four. |
 | mediafire | 4 | Its servers send no version header, but the SHA-256 from mediafire's API is checked over the finished file. |
 | cyberdrop | 1 | No version header and no hash: pieces fetched at different times couldn't be proven to belong to the same file. |
+| cyberfile | 1 | Measured: its download servers allow one connection per IP, so one file at a time, too. A second connection gets `429`. |
 | Direct file links | 4 | A common download-manager default for servers Siphon knows nothing about. |
 
 A file is split into chunks (4–32 MiB, depending on its size) kept in a
@@ -406,8 +475,11 @@ The site definitions are embedded in the binary. To change them, put a
 `sites.toml` in one of these places, which are searched in order:
 
 1. the path given with `-c`;
-2. next to the executable;
-3. the current working directory.
+2. next to the executable.
+
+The current working directory is not searched: it is where the command line
+saves downloads by default, and a downloaded file must not change Siphon's
+settings.
 
 This file is **laid over** the embedded definitions; it does not replace
 them:
@@ -462,9 +534,10 @@ embedded copy.
 | File | Where | Purpose |
 | --- | --- | --- |
 | `<name>.part`, `<name>.part.state` | Next to the file being downloaded | Partial data and resume state; removed when the file completes. |
-| `done.jsonl` | Output root | Ledger of finished downloads (used to skip them next time). |
+| `done.jsonl` | Output root | Ledger of finished downloads (used to skip them next time). Like `queue.json` it holds the source links, a mega link's key included; a new one is readable by your user only. |
 | `queue.json` | `%AppData%\Siphon\` (the user config folder) | The GUI's queue. It holds the source links, and a mega link includes its key. |
-| `instance.port` | `%AppData%\Siphon\` | While the window version runs: how a second launch finds it. Removed on exit. |
+| `instance.port` | `%AppData%\Siphon\` | While the window version runs: how a second launch and the browser extension reach it, with a key only your user can read. Removed on exit. |
+| `browser\` | `%AppData%\Siphon\` | Windows only: the browser integration's registration files (**Settings → Browser integration**). |
 | `tools\` | `%AppData%\Siphon\` | The tools installed with **Install tools** (yt-dlp, ffmpeg, gallery-dl, deno). Delete the folder to remove them. |
 | `gofile-guest.json` | `%AppData%\Siphon\` | The gofile guest account in use, reused for a day. Safe to delete. |
 

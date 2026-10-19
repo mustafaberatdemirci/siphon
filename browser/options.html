@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Siphon</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; min-width: 420px; color: #1f2937; }
+    @media (prefers-color-scheme: dark) { body { background: #1f2023; color: #e5e7eb; } input, textarea { background: #2a2b2f; color: inherit; border: 1px solid #4b5563; } }
+    label { display: block; margin: 12px 0 4px; font-weight: 600; }
+    .hint { font-size: 12px; opacity: .75; margin-top: 2px; }
+    input[type=text], textarea { width: 100%; box-sizing: border-box; padding: 4px 6px; }
+    input[type=number] { width: 6em; }
+    #status { margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <label><input type="checkbox" id="capture"> Send matching downloads to Siphon</label>
+  <div class="hint">A download the browser starts goes to Siphon when it matches the rules below. If Siphon can't be reached, the browser keeps it.</div>
+
+  <label for="types">File types</label>
+  <input type="text" id="types">
+  <div class="hint">Extensions, separated by spaces.</div>
+
+  <label for="minSizeMB">Smallest size (MB)</label>
+  <input type="number" id="minSizeMB" min="0" step="1">
+  <div class="hint">Smaller downloads stay in the browser (when the size is known).</div>
+
+  <label for="exclude">Never capture from these sites</label>
+  <textarea id="exclude" rows="3" placeholder="example.com"></textarea>
+  <div class="hint">One site per line. Siphon downloads without the browser's cookies: add sites whose downloads need you to be signed in.</div>
+
+  <p><button id="ping">Check the connection to Siphon</button><span id="status"></span></p>
+  <script src="options.js"></script>
+</body>
+</html>

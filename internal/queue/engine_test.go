@@ -170,6 +170,27 @@ type fakeResolver struct {
 	prefix string
 	// dir is the album folder of every item; "" means "Album".
 	dir string
+	// pauseAfterFirst, if set, makes Resolve wait for it after yielding the
+	// first item: a link whose files are resolved one by one (bunkr).
+	pauseAfterFirst chan struct{}
+	// holdEntered/holdRelease: the next ResolveOne reports on holdEntered and
+	// then waits for holdRelease WITHOUT watching its context, like a step
+	// that doesn't stop when its job is canceled (hashing a finished file).
+	holdEntered chan struct{}
+	holdRelease chan struct{}
+}
+
+// holdNextResolveOne arms holdEntered/holdRelease for the next ResolveOne.
+// release is safe to call more than once; the test's cleanup calls it too.
+func (r *fakeResolver) holdNextResolveOne(t *testing.T) (entered <-chan struct{}, release func()) {
+	en, rel := make(chan struct{}), make(chan struct{})
+	r.mu.Lock()
+	r.holdEntered, r.holdRelease = en, rel
+	r.mu.Unlock()
+	var once sync.Once
+	release = func() { once.Do(func() { close(rel) }) }
+	t.Cleanup(release)
+	return en, release
 }
 
 // failNextResolveOne fails the next n re-resolutions with err.
@@ -251,12 +272,26 @@ func (r *fakeResolver) Resolve(ctx context.Context, u string, yield func(site.It
 		if err := yield(it); err != nil {
 			return nil, err
 		}
+		if i == 0 && r.pauseAfterFirst != nil {
+			select {
+			case <-r.pauseAfterFirst:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 	}
 	return nil, nil
 }
 
 func (r *fakeResolver) ResolveOne(ctx context.Context, sourcePage string) (site.Item, error) {
 	r.mu.Lock()
+	if en, rel := r.holdEntered, r.holdRelease; en != nil {
+		r.holdEntered, r.holdRelease = nil, nil
+		r.mu.Unlock()
+		close(en)
+		<-rel
+		r.mu.Lock()
+	}
 	r.resolveOnes++
 	if r.failOnes > 0 {
 		r.failOnes--
@@ -541,6 +576,108 @@ func TestRemoveRunningJobWipesPartial(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("the removed job's files remained or the job is still listed: %d jobs", len(h.e.Jobs()))
+}
+
+// Removing a running job and adding the same link again right away gives a
+// job with the same id while the first run may still be winding down. The
+// new one must wait for it: two runs would write the same .part, and the end
+// of the first one used to mark the new job paused and drop its cancel func.
+func TestRemoveThenAddAgainWaitsForTheOldRun(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	h := newHarness(t, f, "", 2)
+	r := h.e.resolvers[0].(*fakeResolver)
+	// The first run gets stuck where a cancel doesn't reach: its URL is
+	// refused, and the re-resolution waits for the test.
+	f.mu.Lock()
+	f.forbid["a.bin"] = true
+	f.mu.Unlock()
+	entered, release := r.holdNextResolveOne(t)
+	h.start()
+	defer h.stop()
+
+	if _, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	id := jobByName(h.e, "a.bin").ID
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first run never re-resolved")
+	}
+
+	h.e.Remove(id, false)
+	f.mu.Lock()
+	f.forbid["a.bin"] = false
+	f.mu.Unlock()
+	h.mu.Lock()
+	readdedAt := len(h.events)
+	h.mu.Unlock()
+	if n, err := h.e.Add(context.Background(), "file://a.bin", h.out); err != nil || n != 1 {
+		t.Fatalf("adding again: n=%d err=%v", n, err)
+	}
+
+	// While the first run is stuck, the new job stays queued and nothing
+	// is requested for the file a second time.
+	time.Sleep(300 * time.Millisecond)
+	if j := jobByName(h.e, "a.bin"); j.State != StateQueued {
+		t.Fatalf("the job added again is %s while the first run still runs; want queued", j.State)
+	}
+	if got := f.hitCount("a.bin"); got != 1 {
+		t.Fatalf("the file was requested %d times while the first run still ran; want 1", got)
+	}
+
+	release()
+	h.waitState(id, StateDone, 10*time.Second)
+	got, _ := os.ReadFile(filepath.Join(h.out, "Album", "a.bin"))
+	if !bytes.Equal(got, f.files["a.bin"]) {
+		t.Fatal("content is corrupt")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, ev := range h.events[readdedAt:] {
+		if ev.ID == id && ev.State == StatePaused {
+			t.Fatal("the end of the first run marked the job added again as paused")
+		}
+	}
+}
+
+// The jobs of a link start while the rest of it is still being resolved: a
+// bunkr album asks the API once per file, and none of its files used to start
+// before the last one was resolved.
+func TestAddStartsJobsBeforeResolutionEnds(t *testing.T) {
+	f := newFakeSite(t, "a.bin", "b.bin", "c.bin")
+	h := newHarness(t, f, "", 2)
+	r := h.e.resolvers[0].(*fakeResolver)
+	gate := make(chan struct{})
+	r.pauseAfterFirst = gate
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	h.start()
+	defer h.stop()
+
+	// Settle the scheduler first: one job run to the end, then a moment for
+	// the wake-up it leaves behind. Otherwise the scheduler's first round
+	// could pick the new job up by chance and hide a missing wake-up.
+	if _, err := h.e.Add(context.Background(), "file://c.bin", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.waitState(jobByName(h.e, "c.bin").ID, StateDone, 5*time.Second)
+	time.Sleep(100 * time.Millisecond)
+
+	added := make(chan error, 1)
+	go func() {
+		_, err := h.e.Add(context.Background(), "album://x", h.out)
+		added <- err
+	}()
+	// "a.bin" downloads while Add still waits before the second file.
+	h.waitState(jobID(h.out, "file://a.bin", "Album", "a.bin"), StateDone, 5*time.Second)
+
+	open()
+	if err := <-added; err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitAll(StateDone, 10*time.Second)
 }
 
 // MaxActive must limit the number of jobs running at the same time.
@@ -1906,5 +2043,67 @@ func TestToolJobsSurviveRestart(t *testing.T) {
 	}
 	if pageHits.Load() != hitsAfterAdd {
 		t.Errorf("the page was fetched again after the restart (%d requests)", pageHits.Load()-hitsAfterAdd)
+	}
+}
+
+// A queued job whose site is no longer defined (dropped by a later version)
+// fails, and the window is told and the queue file written: it used to turn
+// failed silently, with no event and nothing saved.
+func TestJobOfUnknownSiteFailsVisibly(t *testing.T) {
+	f := newFakeSite(t)
+	statePath := filepath.Join(testutil.TempDir(t), "queue.json")
+	gone := &Job{ID: "gone1", Site: "gone", SourcePage: "file://x.bin", Filename: "x.bin", State: StateQueued, AddedAt: time.Now()}
+	if err := save(statePath, []*Job{gone}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, f, statePath, 1)
+	h.start()
+	defer h.stop()
+	h.waitState(gone.ID, StateFailed, 5*time.Second)
+
+	deadline := time.Now().Add(5 * time.Second)
+	told, saved := false, false
+	for time.Now().Before(deadline) && !(told && saved) {
+		h.mu.Lock()
+		for _, ev := range h.events {
+			told = told || ev.ID == gone.ID && ev.State == StateFailed
+		}
+		h.mu.Unlock()
+		if jobs, err := load(statePath); err == nil && len(jobs) == 1 && jobs[0].State == StateFailed {
+			saved = true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !told {
+		t.Error("no event told the window the job failed")
+	}
+	if !saved {
+		t.Error("the failure was not written to the queue file")
+	}
+}
+
+// Progress goes to the job it is about, found by the id the engine tags the
+// item with: the same link saved into two folders gives two jobs with the
+// same source page and folder, and both used to report into the first one.
+func TestProgressGoesToTheTaggedJob(t *testing.T) {
+	f := newFakeSite(t)
+	h := newHarness(t, f, "", 2)
+	e := h.e
+	one := &Job{ID: "one", SourcePage: "file://a.bin", Dir: "Album", State: StateRunning}
+	two := &Job{ID: "two", SourcePage: "file://a.bin", Dir: "Album", State: StateRunning}
+	e.mu.Lock()
+	e.jobs = append(e.jobs, one, two)
+	e.byID[one.ID], e.byID[two.ID] = one, two
+	e.mu.Unlock()
+
+	e.onProgress(site.Item{SourcePage: "file://a.bin", Dir: "Album", Tag: "two"}, 500, 1000)
+	e.onConnections(site.Item{SourcePage: "file://a.bin", Dir: "Album", Tag: "two"}, 3)
+	for _, j := range e.Jobs() {
+		switch {
+		case j.ID == "one" && (j.Done != 0 || j.Conns != 0):
+			t.Errorf("the other job got the report: %+v", j)
+		case j.ID == "two" && (j.Done != 500 || j.Size != 1000 || j.Conns != 3):
+			t.Errorf("the tagged job didn't get the report: %+v", j)
+		}
 	}
 }

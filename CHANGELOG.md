@@ -2,6 +2,100 @@
 
 Each version's section is also its release notes on GitHub.
 
+## 0.1.2
+
+**Browser integration**
+
+- **The Siphon extension** for Chrome, Edge, Brave and Firefox (in the
+  `browser` folder of every download): **Download with Siphon** on a link
+  or a selection, the toolbar button sends a page's file links (only those
+  of supported sites), and downloads the browser starts go to Siphon when
+  they match the extension's rules. A download is canceled in the browser
+  only once Siphon took it. Set it up with **Settings → Browser
+  integration → Install**, then load the extension (see the README).
+- **The clipboard**: links of supported sites copied anywhere open the Add
+  dialog. **Settings → Watch the clipboard** turns it off.
+- `siphon-gui <link> …` hands the links to the running window.
+- Whichever way links come, they open the Add dialog: nothing is queued
+  before you press **Add**.
+
+**Sites**
+
+- **cyberfile**: file links (`cyberfile.me/<code>`), folders
+  (`cyberfile.me/folder/<hash>`, with subfolders) and its download server
+  links, with a fresh download link for every attempt. cyberfile allows
+  one download connection per IP, so its files download one at a time
+  over one connection, and resume after an interruption. When cyberfile
+  has lost a file's data (its download server answers 404 to a valid
+  link), Siphon says so instead of retrying.
+
+**Security**
+
+- Siphon no longer takes a program from its own folder for yt-dlp,
+  gallery-dl, ffmpeg or deno, ignores relative tool paths in `sites.toml`,
+  and no longer reads a `sites.toml` from the working directory, which is
+  where the command line saves downloads by default. A download named like
+  one of those tools, or `sites.toml`, is refused in a folder Siphon looks
+  for them in. Before, a file downloaded next to Siphon could be taken for a
+  tool and started. Tools installed with **Install tools** or on your PATH
+  work as before; a tool kept next to Siphon now needs its absolute path in
+  `sites.toml`.
+- Finished downloads are marked as coming from the internet on Windows, as
+  a browser does: Windows warns before starting a downloaded program, and
+  Office opens a downloaded document in Protected View.
+- Invisible characters that reverse the display order are dropped from file
+  names, so a program can't pass for `photoexe.jpg`.
+- A new `done.jsonl` is readable by your user only: like the queue file, it
+  holds the source links, a mega link's key included.
+
+**Fixes**
+
+- Removing a running download and adding the same link right away no longer
+  starts a second download of the same file while the first is still
+  stopping; the job added again waits for it, instead of showing as paused.
+- **Automatic** language now really follows the system's language: Turkish
+  and German systems got English.
+- A large bunkr album starts downloading while the rest of it is still being
+  resolved, instead of after its last file.
+- A file downloaded over several connections saves its progress only once
+  the data is on the disk, so a power cut can't leave a file that looks
+  complete but has gaps.
+- A download whose bytes stop coming no longer keeps showing its last rate
+  and time left.
+- The window version no longer keeps `done.jsonl` open: the download folder
+  can be moved or deleted while Siphon runs.
+- A queued download of a site Siphon no longer knows fails visibly.
+- Resolving a mega folder whose listing is corrupt can't hang any more.
+- bunkr albums failed file after file with "retry budget exhausted: HTTP
+  503": bunkr's file servers now allow one connection per IP address, and
+  Siphon opened up to four files with several connections each. bunkr files
+  now download one at a time over one connection; files cut off by the 503s
+  continue where they stopped (**Downloads → Retry failed**).
+- `siphon doctor bunkr -canary <url>`, the form the README shows, checks
+  that URL: flags after a site name used to be taken for site names.
+- `siphon doctor -record` keeps every answer recorded under the same name
+  within a second; they used to overwrite each other.
+- **Show in folder** finds an album's folder whose name had to be changed
+  for the disk.
+- Pausing a yt-dlp download stops ffmpeg and anything else it started too;
+  they used to keep running.
+- A file already in the folder no longer counts as downloaded just because
+  its name matches when the site gives no size (bunkr's single files): the
+  server's size has to match too.
+- Pausing or quitting while a large file is being checked at its end no
+  longer waits for the check to finish.
+- The same link saved into two folders at once shows each download's
+  progress in its own row.
+- While links are being resolved, **Add links** becomes **Stop adding**, and
+  more links can be added meanwhile.
+
+**Downloads**
+
+Windows (x64, also runs on Windows 11 on ARM), macOS (one app for Apple
+Silicon and Intel) and Linux (x64 and ARM64). The programs aren't
+code-signed or notarized yet: on first launch Windows SmartScreen and macOS
+warn; the README's *Install* section says how to open them.
+
 ## 0.1.1
 
 **Fixes**

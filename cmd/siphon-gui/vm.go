@@ -22,6 +22,9 @@ type viewModel struct {
 	jobs  map[string]queue.Job
 	speed map[string]*speedo
 	rate  map[string]float64
+	// moved is when a running job's bytes last grew; one whose bytes stop
+	// coming loses its rate (Tick).
+	moved map[string]time.Time
 	dirty bool
 
 	// notice is the result of an action ("Could not add: …", "Could not open
@@ -36,11 +39,16 @@ type viewModel struct {
 // notice stays.
 const noticeTTL = 30 * time.Second
 
+// staleAfter: a running job that got no bytes for this long shows no rate and
+// no time left. Downloads report progress about every 250 ms while bytes come.
+const staleAfter = 5 * time.Second
+
 func newViewModel() *viewModel {
 	return &viewModel{
 		jobs:  map[string]queue.Job{},
 		speed: map[string]*speedo{},
 		rate:  map[string]float64{},
+		moved: map[string]time.Time{},
 	}
 }
 
@@ -52,7 +60,8 @@ func (vm *viewModel) Apply(j queue.Job) {
 }
 
 func (vm *viewModel) apply(j queue.Job, now time.Time) {
-	if _, known := vm.jobs[j.ID]; !known {
+	prev, known := vm.jobs[j.ID]
+	if !known {
 		vm.order = append(vm.order, j.ID)
 	}
 	vm.jobs[j.ID] = j
@@ -63,13 +72,36 @@ func (vm *viewModel) apply(j queue.Job, now time.Time) {
 			sp = &speedo{}
 			vm.speed[j.ID] = sp
 		}
+		// An event that moved no bytes (the connection count changed) is not
+		// a speed sample: taking it as one pulled the rate down by a third
+		// whenever a connection joined or left.
+		if known && prev.State == queue.StateRunning && prev.Done == j.Done {
+			break
+		}
 		vm.rate[j.ID] = sp.update(j.Done, now)
+		vm.moved[j.ID] = now
 	default:
 		// A stopped job has no speed; rather than writing "0 B/s" nothing is written.
 		delete(vm.speed, j.ID)
 		delete(vm.rate, j.ID)
+		delete(vm.moved, j.ID)
 	}
 	vm.dirty = true
+}
+
+// Tick takes the rate away from running jobs whose bytes stopped coming. With
+// no progress events nothing redraws their rows, and a stalled download kept
+// showing its last rate and time left. The refresh loop calls it.
+func (vm *viewModel) Tick(now time.Time) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	for id, r := range vm.rate {
+		if r > 0 && now.Sub(vm.moved[id]) > staleAfter {
+			vm.rate[id] = 0
+			vm.speed[id] = &speedo{} // measured afresh when bytes come again
+			vm.dirty = true
+		}
+	}
 }
 
 // Replace syncs the list with the engine's full copy. Removing and clearing
@@ -94,6 +126,7 @@ func (vm *viewModel) Replace(jobs []queue.Job) {
 			delete(vm.jobs, id)
 			delete(vm.speed, id)
 			delete(vm.rate, id)
+			delete(vm.moved, id)
 		}
 	}
 	vm.dirty = true

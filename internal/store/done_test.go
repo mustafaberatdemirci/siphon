@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -261,6 +262,60 @@ func TestAddAfterCloseFails(t *testing.T) {
 	// Close must be idempotent.
 	if err := l.Close(); err != nil {
 		t.Errorf("second Close returned an error: %v", err)
+	}
+}
+
+// The ledger doesn't keep its file open between entries: on Windows an open
+// file keeps its folder from being deleted or moved, and the window version
+// keeps the ledger of every folder it saved to open until it quits.
+func TestLedgerDoesNotHoldTheFileOpen(t *testing.T) {
+	out := t.TempDir()
+	l, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := l.Add(Entry{SourcePage: "https://s/1", Filename: "a.bin", Path: "a.bin"}); err != nil {
+		t.Fatal(err)
+	}
+	moved := l.Path() + ".moved"
+	if err := os.Rename(l.Path(), moved); err != nil {
+		t.Fatalf("the ledger file can't be moved while the ledger is open: %v", err)
+	}
+	if err := os.Rename(moved, l.Path()); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Add(Entry{SourcePage: "https://s/2", Filename: "b.bin", Path: "b.bin"}); err != nil {
+		t.Fatalf("Add after the file was moved back: %v", err)
+	}
+
+	l2, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	if l2.Len() != 2 || l2.Skipped() != 0 {
+		t.Errorf("reopened: Len = %d, Skipped = %d; want 2, 0", l2.Len(), l2.Skipped())
+	}
+}
+
+// The ledger holds the source links, a mega link's key included: a new one is
+// readable by its owner only. (Windows has no such mode bits.)
+func TestNewLedgerIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix mode bits on Windows")
+	}
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	fi, err := os.Stat(l.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := fi.Mode().Perm(); m&0o077 != 0 {
+		t.Errorf("ledger mode = %v, others can read it", m)
 	}
 }
 

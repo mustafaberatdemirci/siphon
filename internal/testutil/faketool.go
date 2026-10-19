@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A fake yt-dlp and gallery-dl for tests: the test binary itself, started
@@ -25,6 +27,9 @@ import (
 //	            /private       fails: "Private video"
 //	            /image         fails: "not a video" (the site is known)
 //	            /split         reports a file that isn't on disk
+//	            /spawn         starts a child (as yt-dlp starts ffmpeg) that
+//	                           writes a beat into FakeToolHeartbeatEnv's file
+//	                           every 50 ms, then waits to be stopped
 //	            anything else  "Unsupported URL"
 //	gallery-dl  /album         two images, a.jpg and b.jpg
 //	            /image         accepted by the probe
@@ -33,9 +38,13 @@ import (
 // Every call's arguments are appended to the file named by FakeToolLogEnv,
 // one JSON array per line, if set.
 const (
-	FakeToolEnv    = "SIPHON_FAKE_TOOL"
-	FakeToolLogEnv = "SIPHON_FAKE_TOOL_LOG"
+	FakeToolEnv          = "SIPHON_FAKE_TOOL"
+	FakeToolLogEnv       = "SIPHON_FAKE_TOOL_LOG"
+	FakeToolHeartbeatEnv = "SIPHON_FAKE_TOOL_HEARTBEAT"
 )
+
+// heartbeatFlag starts the fake tool as the child of /spawn.
+const heartbeatFlag = "--fake-heartbeat"
 
 // FakeToolPath returns the executable to configure as the tool, and makes
 // the child processes act as the fake.
@@ -95,6 +104,16 @@ func fakeTool(args []string) int {
 	}
 
 	switch {
+	case has(heartbeatFlag): // the child /spawn started
+		// It stops by itself after a while, so a test that failed to stop
+		// it doesn't leave it running for good.
+		file := after(heartbeatFlag)
+		for i := 0; i < 600; i++ {
+			_ = os.WriteFile(file, []byte(fmt.Sprint(i)), 0o644)
+			time.Sleep(50 * time.Millisecond)
+		}
+		return 0
+
 	case has("-J"): // yt-dlp probe
 		switch {
 		case strings.HasPrefix(path, "/watch?v="):
@@ -123,6 +142,16 @@ func fakeTool(args []string) int {
 		dir := after("-P")
 		if path == "/split" {
 			fmt.Println("SIPHON-FILE " + filepath.Join(dir, "Split [s].webm"))
+			return 0
+		}
+		if path == "/spawn" {
+			child := exec.Command(os.Args[0], heartbeatFlag, os.Getenv(FakeToolHeartbeatEnv))
+			if err := child.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+				return 1
+			}
+			fmt.Println("SIPHON-PROGRESS 0 100 NA")
+			time.Sleep(time.Minute) // until stopped
 			return 0
 		}
 		if !strings.HasPrefix(path, "/watch?v=") {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -415,5 +416,27 @@ func TestSecondRunQueuesAndSkipsEveryItem(t *testing.T) {
 	}
 	if second.skipped != n {
 		t.Fatalf("summary skipped = %d, want %d", second.skipped, n)
+	}
+}
+
+// Recognized takes the real sites' links and leaves out what only the plain
+// file link fallback would take: a page's every link is not a download.
+func TestRecognizedLeavesOutPlainLinks(t *testing.T) {
+	_, rs, err := Setup(Events{}, "", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for u, want := range map[string]bool{
+		"https://mega.nz/file/AbCdEfGh#" + strings.Repeat("A", 43): true,
+		"https://gofile.io/d/abcd12":                               true,
+		"https://cyberfile.me/AbCd":                                true,
+		"https://bunkr.ws/a/AbCd1234":                              true,
+		"https://example.com/files/setup.zip":                      false,
+		"https://news.example/article":                             false,
+		"https://cyberfile.me/faq":                                 false,
+	} {
+		if got := Recognized(rs, u); got != want {
+			t.Errorf("Recognized(%s) = %v, want %v", u, got, want)
+		}
 	}
 }

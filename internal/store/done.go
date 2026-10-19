@@ -68,12 +68,17 @@ type Ledger struct {
 
 	mu      sync.Mutex
 	done    map[string]Entry
-	f       *os.File
+	closed  bool
 	skipped int
 }
 
-// Open reads the ledger under the output root and opens it for appending.
-// If the file doesn't exist it starts with an empty ledger.
+// Open reads the ledger under the output root and makes sure it can be
+// appended to. If the file doesn't exist it starts with an empty ledger.
+//
+// The file is NOT kept open: each Add opens, appends and closes it. Windows
+// can't delete or move a folder while a file in it is open, and the window
+// version keeps the ledger of every folder it saved to until it quits; one
+// open per finished download costs nothing next to the download.
 func Open(outRoot string) (*Ledger, error) {
 	if err := os.MkdirAll(outRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("could not create output root: %w", err)
@@ -85,19 +90,32 @@ func Open(outRoot string) (*Ledger, error) {
 		return nil, err
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := l.openAppend()
 	if err != nil {
-		return nil, fmt.Errorf("could not open %s: %w", path, err)
+		return nil, err
 	}
 	// A last line left half-written by a crash has no line ending. If it is
 	// not terminated, the first new entry is glued onto it, the two together
 	// become one corrupt line and the good entry is lost on the next open.
-	if err := terminateLastLine(path, f); err != nil {
-		f.Close()
+	err = terminateLastLine(path, f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return nil, fmt.Errorf("could not repair %s: %w", path, err)
 	}
-	l.f = f
 	return l, nil
+}
+
+// openAppend opens the ledger file for appending, creating it if needed. A
+// new file is readable by its owner only: source_page carries a mega link's
+// key and a gofile folder's password hash, like the queue file does.
+func (l *Ledger) openAppend() (*os.File, error) {
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("could not open %s: %w", l.path, err)
+	}
+	return f, nil
 }
 
 // terminateLastLine appends a '\n' if the file is not empty and doesn't end
@@ -188,14 +206,23 @@ func (l *Ledger) Add(e Entry) error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.f == nil {
+	if l.closed {
 		return errors.New("ledger is closed")
 	}
-	if _, err := l.f.Write(append(data, '\n')); err != nil {
+	f, err := l.openAppend()
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		f.Close()
 		return fmt.Errorf("could not write %s: %w", l.path, err)
 	}
-	if err := l.f.Sync(); err != nil {
+	if err := f.Sync(); err != nil {
+		f.Close()
 		return fmt.Errorf("could not sync %s: %w", l.path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("could not close %s: %w", l.path, err)
 	}
 	l.done[Key(e.Dir, e.SourcePage, e.Filename)] = e
 	return nil
@@ -218,13 +245,11 @@ func (l *Ledger) Skipped() int {
 // Path is the path of the ledger file.
 func (l *Ledger) Path() string { return l.path }
 
+// Close ends the ledger's use: later Adds fail. The file itself is only open
+// during an Add, so there is nothing to release.
 func (l *Ledger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.f == nil {
-		return nil
-	}
-	err := l.f.Close()
-	l.f = nil
-	return err
+	l.closed = true
+	return nil
 }

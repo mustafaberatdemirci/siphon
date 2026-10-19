@@ -29,6 +29,23 @@ func TestComponentForbiddenCharacters(t *testing.T) {
 // Windows SILENTLY drops trailing dots and spaces. If we don't, the name
 // created on disk differs from the name we think we have, and the "already
 // exists" check and rename behave unexpectedly.
+// Bidirectional control characters are dropped: a right-to-left override
+// makes "photo‮gpj.exe" show as "photoexe.jpg" in Explorer and in the
+// window, a program dressed up as a picture.
+func TestComponentDropsBidiControls(t *testing.T) {
+	for in, want := range map[string]string{
+		"photo‮gpj.exe": "photogpj.exe",
+		"a‪b‫c‬d":       "abcd",
+		"x⁦y⁧z⁨⁩":       "xyz",
+		"l‎r‏a؜":        "lra",
+		"مرحبا.txt":     "مرحبا.txt", // right-to-left text itself stays
+	} {
+		if got := Component(in); got != want {
+			t.Errorf("Component(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestComponentTrailingDotsAndSpaces(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"file.", "file"},

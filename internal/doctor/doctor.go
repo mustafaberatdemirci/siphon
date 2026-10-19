@@ -108,6 +108,7 @@ type Recorder struct {
 	Dir string
 
 	mu    sync.Mutex
+	seq   int
 	saved []string
 	errs  []error
 }
@@ -127,14 +128,16 @@ func (r *Recorder) save(siteName, name string, data []byte) {
 	if dir == "" {
 		dir = DefaultDir
 	}
-	// The timestamp prevents name collisions and tells which recording is
-	// newer when diffing.
-	stamp := time.Now().UTC().Format("20060102-150405")
-	fname := fmt.Sprintf("%s-%s-%s", stamp, safe(siteName), safe(name))
-	path := filepath.Join(dir, fname)
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// The timestamp tells which recording is newer when diffing; the sequence
+	// number keeps apart answers recorded under the same name within one
+	// second (mega records every API answer as api.json), which used to
+	// overwrite each other.
+	r.seq++
+	stamp := time.Now().UTC().Format("20060102-150405")
+	fname := fmt.Sprintf("%s-%03d-%s-%s", stamp, r.seq, safe(siteName), safe(name))
+	path := filepath.Join(dir, fname)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		r.errs = append(r.errs, fmt.Errorf("%s: %w", dir, err))
 		return

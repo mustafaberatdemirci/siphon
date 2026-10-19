@@ -154,6 +154,12 @@ type Item struct {
 	Size       int64             // -1 if unknown
 	Index      int               // position within the album
 
+	// Tag belongs to the caller: resolvers leave it empty and the downloader
+	// carries it through to its callbacks untouched. The queue puts its job
+	// id here, to know which job a progress report is about. Not written to
+	// the ledger.
+	Tag string
+
 	// Secret is resolver-private material; the downloader never touches it,
 	// it is never written to the ledger and never logged. For mega it is the
 	// content key + nonce + meta-MAC (32 bytes). It travels inside the Item so

@@ -24,6 +24,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/mustafaberatdemirci/siphon/internal/browser"
+	"github.com/mustafaberatdemirci/siphon/internal/instance"
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 )
@@ -46,20 +48,36 @@ func main() {
 		statePath = ""
 	}
 
-	// One instance only (instance.go): closing the window only hides it, so
-	// launching the exe again is an easy mistake. A second launch shows this
-	// window and exits instead of driving the same queue twice.
+	// One instance only (internal/instance): closing the window only hides
+	// it, so launching the exe again is an easy mistake. A second launch
+	// shows this window and exits instead of driving the same queue twice;
+	// links it was started with, or that the browser hands over, open this
+	// window's Add dialog.
 	instanceDir := ""
 	if statePath != "" {
 		instanceDir = filepath.Dir(statePath)
 	}
-	releaseInstance, running := claimInstance(instanceDir, func() {
-		fyne.Do(func() {
-			w.Show()
-			w.RequestFocus()
-		})
+	startLinks := linkArgs(os.Args[1:])
+	var q *queueTab // set below, before the window runs; links wait for it
+	releaseInstance, running := instance.Claim(instanceDir, instance.Handlers{
+		Show: func() {
+			fyne.Do(func() {
+				w.Show()
+				w.RequestFocus()
+			})
+		},
+		Add: func(links []string) {
+			fyne.Do(func() {
+				if q != nil {
+					q.receiveLinks(links)
+				}
+			})
+		},
 	})
 	if running {
+		if len(startLinks) > 0 {
+			_ = instance.Add(instanceDir, startLinks)
+		}
 		return
 	}
 	defer releaseInstance()
@@ -134,7 +152,8 @@ func main() {
 	// Closing the window hides it in the notification area; downloads go on.
 	tr := setupTray(a, w, a.Preferences(), quit)
 
-	q, queueView := newQueueTab(w, a.Preferences(), eng, vm, tr.setQuota)
+	var queueView fyne.CanvasObject
+	q, queueView = newQueueTab(w, a.Preferences(), eng, vm, tr.setQuota)
 	// Diagnose opens in a window of its own, made when first asked for: the
 	// main window is the queue's alone.
 	var diag fyne.Window
@@ -165,6 +184,11 @@ func main() {
 		showInfo(T("Persistence off"),
 			T("No folder was found for the queue file; the list is limited to this session."), w)
 	}
+	if len(startLinks) > 0 {
+		// Started with links (by the browser, or "siphon-gui <link>"): the
+		// Add dialog opens with them once the window runs.
+		go fyne.Do(func() { q.receiveLinks(startLinks) })
+	}
 	w.ShowAndRun()
 	shutdown()
 	if restartAfter {
@@ -176,11 +200,22 @@ func main() {
 	}
 }
 
-// startAgain starts this program anew with the same arguments.
+// startAgain starts this program anew. Without the arguments: links it was
+// started with were handled already and must not open the Add dialog again.
 func startAgain() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	return exec.Command(exe, os.Args[1:]...).Start()
+	return exec.Command(exe).Start()
+}
+
+// linkArgs are the links among the program's arguments (a browser or a
+// shortcut starting it with links); anything else is ignored.
+func linkArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		out = append(out, browser.ExtractLinks(a)...)
+	}
+	return out
 }

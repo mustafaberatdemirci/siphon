@@ -165,6 +165,37 @@ func TestResolveLanguage(t *testing.T) {
 	}
 }
 
+// The system locale comes with a region ("tr-TR", "de-AT") or a POSIX tail
+// ("pt_BR.UTF-8"); Automatic must still find the language in it. Comparing
+// the whole tag to the catalogs' codes left every real system in English.
+func TestBaseLanguage(t *testing.T) {
+	for in, want := range map[string]language{
+		"tr-TR":       langTurkish,
+		"tr":          langTurkish,
+		"de-DE":       langGerman,
+		"de-AT":       langGerman,
+		"DE-ch":       langGerman,
+		"en-US":       langEnglish,
+		"zh-Hant-TW":  "zh",
+		"pt_BR.UTF-8": "pt",
+		" fr-FR ":     "fr",
+		"":            "",
+	} {
+		if got := baseLanguage(in); got != want {
+			t.Errorf("baseLanguage(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for loc, want := range map[string]language{
+		"tr-TR": langTurkish,
+		"de-AT": langGerman,
+		"fr-FR": langEnglish,
+	} {
+		if got := resolveLanguage(langAuto, baseLanguage(loc)); got != want {
+			t.Errorf("Automatic on a %s system = %q, want %q", loc, got, want)
+		}
+	}
+}
+
 func TestTFallsBackToEnglish(t *testing.T) {
 	defer func(l language) { current = l }(current)
 	current = langTurkish

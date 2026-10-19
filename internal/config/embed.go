@@ -9,8 +9,8 @@ import _ "embed"
 // binaries (siphon.exe and siphon-gui.exe). Kept at the root, each binary
 // would need its own copy and the two copies would drift apart over time.
 //
-// The external override mechanism is unchanged: the -c flag, next to the
-// exe, the cwd.
+// The external override mechanism is unchanged: the -c flag, then next to
+// the exe.
 //
 //go:embed sites.toml
 var Embedded []byte

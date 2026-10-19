@@ -1,0 +1,8 @@
+# Text files are stored and checked out with LF on every system: gofmt wants
+# LF, CI checks the formatting on Linux, and a Windows checkout with
+# core.autocrlf otherwise mixes CRLF and LF files in the working tree.
+* text=auto eol=lf
+
+# The pictures in docs/ (drawn by tests) and the icon.
+*.png binary
+*.gif binary

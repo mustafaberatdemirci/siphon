@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/mustafaberatdemirci/siphon/internal/browser"
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/doctor"
 	"github.com/mustafaberatdemirci/siphon/internal/external"
@@ -68,6 +69,11 @@ func (l logger) events() run.Events {
 }
 
 func main() {
+	// Started by a browser as the Siphon extension's native messaging host:
+	// its arguments are the browser's, not Siphon's flags.
+	if browser.IsHostCall(os.Args[1:]) {
+		os.Exit(runBrowserHost())
+	}
 	// The subcommand is split off BEFORE flag.Parse. Go's flag package stops
 	// at the first non-flag argument, so the "siphon doctor -v" form can't be
 	// parsed with a single FlagSet.
@@ -93,7 +99,7 @@ func runCLI() int {
 	)
 	flag.StringVar(&inputPath, "i", "", "URL list file (one URL per line, # for comments)")
 	flag.StringVar(&outDir, "out", ".", "output root")
-	flag.StringVar(&cfgPath, "c", "", "path to sites.toml (if not given: next to the exe, then the cwd, then embedded)")
+	flag.StringVar(&cfgPath, "c", "", "path to sites.toml (if not given: next to the exe, then embedded)")
 	flag.BoolVar(&verbose, "v", false, "also print layer details")
 	flag.BoolVar(&quiet, "q", false, "only print errors")
 	flag.BoolVar(&resolveOnly, "resolve-only", false, "print the resolved URLs, don't download")
@@ -175,7 +181,8 @@ func runDoctor(args []string) int {
 		fmt.Fprintf(os.Stderr, "usage: siphon doctor [flags] [site ...]\n\n")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	names, err := parseInterspersed(fs, args)
+	if err != nil {
 		return run.ExitUsage
 	}
 
@@ -199,7 +206,7 @@ func runDoctor(args []string) int {
 
 	// If arguments are given only those sites are diagnosed.
 	want := map[string]bool{}
-	for _, a := range fs.Args() {
+	for _, a := range names {
 		want[strings.ToLower(a)] = true
 	}
 	var sites []doctor.Named
@@ -241,6 +248,24 @@ func runDoctor(args []string) int {
 		return run.ExitPartial
 	}
 	return run.ExitOK
+}
+
+// parseInterspersed parses flags wherever they stand among the other
+// arguments, which it returns. Go's flag package stops at the first one that
+// isn't a flag, so "siphon doctor bunkr -canary <url>" took "-canary" and
+// the URL for site names and checked the configured canaries instead.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var rest []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return rest, nil
+		}
+		rest = append(rest, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
 }
 
 // stringList is a repeatable string flag.

@@ -1,8 +1,8 @@
 # Siphon's embedded site definitions.
 #
 # This file is embedded into the binary with go:embed. If an external copy is
-# found (search order: -c flag, next to the exe, cwd) it is OVERLAID on top,
-# not substituted:
+# found (search order: -c flag, next to the exe) it is OVERLAID on top, not
+# substituted:
 #   - scalar fields are overwritten
 #   - array fields are MERGED (union, order preserved)
 #   - removal only happens explicitly via domains_remove / cdn_patterns_remove
@@ -76,9 +76,9 @@ max_elapsed = "10m"
 # changing IP with a VPN changes nothing.
 #
 # The key is NOT WRITTEN INTO THIS FILE (it is embedded in the binary and in
-# the repo). Put a separate sites.toml next to the exe or in the working
-# directory; writing only the key you want to change is enough, the rest is
-# merged with the embedded copy:
+# the repo). Put a separate sites.toml next to the exe (or give it with -c);
+# writing only the key you want to change is enough, the rest is merged with
+# the embedded copy:
 #
 #   schema_version = 1
 #   [[site]]
@@ -147,7 +147,9 @@ match_patterns = ["bunkr.*", "bunkrr.*"]
 # c3su-b, c1be-b, c2ch-b, c2ri-b, c2rm-b, all under .cdn.cr. Listing them one
 # by one is pointless; a wildcard pattern is the right answer. If a new root
 # domain appears doctor will print WARN and say so.
-cdn_patterns = ["*.cdn.cr"]
+#
+# On 2026-10-19 the files came from pc9.scdn.st and pbc.scdn.st.
+cdn_patterns = ["*.cdn.cr", "*.scdn.st"]
 
 # NO Referer on page requests. The download request's Referer comes from the
 # PROTOCOL, not the policy: the API endpoint requires the <dl_origin>/file/<id>
@@ -158,27 +160,24 @@ referer_policy = "none"
 
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
 
-# Files at once. bunkr's CDN is more tolerant than pixeldrain, but there's no
-# point overdoing it.
-max_concurrent = 4
-
-# Segmented download ON, capped at 3 connections per file.
+# ONE file at a time, over ONE connection.
 #
-# MEASUREMENT 2026-09-11, 523 MB file, same hour:
-#   4 connections -> one got 503, adapted down to 3, 113.8 s (4.6 MB/s)
-#   1 connection  -> 120.1 s (4.4 MB/s)
-# So bunkr's CDN limits the TOTAL speed per client; more connections don't
-# help. Capped at 3: 4 gets a 503, 3 is clean. It stays segmented because it
-# does no harm and the gain comes for free if the CDN's behavior changes.
-max_segments = 3
-
-# Connections to one CDN host at once, files included: the 4 files' own
-# connections plus 2 extra. One large file alone gets its 3; with 4 files
-# running, two of them get a second connection. Before, files and extra
-# connections shared max_concurrent, and a file's extra connections could
-# keep the next file from starting. NOT MEASURED beyond the per-file 503
-# above; if the CDN answers 503/429 the download drops a connection by itself.
-max_connections = 6
+# MEASUREMENT 2026-10-19, one-byte requests to the CDN for the files of an
+# album:
+#   one request at a time                -> every one 206
+#   four ranges of one file at once      -> one 206, three 503
+#   one range of four files at once (two
+#   CDN hosts, pc9 and pbc.scdn.st)      -> one 206, three 503
+# So the CDN allows one open connection per IP, across its hosts. With the
+# values before (4 files at once, up to 3 connections per file, 6 per host),
+# every connection but one got 503 in turn until its retries ran out: a
+# 17-file album failed with "retry budget exhausted: HTTP 503".
+#
+# MEASUREMENT 2026-09-11 (before): 4 connections to one file -> one got 503,
+# 3 were clean; the total speed was the same over 1 and over 3 connections.
+max_concurrent = 1
+max_segments = 1
+max_connections = 1
 
 # Canary is the site root. If you add an ALBUM URL, doctor's Parse layer is
 # verified too; the root page carries no albumFiles, so Parse prints WARN for now.
@@ -436,6 +435,57 @@ max_elapsed = "10m"
 api_endpoint = "https://api.cyberdrop.cr/api"
 
 [[site]]
+name = "cyberfile"
+
+# Measured 2026-10-19. A file's page (cyberfile.me/<code>) carries its
+# numeric id; the page's script POSTs it to details_endpoint, whose answer
+# holds the file's name and its Download button: a download server link with
+# a download_token, asked for fresh before each attempt (a made-up token is
+# sent to the site's error page). No account, no captcha.
+#
+# A folder (cyberfile.me/folder/<hash>) carries its numeric id on its page;
+# list_endpoint lists its files page by page, each with its exact size.
+# Subfolders are followed (NOT MEASURED: no folder with subfolders was at
+# hand).
+domains = ["cyberfile.me", "www.cyberfile.me"]
+legacy_domains = []
+match_patterns = []
+
+# The download servers (p1.cyberfile.me, p2.cyberfile.me). A link to one is
+# recognized too and taken as its file.
+cdn_patterns = ["*.cyberfile.me"]
+
+referer_policy = "none"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+# ONE file at a time, over ONE connection. MEASURED 2026-10-19: the download
+# servers allow one open connection per IP. Four ranges of one file at once:
+# three got 429 Too Many Requests; the first bytes of two different files at
+# once: the second got 429; the same requests one after another: all 206. So
+# a second file or connection would only collect 429s and retries.
+#
+# Resuming is safe: the download servers take Range requests and send a
+# strong ETag and Last-Modified, and the size they report matches the
+# folder listing's.
+max_concurrent = 1
+max_segments = 1
+max_connections = 1
+
+# The site root: doctor checks the site answers, and Parse, ItemPage and CDN
+# are WARN. No file link is kept here (files come and go); check the whole
+# chain with: siphon doctor cyberfile -canary <a cyberfile.me/<code> link>
+canary_urls = ["https://cyberfile.me/"]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+[site.extra]
+details_endpoint = "https://cyberfile.me/account/ajax/file_details"
+list_endpoint = "https://cyberfile.me/account/ajax/load_files"
+
+[[site]]
 name = "direct"
 
 # PLAIN FILE LINKS: any http(s) link that none of the sites above recognizes,
@@ -469,13 +519,13 @@ max_delay = "60s"
 max_elapsed = "10m"
 
 # WEB PAGES of sites Siphon doesn't know (a video, a playlist, a gallery) go
-# to yt-dlp, then gallery-dl, if they are installed: next to Siphon, in
-# Siphon's tools folder (where Diagnose > Install tools and "siphon tools
-# install" put them) or on PATH. They do the downloading; Siphon shows the
-# progress and keeps them in the queue. With ffmpeg, yt-dlp can also merge
-# picture and sound that a site sends separately; deno is the JavaScript
-# runtime yt-dlp wants for YouTube. If a tool lives somewhere else, say where
-# in your own sites.toml:
+# to yt-dlp, then gallery-dl, if they are installed: in Siphon's tools folder
+# (where Diagnose > Install tools and "siphon tools install" put them) or on
+# PATH. They do the downloading; Siphon shows the progress and keeps them in
+# the queue. With ffmpeg, yt-dlp can also merge picture and sound that a site
+# sends separately; deno is the JavaScript runtime yt-dlp wants for YouTube.
+# If a tool lives somewhere else, give its ABSOLUTE path in your own
+# sites.toml (a relative one is ignored):
 #
 #   [[site]]
 #   name = "direct"

@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Siphon",
+  "version": "0.1.2",
+  "description": "Send links, a page's file links and downloads to Siphon.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwh+045Iq4oJT15AC2ND3xQ1tK/DY8+kIr6u08/lcJTnxTmSfRv65EvPOjxy0M108JElnfsf5KJNAVRlX1TXR/s9w4GajK9BtBwkUJlRnhURMGu67qhQKfzbW8Ca25AALcEiAnSgUMRvVdl2Q1cyu1/RwL3lgbNZtDkx1eKdaGJ1Ar/TlkV6JrGiNQwY7dODOiPq7eqr+PJ8bjABKAFm2vV93p1/mZOuJl6EArFpBOUXJNPlWrnFTYToN82TaKrOHanXXoqX9awucDKIRc+qRM4QV8DGBMBkoKgsF94nW8puLt/w9LNKuZ+1j7qMjeckyMi5S7hhHoiaaZFhUbm6z6QIDAQAB",
+  "icons": { "128": "icon.png" },
+  "action": {
+    "default_title": "Send this page's file links to Siphon",
+    "default_icon": "icon.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
+  },
+  "permissions": ["contextMenus", "nativeMessaging", "downloads", "scripting", "activeTab", "storage"],
+  "options_ui": { "page": "options.html" },
+  "browser_specific_settings": {
+    "gecko": { "id": "siphon@mustafaberatdemirci.github.io", "strict_min_version": "128.0" }
+  }
+}

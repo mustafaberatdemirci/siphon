@@ -199,6 +199,23 @@ func TestRecorderSavesRealBytes(t *testing.T) {
 	}
 }
 
+// Two answers recorded under the same name within a second (mega records
+// every API answer as api.json) are both kept, in the order they came.
+func TestRecorderKeepsSameNameRecordings(t *testing.T) {
+	rec := &Recorder{Dir: t.TempDir()}
+	rec.For("mega")("api.json", []byte("first"))
+	rec.For("mega")("api.json", []byte("second"))
+	saved := rec.Saved()
+	var got []string
+	for _, p := range saved {
+		b, _ := os.ReadFile(p)
+		got = append(got, string(b))
+	}
+	if strings.Join(got, ",") != "first,second" {
+		t.Errorf("recordings in name order = %v, want [first second]", got)
+	}
+}
+
 func TestRecorderPerSiteLabels(t *testing.T) {
 	dir := t.TempDir()
 	rec := &Recorder{Dir: dir}

@@ -202,6 +202,7 @@ func Setup(
 		site.MediafireName:  site.NewMediafire,
 		site.GofileName:     site.NewGofile,
 		site.CyberdropName:  site.NewCyberdrop,
+		site.CyberfileName:  site.NewCyberfile,
 		site.DirectName:     site.NewDirect,
 	} {
 		if rerr := reg.Register(name, factory); rerr != nil {
@@ -209,7 +210,7 @@ func Setup(
 		}
 	}
 
-	state := stateDir()
+	state := StateDir()
 	for i := range cfgs {
 		cfgs[i].Logf = ev.Debugf
 		if cfgs[i].HTTPClient == nil {
@@ -554,10 +555,19 @@ func isFallback(r site.Resolver) bool {
 	return ok && f.Fallback()
 }
 
-// stateDir is <user config>/Siphon (%AppData%\Siphon on Windows), the
+// Recognized reports whether one of the real sites takes the link, not the
+// plain-file-link fallback (which takes nearly any link). The clipboard
+// watch and the links collected from a whole page keep only these: every
+// link of a page is not a download.
+func Recognized(rs []site.Resolver, u string) bool {
+	r, _ := Pick(rs, u)
+	return r != nil && !isFallback(r)
+}
+
+// StateDir is <user config>/Siphon (%AppData%\Siphon on Windows), the
 // folder of the GUI's queue file; resolvers keep their small state there
 // (gofile's guest account). "" when there is no such folder.
-func stateDir() string {
+func StateDir() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return ""

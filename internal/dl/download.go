@@ -46,6 +46,11 @@ const (
 	stateSuffix = ".part.state"
 )
 
+// syncFile writes a file's data through to the disk. It runs before every
+// state save that counts that data: the state must never be ahead of the
+// .part (see the package doc). A variable so tests can make it fail.
+var syncFile = (*os.File).Sync
+
 // Validator types. Which one is used is stored in the state because If-Range
 // accepts both but they mean different things.
 const (
@@ -364,6 +369,9 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 	}
 
 	final := filepath.Join(dir, d.claim(dir, it))
+	if err := checkProtected(final); err != nil {
+		return Result{}, err
+	}
 	part := final + partSuffix
 	statePath := final + stateSuffix
 
@@ -371,14 +379,27 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 	// checked before this; this is only a cheap check against downloading
 	// twice.
 	if fi, err := os.Stat(final); err == nil && !fi.IsDir() {
-		// If the size is known and doesn't match, this is NOT the same file:
-		// a file of another album with the same name or the user's own file.
-		// Counting it as "already downloaded" would record the wrong content
-		// as a success; a permanent error, because retrying finds the same
-		// collision.
-		if it.Size > 0 && fi.Size() != it.Size {
+		// If the size doesn't match, this is NOT the same file: a file of
+		// another album with the same name or the user's own file. Counting
+		// it as "already downloaded" would record the wrong content as a
+		// success; a permanent error, because retrying finds the same
+		// collision. When the resolver gives no size (bunkr's single files)
+		// the server is asked; it used to count any file of that name as done.
+		want := it.Size
+		if want <= 0 {
+			n, serr := d.remoteSize(ctx, it)
+			if serr != nil {
+				return Result{}, serr
+			}
+			want = n
+		}
+		if want <= 0 {
+			return Result{}, fmt.Errorf("a file with the same name already exists, and neither the site nor the server says how big this one is, so the two can't be told apart: %s; move or delete it, then retry",
+				final)
+		}
+		if fi.Size() != want {
 			return Result{}, fmt.Errorf("a file with the same name but a different size already exists: %s (%d bytes, expected %d); move or delete it, then retry",
-				final, fi.Size(), it.Size)
+				final, fi.Size(), want)
 		}
 		d.logf("%s already exists, skipping", filepath.Base(final))
 		// The hash is not recomputed: the file is already in place and
@@ -487,6 +508,7 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		return Result{}, fmt.Errorf("rename: %w", err)
 	}
 	_ = os.Remove(statePath)
+	MarkDownloaded(final, it.SourcePage)
 	return Result{Path: final, Size: st.Offset, SHA256: sum}, nil
 }
 
@@ -793,7 +815,7 @@ func (d *Downloader) stream(
 	for {
 		select {
 		case <-ctx.Done():
-			_ = f.Sync()
+			_ = syncFile(f)
 			f.Close()
 			saveState(statePath, st, hasher)
 			return false, st, body, ctx.Err()
@@ -806,13 +828,13 @@ func (d *Downloader) stream(
 			if terr := d.Throttle.Wait(ctx, n); terr != nil {
 				// Canceled while waiting: the chunk read was not written to
 				// disk, the offset didn't advance; the state is saved as is.
-				_ = f.Sync()
+				_ = syncFile(f)
 				f.Close()
 				saveState(statePath, st, hasher)
 				return false, st, body, terr
 			}
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				_ = f.Sync()
+				_ = syncFile(f)
 				f.Close()
 				saveState(statePath, st, hasher)
 				return false, st, body, werr
@@ -827,7 +849,7 @@ func (d *Downloader) stream(
 				// Order matters: data to disk first, then the state. The state
 				// must never be ahead of the .part (see the package doc); the
 				// reverse is safely truncated in prepare.
-				if f.Sync() == nil {
+				if syncFile(f) == nil {
 					saveState(statePath, st, hasher)
 				}
 				lastSave = time.Now()
@@ -841,7 +863,7 @@ func (d *Downloader) stream(
 			break
 		}
 		if rerr != nil {
-			_ = f.Sync()
+			_ = syncFile(f)
 			f.Close()
 			saveState(statePath, st, hasher)
 			// A read that breaks mid-body is transient; continue from the saved offset.
@@ -849,7 +871,7 @@ func (d *Downloader) stream(
 		}
 	}
 
-	syncErr := f.Sync()
+	syncErr := syncFile(f)
 	closeErr := f.Close()
 	if err := errors.Join(syncErr, closeErr); err != nil {
 		saveState(statePath, st, hasher)
@@ -1053,5 +1075,9 @@ func (d *Downloader) Plan(outRoot string, it site.Item) (string, error) {
 	}
 	it.Filename = name
 	dir := filepath.Join(outRoot, DirPath(it.Dir))
-	return filepath.Join(dir, d.claim(dir, it)), nil
+	final := filepath.Join(dir, d.claim(dir, it))
+	if err := checkProtected(final); err != nil {
+		return "", err
+	}
+	return final, nil
 }

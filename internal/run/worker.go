@@ -252,5 +252,10 @@ func (w *Worker) downloadSelf(ctx context.Context, outDir string, it site.Item) 
 	if w.Down.Progress != nil {
 		w.Down.Progress(it, size, size)
 	}
+	// A video is one file; a gallery is a folder of files the tool chose
+	// and is left to it.
+	if fi, serr := os.Stat(path); serr == nil && !fi.IsDir() {
+		dl.MarkDownloaded(path, it.SourcePage)
+	}
 	return dl.Result{Path: path, Size: size}, nil
 }

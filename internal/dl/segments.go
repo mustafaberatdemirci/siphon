@@ -402,9 +402,30 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 	}
 	// Windows won't rename an open file: it must be closed BEFORE hashing and
 	// renaming. closeOnce closes it exactly once on every path.
-	var closeOnce sync.Once
-	closeF := func() { closeOnce.Do(func() { _ = f.Sync(); _ = f.Close() }) }
+	var (
+		closeOnce sync.Once
+		closed    bool  // set by closeF; read after g.Wait, or before it ran
+		closeSync error // closeF's sync, standing in for one after the close
+	)
+	closeF := func() {
+		closeOnce.Do(func() {
+			closeSync = syncFile(f)
+			_ = f.Close()
+			closed = true
+		})
+	}
 	defer closeF()
+	// syncData puts every byte written so far on the disk, before a state
+	// that counts them is saved. A snapshot only counts bytes whose write
+	// finished before it was taken, so syncing after taking it covers them.
+	// Without it a power cut could leave a state ahead of the pre-sized
+	// .part, and its zeros pass every check of a site that gives no hash.
+	syncData := func() error {
+		if closed {
+			return closeSync
+		}
+		return syncFile(f)
+	}
 
 	p := newChunkPool(st.Segments)
 	// The number of connections follows the user's CURRENT choice, not the
@@ -468,7 +489,7 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 			lastConns, conns = c, c
 		}
 		p.mu.Unlock()
-		if doSave {
+		if doSave && syncData() == nil {
 			saveState(statePath, snap, nil)
 		}
 		if doRep && d.Progress != nil {
@@ -559,7 +580,7 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		}
 		verifier = v
 	}
-	sum, err := hashFile(part, verifier)
+	sum, err := hashFile(ctx, part, verifier)
 	if err != nil {
 		return Result{}, err
 	}
@@ -581,6 +602,7 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		return Result{}, fmt.Errorf("rename: %w", err)
 	}
 	_ = os.Remove(statePath)
+	MarkDownloaded(final, it.SourcePage)
 	return Result{Path: final, Size: total, SHA256: sum}, nil
 }
 
@@ -609,6 +631,39 @@ func (d *Downloader) firstByte(ctx context.Context, target string, it site.Item)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 	return resp, body, nil
+}
+
+// remoteSize asks the server how big the file is, with its first byte; -1
+// when the answer doesn't say.
+func (d *Downloader) remoteSize(ctx context.Context, it site.Item) (int64, error) {
+	target := it.URL
+	if d.PrepareURL != nil {
+		prepared, perr := d.PrepareURL(ctx, target)
+		if perr != nil {
+			return 0, Retryable(perr)
+		}
+		target = prepared
+	}
+	resp, body, err := d.firstByte(ctx, target, it)
+	if err != nil {
+		return 0, err
+	}
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		if _, total, perr := parseContentRange(resp.Header.Get("Content-Range")); perr == nil && total > 0 {
+			return total, nil
+		}
+		return -1, nil
+	case http.StatusOK:
+		// The range was ignored and the whole file is coming: its length is
+		// the size. Not so for a range asked in the URL, whose 200 is the byte.
+		if d.RangeURL == nil && resp.ContentLength > 0 {
+			return resp.ContentLength, nil
+		}
+		return -1, nil
+	default:
+		return 0, d.classifyStatus(resp, body)
+	}
 }
 
 // probe learns the size, validator and range support by asking for the first byte.
@@ -894,8 +949,10 @@ func (d *Downloader) setHeaders(req *http.Request, it site.Item) {
 }
 
 // hashFile computes a file's sha256 by reading it from the start. If also is
-// non-nil it is fed the same bytes (a decoder's integrity check).
-func hashFile(path string, also io.Writer) (string, error) {
+// non-nil it is fed the same bytes (a decoder's integrity check). It stops
+// when ctx ends: reading a large file takes minutes, and a pause or quit must
+// not wait for it.
+func hashFile(ctx context.Context, path string, also io.Writer) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -906,8 +963,21 @@ func hashFile(path string, also io.Writer) (string, error) {
 	if also != nil {
 		w = io.MultiWriter(h, also)
 	}
-	if _, err := io.Copy(w, f); err != nil {
-		return "", err
+	buf := make([]byte, 1<<20)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			_, _ = w.Write(buf[:n]) // hashes and verifiers don't fail
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", rerr
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

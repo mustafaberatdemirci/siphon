@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
-	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
@@ -21,8 +20,8 @@ import (
 )
 
 // DefaultSegments is the requested connections per file if the user didn't
-// set it. The site ceiling (max_segments) clips it: 1 on pixeldrain, 3 on
-// bunkr, 8 on mega.
+// set it. The site ceiling (max_segments) clips it: 1 on pixeldrain, bunkr
+// and cyberfile, 8 on mega.
 const DefaultSegments = 4
 
 // DefaultMaxActive is the number of jobs downloaded at the same time, across
@@ -69,50 +68,6 @@ type Options struct {
 	Resolvers []site.Resolver
 	Configs   []site.SiteConfig
 }
-
-// DefaultQuotaProbeEvery: while a site's quota is exhausted, the first byte
-// of one of its waiting files is requested at this interval. As soon as a
-// byte comes back the quota has opened (the time passed or the user switched
-// VPN) and EVERY waiting job of the site goes back into the queue at once.
-//
-// MegaBasterd gets the same effect by having every connection retry its
-// chunk at most 8 s apart, forever (EXP_BACKOFF_MAX_WAIT_TIME); by default
-// that is 24 connections knocking every 8 s. One one-byte request per site
-// every 10 s notices a VPN switch just as quickly. The interval doesn't
-// grow: the user may switch the VPN at any time, and a quota answer costs no
-// bandwidth.
-//
-// Why try instead of asking the API: the tar field of the "uq" response came
-// back as 0 both with the quota full and empty (measured); there is no
-// reliable field to interpret.
-const DefaultQuotaProbeEvery = 10 * time.Second
-
-// QuotaCommandCooldown: the quota command runs at most this often. When
-// three jobs get 509 at the same time the VPN must not switch three times
-// (MegaBasterd: 120 s).
-const QuotaCommandCooldown = 2 * time.Minute
-
-// quotaCommandProbeDelay: after the command finishes the probe happens this
-// much later; a short margin for the VPN tunnel to settle.
-const quotaCommandProbeDelay = 3 * time.Second
-
-// Backoff on a network outage. When the app opens before the network is up
-// (or while the VPN switches), resolution gives DNS/connection errors. The
-// job used to fall into "failed" right away and the next one started and fell
-// too: within seconds the whole queue was "failed". Now the job stays in the
-// queue and the site is held for a while: 15 s, 30 s, 1 min, 2 min, 4 min,
-// 5 min (~13 min in total). If the network doesn't come back in that time the
-// job falls into "failed" as before; showing "queued" forever would be a lie too.
-const (
-	DefaultNetRetryBase = 15 * time.Second
-	maxNetRetryWait     = 5 * time.Minute
-	maxNetFails         = 6
-)
-
-// quotaHoldNotifyEvery: OnQuotaHold at most this often for the same site. If
-// the probe says "there is allowance" and the CDN gives 509 again the hold is
-// set up again; notifications must not rain down each time.
-const quotaHoldNotifyEvery = 10 * time.Minute
 
 // Engine is the queue itself.
 type Engine struct {
@@ -288,6 +243,7 @@ func (e *Engine) Add(ctx context.Context, rawURL, outDir string) (int, error) {
 			AddedAt:    time.Now(),
 		}
 		e.mu.Lock()
+		var snap Job
 		if existing, dup := e.byID[j.ID]; dup {
 			// If a finished job is added again, leave it alone; if a
 			// paused/failed job is added again, put it back in the queue.
@@ -297,18 +253,21 @@ func (e *Engine) Add(ctx context.Context, rawURL, outDir string) (int, error) {
 				existing.Error = ""
 			}
 			e.items[j.ID] = it
-			snap := *existing
-			e.mu.Unlock()
-			e.changed(snap)
-			return nil
+			snap = *existing
+		} else {
+			e.jobs = append(e.jobs, j)
+			e.byID[j.ID] = j
+			e.items[j.ID] = it
+			snap = *j
+			added++
 		}
-		e.jobs = append(e.jobs, j)
-		e.byID[j.ID] = j
-		e.items[j.ID] = it
-		snap := *j
 		e.mu.Unlock()
-		added++
 		e.changed(snap)
+		// Each job may start as soon as it is queued, not when the whole
+		// link is resolved: a bunkr album asks the API once per file, and
+		// a large one kept its first download waiting for minutes.
+		e.scheduleSave()
+		e.kick()
 		return nil
 	})
 	for _, ie := range itemErrs {
@@ -321,6 +280,10 @@ func (e *Engine) Add(ctx context.Context, rawURL, outDir string) (int, error) {
 	}
 	return added, nil
 }
+
+// Recognizes reports whether one of the real sites (not the plain file link
+// fallback) takes the link: the clipboard watch offers only those.
+func (e *Engine) Recognizes(u string) bool { return run.Recognized(e.resolvers, u) }
 
 // ---------- Controls ----------
 
@@ -501,30 +464,6 @@ func (e *Engine) PauseAll() {
 	}
 }
 
-// RetryWaiting puts every job waiting for quota back in the queue right away
-// ("I switched the VPN, try now"). It doesn't touch the user's global pause.
-func (e *Engine) RetryWaiting() {
-	e.mu.Lock()
-	var snaps []Job
-	for _, j := range e.jobs {
-		if j.State == StateWaiting {
-			j.State = StateQueued
-			j.RetryAt = time.Time{}
-			j.Error = ""
-			delete(e.holdSince, j.Site)
-			snaps = append(snaps, *j)
-		}
-	}
-	e.mu.Unlock()
-	for _, s := range snaps {
-		e.changed(s)
-	}
-	if len(snaps) > 0 {
-		e.scheduleSave()
-		e.kick()
-	}
-}
-
 // ResumeAll puts every paused job back in the queue, lifts the captcha holds
 // and turns starting back on.
 func (e *Engine) ResumeAll() {
@@ -700,9 +639,6 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-// DefaultQuotaWait is the retry interval when the site doesn't tell its reset time.
-const DefaultQuotaWait = 10 * time.Minute
-
 // nextRetry returns the earliest RetryAt of the waiting jobs and the earliest
 // opening of the sites held because of a network outage: the timer must wake
 // at both.
@@ -724,251 +660,6 @@ func (e *Engine) nextRetry() (time.Time, bool) {
 	return next, !next.IsZero()
 }
 
-// releaseDue puts waiting jobs whose time has come back in the queue.
-func (e *Engine) releaseDue(now time.Time) {
-	e.mu.Lock()
-	var snaps []Job
-	for _, j := range e.jobs {
-		if j.State == StateWaiting && !j.RetryAt.After(now) {
-			j.State = StateQueued
-			j.RetryAt = time.Time{}
-			j.Error = ""
-			delete(e.holdSince, j.Site)
-			snaps = append(snaps, *j)
-		}
-	}
-	e.mu.Unlock()
-	for _, s := range snaps {
-		e.changed(s)
-	}
-	if len(snaps) > 0 {
-		e.scheduleSave()
-	}
-}
-
-// startProbes takes the lock itself: for every site with jobs waiting for
-// quota whose turn has come, it starts a probe in the background
-// (probeQuota) about the site's first waiting job. It returns the earliest
-// next probe time (for the timer).
-func (e *Engine) startProbes(ctx context.Context, now time.Time) (time.Time, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	first := map[string]*Job{}
-	for _, j := range e.jobs {
-		if j.State == StateWaiting && first[j.Site] == nil {
-			first[j.Site] = j
-		}
-	}
-	var next time.Time
-	for name, j := range first {
-		if e.probing[name] {
-			continue
-		}
-		at, scheduled := e.nextProbe[name]
-		if !scheduled {
-			at = now.Add(e.opt.QuotaProbeEvery)
-			e.nextProbe[name] = at
-		}
-		if at.After(now) {
-			if next.IsZero() || at.Before(next) {
-				next = at
-			}
-			continue
-		}
-		w, ok := e.workers[name]
-		if !ok {
-			continue
-		}
-		e.probing[name] = true
-		e.nextProbe[name] = now.Add(e.opt.QuotaProbeEvery)
-		go e.probeQuota(ctx, w, name, j.ID, j.SourcePage)
-		if next.IsZero() || e.nextProbe[name].Before(next) {
-			next = e.nextProbe[name]
-		}
-	}
-	return next, !next.IsZero()
-}
-
-// probeQuota asks whether siteName's quota has opened, with the smallest
-// request that is still a real transfer: the first byte of one of its
-// waiting files. It runs in its own goroutine, at most one per site.
-//
-//   - A byte came back: the quota is open (the time passed or the VPN was
-//     switched). EVERY waiting job of the site goes back into the queue at
-//     once; nobody waits for a whole file to download first.
-//   - The quota answer again: the next probe in QuotaProbeEvery.
-//   - The network is down: likewise.
-//   - The file itself can't be had (deleted, forbidden): that job fails, and
-//     the next probe asks about another file right away. Otherwise a dead
-//     file at the head of the queue would keep the site waiting for good.
-func (e *Engine) probeQuota(ctx context.Context, w *run.Worker, siteName, jobID, sourcePage string) {
-	err := e.checkSite(ctx, w, siteName, sourcePage)
-
-	e.mu.Lock()
-	delete(e.probing, siteName)
-	var snaps []Job
-	opened := false
-	switch {
-	case err == nil:
-		snaps = e.releaseWaiting(siteName)
-		opened = len(snaps) > 0
-	case ctx.Err() != nil:
-		// Shutting down.
-	default:
-		e.nextProbe[siteName] = time.Now().Add(e.opt.QuotaProbeEvery)
-		if permanentProbeError(err) {
-			delete(e.probeItem, siteName)
-			if j, ok := e.byID[jobID]; ok && j.State == StateWaiting {
-				j.State = StateFailed
-				j.RetryAt = time.Time{}
-				j.Error = err.Error()
-				snaps = append(snaps, *j)
-				e.nextProbe[siteName] = time.Now()
-			}
-		}
-	}
-	e.mu.Unlock()
-
-	for _, s := range snaps {
-		e.changed(s)
-	}
-	if opened {
-		e.noticeOpened(siteName, len(snaps))
-	}
-	if len(snaps) > 0 {
-		e.scheduleSave()
-		e.kick()
-	}
-}
-
-// checkSite asks the site for the first byte of sourcePage's file. The
-// resolved item is kept between probes, so a probe is one small request, not
-// an API call as well. If its URL has expired (mega binds it to the IP that
-// asked for it: exactly what a VPN switch does) it is resolved again and
-// asked once more straight away.
-func (e *Engine) checkSite(ctx context.Context, w *run.Worker, siteName, sourcePage string) error {
-	var it site.Item
-	e.mu.Lock()
-	if c, ok := e.probeItem[siteName]; ok && c.SourcePage == sourcePage {
-		it = c
-	}
-	e.mu.Unlock()
-	for attempt := 0; ; attempt++ {
-		if it.URL == "" {
-			fresh, err := w.Resolver.ResolveOne(ctx, sourcePage)
-			if err != nil {
-				return err
-			}
-			it = fresh
-			e.mu.Lock()
-			e.probeItem[siteName] = it
-			e.mu.Unlock()
-		}
-		err := w.Down.CheckAccess(ctx, it)
-		if dl.IsURLExpired(err) && attempt == 0 {
-			it = site.Item{}
-			continue
-		}
-		return err
-	}
-}
-
-// permanentProbeError: the probed file itself can't be had (deleted,
-// forbidden), as opposed to the quota still being exhausted or the network
-// being down.
-func permanentProbeError(err error) bool {
-	if _, ok := site.QuotaOf(err); ok {
-		return false
-	}
-	if snet.IsTransient(err) || errors.Is(err, site.ErrAllDomainsBurned) {
-		return false
-	}
-	var rt interface{ Retryable() bool }
-	return !errors.As(err, &rt) || !rt.Retryable()
-}
-
-// noticeOpened tells the user a site's quota opened, at most once a minute
-// per site: if the quota closes again right away, the probe and the release
-// repeat every few seconds and the status line mustn't flicker with it.
-func (e *Engine) noticeOpened(siteName string, n int) {
-	e.mu.Lock()
-	last := e.openNotified[siteName]
-	quiet := time.Since(last) < time.Minute
-	if !quiet {
-		e.openNotified[siteName] = time.Now()
-	}
-	e.mu.Unlock()
-	if !quiet {
-		e.notice(fmt.Sprintf("%s: allowance available again, %d waiting jobs are back in the queue.", siteName, n))
-	}
-}
-
-// enterQuotaWait, under the lock: when the quota runs out it puts the job and
-// the same site's queued jobs on hold. The returned snapshots are published
-// outside the lock.
-//
-// The same site's queued jobs wait too: the quota is per IP and site wide;
-// each would start in turn and get the same 509. Running ones are NOT
-// TOUCHED: mega doesn't cut a transfer that already started, letting it
-// finish is a gain.
-//
-// The resolved Item is dropped: mega's download URL is bound to the IP that
-// requested it. When the user switches VPN a fresh "g" is needed; the old URL
-// would only cost a round of 403.
-func (e *Engine) enterQuotaWait(j *Job, wait time.Duration, msg string) []Job {
-	if wait <= 0 {
-		wait = DefaultQuotaWait
-	}
-	now := time.Now()
-	until := now.Add(wait)
-	e.holdSince[j.Site] = now
-	if !e.probing[j.Site] {
-		e.nextProbe[j.Site] = now.Add(e.opt.QuotaProbeEvery)
-	}
-	var snaps []Job
-	for _, o := range e.jobs {
-		if o.Site != j.Site {
-			continue
-		}
-		if o != j && o.State != StateQueued {
-			continue
-		}
-		o.State = StateWaiting
-		o.RetryAt = until
-		o.Error = msg
-		delete(e.items, o.ID)
-		snaps = append(snaps, *o)
-	}
-	return snaps
-}
-
-// releaseSite, under the lock: if a job that started AFTER the quota ran out
-// downloaded successfully (the time passed or the user changed IP and
-// pressed ▶), there's no reason left for the others to wait.
-func (e *Engine) releaseSite(siteName string, started time.Time) []Job {
-	if since, held := e.holdSince[siteName]; !held || started.Before(since) {
-		return nil
-	}
-	return e.releaseWaiting(siteName)
-}
-
-// releaseWaiting, under the lock: every waiting job of the site back into the queue.
-func (e *Engine) releaseWaiting(siteName string) []Job {
-	delete(e.holdSince, siteName)
-	delete(e.nextProbe, siteName)
-	delete(e.probeItem, siteName)
-	var snaps []Job
-	for _, o := range e.jobs {
-		if o.Site == siteName && o.State == StateWaiting {
-			o.State = StateQueued
-			o.RetryAt = time.Time{}
-			o.Error = ""
-			snaps = append(snaps, *o)
-		}
-	}
-	return snaps
-}
-
 func (e *Engine) kick() {
 	select {
 	case e.wake <- struct{}{}:
@@ -979,8 +670,8 @@ func (e *Engine) kick() {
 // dispatch starts queued jobs while there are free slots.
 func (e *Engine) dispatch(ctx context.Context) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.pausedAll || e.closing {
+		e.mu.Unlock()
 		return
 	}
 	now := time.Now()
@@ -994,11 +685,18 @@ func (e *Engine) dispatch(ctx context.Context) {
 			perSite[j.Site]++
 		}
 	}
+	var failed []Job // jobs of a site no longer defined; told outside the lock
 	for _, j := range e.jobs {
 		if len(e.active) >= e.opt.MaxActive {
-			return
+			break
 		}
 		if j.State != StateQueued {
+			continue
+		}
+		// The job's previous run (it was removed and added again) hasn't
+		// stopped yet. Starting now would put two downloads on the same
+		// .part; that run kicks the scheduler when it ends.
+		if _, busy := e.active[j.ID]; busy {
 			continue
 		}
 		if e.captchaHold[j.Site] || e.netHeld(j.Site, now) {
@@ -1008,6 +706,7 @@ func (e *Engine) dispatch(ctx context.Context) {
 		if !ok {
 			j.State = StateFailed
 			j.Error = "no site definition: " + j.Site
+			failed = append(failed, *j)
 			continue
 		}
 		if c := w.Cfg.MaxConcurrent; c > 0 && perSite[j.Site] >= c {
@@ -1020,12 +719,22 @@ func (e *Engine) dispatch(ctx context.Context) {
 		e.active[j.ID] = cancel
 		item, haveItem := e.items[j.ID]
 		snap := *j
-		go e.runJob(jctx, w, snap, item, haveItem)
+		go e.runJob(jctx, w, j, snap, item, haveItem)
+	}
+	e.mu.Unlock()
+	for _, s := range failed {
+		e.changed(s)
+	}
+	if len(failed) > 0 {
+		e.scheduleSave()
 	}
 }
 
-// runJob drives a single job from start to finish and records the result in the queue.
-func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item, haveItem bool) {
+// runJob drives a single job from start to finish and records the result in
+// the queue. owner is the queue's own Job the run was started for: the result
+// goes to it only, never to a job added again under the same id after this
+// one was removed.
+func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, it site.Item, haveItem bool) {
 	started := time.Now()
 	e.changed(j)
 	e.scheduleSave()
@@ -1034,6 +743,9 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 
 	e.mu.Lock()
 	live, still := e.byID[j.ID]
+	// Removed, or removed and added again: the job under this id now is
+	// another one, waiting for this run to end (see dispatch).
+	still = still && live == owner
 	delete(e.active, j.ID)
 	wantedPause := e.pauseWant[j.ID]
 	delete(e.pauseWant, j.ID)
@@ -1144,85 +856,6 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, j Job, it site.Item,
 	e.kick()
 }
 
-// notifyQuotaHold calls OnQuotaHold sparingly, per site.
-func (e *Engine) notifyQuotaHold(siteName string, retryAt time.Time) {
-	if e.opt.OnQuotaHold == nil {
-		return
-	}
-	e.mu.Lock()
-	last := e.quotaNotified[siteName]
-	if time.Since(last) < quotaHoldNotifyEvery {
-		e.mu.Unlock()
-		return
-	}
-	e.quotaNotified[siteName] = time.Now()
-	e.mu.Unlock()
-	go e.opt.OnQuotaHold(siteName, retryAt)
-}
-
-// ---------- Quota command ----------
-
-// SetQuotaCommand sets the command line to run when the quota runs out; an
-// empty line turns it off. It is the user's own script: typically a command
-// that switches VPN server. It runs in a shell (Windows: cmd /S /C) and its
-// output goes into the notification.
-func (e *Engine) SetQuotaCommand(line string) {
-	e.mu.Lock()
-	e.quotaCmd = strings.TrimSpace(line)
-	e.mu.Unlock()
-}
-
-func (e *Engine) QuotaCommand() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.quotaCmd
-}
-
-// maybeRunQuotaCommand runs the command in the background if one is set and
-// the cooldown has passed. When it finishes it pulls the probe forward: if
-// the IP changed it is noticed without waiting for the next probe.
-func (e *Engine) maybeRunQuotaCommand() {
-	e.mu.Lock()
-	line := e.quotaCmd
-	ctx := e.runCtx
-	if line == "" || e.quotaCmdRunning || time.Since(e.quotaCmdLast) < QuotaCommandCooldown {
-		e.mu.Unlock()
-		return
-	}
-	e.quotaCmdRunning = true
-	e.quotaCmdLast = time.Now()
-	e.mu.Unlock()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	e.notice("Quota exceeded, running the command: " + line)
-	go func() {
-		start := time.Now()
-		out, err := hook.Run(ctx, line, 0)
-		took := time.Since(start).Round(time.Second)
-
-		e.mu.Lock()
-		e.quotaCmdRunning = false
-		if err == nil {
-			for name := range e.holdSince {
-				e.nextProbe[name] = time.Now().Add(quotaCommandProbeDelay)
-			}
-		}
-		e.mu.Unlock()
-
-		switch {
-		case err != nil && out != "":
-			e.notice(fmt.Sprintf("Quota command failed (%v): %s", err, firstLineOf(out)))
-		case err != nil:
-			e.notice(fmt.Sprintf("Quota command failed: %v", err))
-		default:
-			e.notice(fmt.Sprintf("Quota command finished (%s); retrying shortly.", took))
-			e.kick()
-		}
-	}()
-}
-
 func firstLineOf(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		return strings.TrimSpace(s[:i])
@@ -1279,50 +912,14 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 	if it.Size > 0 {
 		j.Size = it.Size
 	}
+	// Progress and connection reports find the job by this.
+	it.Tag = j.ID
 
 	ledger, err := e.ledgerFor(j.OutDir)
 	if err != nil {
 		return run.Outcome{Kind: run.OutcomeFailed, Err: err}
 	}
 	return w.DownloadItem(ctx, j.OutDir, ledger, it, e.opt.Events)
-}
-
-// netDownError marks that resolution failed because the network was
-// unreachable (see snet.IsTransient).
-type netDownError struct{ err error }
-
-func (e *netDownError) Error() string { return e.err.Error() }
-func (e *netDownError) Unwrap() error { return e.err }
-
-// netHold, under the lock: holds the jobs of a site that got a network error.
-// The first return value is the wait, the second whether the job stays in the
-// queue (false: the budget ran out, let it fail), the third whether a new
-// hold window was opened (notify only then).
-//
-// Other jobs failing within the same window DON'T increase the counter: when
-// three jobs start at once and hit the same outage, the budget must not run
-// out three times as fast.
-func (e *Engine) netHold(siteName string, now time.Time) (time.Duration, bool, bool) {
-	if until, ok := e.netBackoffUntil[siteName]; ok && now.Before(until) {
-		return until.Sub(now), true, false
-	}
-	n := e.netFails[siteName] + 1
-	e.netFails[siteName] = n
-	if n > maxNetFails {
-		return 0, false, false
-	}
-	wait := e.opt.NetRetryBase << uint(n-1)
-	if wait > maxNetRetryWait || wait <= 0 {
-		wait = maxNetRetryWait
-	}
-	e.netBackoffUntil[siteName] = now.Add(wait)
-	return wait, true, true
-}
-
-// netHeld, under the lock: are the site's jobs waiting because of a network outage?
-func (e *Engine) netHeld(siteName string, now time.Time) bool {
-	until, ok := e.netBackoffUntil[siteName]
-	return ok && now.Before(until)
 }
 
 // RetryFailed puts every job in the "failed" state back in the queue. The
@@ -1351,14 +948,6 @@ func (e *Engine) RetryFailed() {
 	}
 }
 
-// humanWait writes short durations in seconds and longer ones with FormatWait.
-func humanWait(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
-	}
-	return site.FormatWait(d)
-}
-
 // ledgerFor opens the output folder's ledger or returns it from the cache.
 func (e *Engine) ledgerFor(outDir string) (*store.Ledger, error) {
 	e.mu.Lock()
@@ -1374,19 +963,33 @@ func (e *Engine) ledgerFor(outDir string) (*store.Ledger, error) {
 	return l, nil
 }
 
+// runningJobFor, under the lock, is the running job a report about it is
+// for: the one its tag names (execute sets it to the job id). Two jobs can
+// share a source page and folder (one link saved into two folders), so
+// matching on those is only the fallback for an untagged item.
+func (e *Engine) runningJobFor(it site.Item) *Job {
+	if it.Tag != "" {
+		if j, ok := e.byID[it.Tag]; ok && j.State == StateRunning {
+			return j
+		}
+		return nil
+	}
+	for _, j := range e.jobs {
+		if j.State == StateRunning && j.SourcePage == it.SourcePage && j.Dir == it.Dir {
+			return j
+		}
+	}
+	return nil
+}
+
 // onConnections writes the number of connections in use into the matching job.
 func (e *Engine) onConnections(it site.Item, n int) {
 	e.mu.Lock()
 	var snap *Job
-	for _, j := range e.jobs {
-		if j.State == StateRunning && j.SourcePage == it.SourcePage && j.Dir == it.Dir {
-			if j.Conns != n {
-				j.Conns = n
-				s := *j
-				snap = &s
-			}
-			break
-		}
+	if j := e.runningJobFor(it); j != nil && j.Conns != n {
+		j.Conns = n
+		s := *j
+		snap = &s
 	}
 	e.mu.Unlock()
 	if snap != nil {
@@ -1398,16 +1001,13 @@ func (e *Engine) onConnections(it site.Item, n int) {
 func (e *Engine) onProgress(it site.Item, done, total int64) {
 	e.mu.Lock()
 	var snap *Job
-	for _, j := range e.jobs {
-		if j.State == StateRunning && j.SourcePage == it.SourcePage && j.Dir == it.Dir {
-			j.Done = done
-			if total > 0 {
-				j.Size = total
-			}
-			s := *j
-			snap = &s
-			break
+	if j := e.runningJobFor(it); j != nil {
+		j.Done = done
+		if total > 0 {
+			j.Size = total
 		}
+		s := *j
+		snap = &s
 	}
 	e.mu.Unlock()
 	if snap != nil {

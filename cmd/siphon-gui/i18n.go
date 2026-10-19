@@ -72,7 +72,19 @@ func resolveLanguage(choice, system language) language {
 }
 
 func systemLanguage() language {
-	return language(strings.ToLower(lang.SystemLocale().LanguageString()))
+	return baseLanguage(lang.SystemLocale().String())
+}
+
+// baseLanguage is the language part of a locale: "tr" for "tr-TR", "pt" for
+// "pt_BR.UTF-8". Fyne's LanguageString only drops a script, so a system
+// locale with a region ("tr-TR", the usual case) never matched a catalog and
+// Automatic always fell back to English.
+func baseLanguage(locale string) language {
+	locale = strings.ToLower(strings.TrimSpace(locale))
+	if i := strings.IndexAny(locale, "-_."); i >= 0 {
+		locale = locale[:i]
+	}
+	return language(locale)
 }
 
 // T translates an English text into the current language.

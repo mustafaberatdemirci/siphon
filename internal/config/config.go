@@ -79,10 +79,14 @@ func (s Source) String() string {
 
 // Load reads the embedded copy and overlays the external copy if one is found.
 //
-// Search order: explicitPath -> next to the exe -> cwd. The first one found is
-// used. If explicitPath is given but the file does not exist that is a usage
-// error; silently falling back to the embedded copy makes diagnosis
-// impossible.
+// Search order: explicitPath -> next to the exe. The first one found is used.
+// If explicitPath is given but the file does not exist that is a usage error;
+// silently falling back to the embedded copy makes diagnosis impossible.
+//
+// The working directory is NOT searched: it is the command line's default
+// output folder, so a downloaded file named sites.toml would be read on the
+// next run, and a sites.toml can name the programs Siphon runs (the direct
+// entry's tool paths).
 func Load(embedded []byte, explicitPath string) ([]site.SiteConfig, Source, error) {
 	base, err := parse(embedded, "embedded sites.toml")
 	if err != nil {
@@ -132,14 +136,8 @@ func locate(explicitPath string) (string, error) {
 		}
 		return explicitPath, nil
 	}
-	var candidates []string
 	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "sites.toml"))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(wd, "sites.toml"))
-	}
-	for _, c := range candidates {
+		c := filepath.Join(filepath.Dir(exe), "sites.toml")
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
 			return c, nil
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"image/color"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
@@ -75,6 +77,17 @@ type queueTab struct {
 	pending string
 	// addEntry is the open Add dialog's link box; nil when it is closed.
 	addEntry *widget.Entry
+	// adding counts the link batches being resolved; while it is above zero
+	// the Add button stops them all through addCtx. UI thread only.
+	adding    int
+	addCtx    context.Context
+	addCancel context.CancelFunc
+
+	// The clipboard watch (clipboard.go): the text last seen, whether the
+	// first look was taken, the links offered this session. UI thread only.
+	clipLast    string
+	clipStarted bool
+	clipOffered map[string]bool
 	// captchaShown is the captcha hold last told on the status line.
 	captchaShown string
 
@@ -110,7 +123,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	// --- Toolbar ---
 	// Add links; what acts on the selected rows (as the row menu does); the
 	// queue as a whole; Settings and Diagnose. The rest is in the menus.
-	q.addBtn = newToolItem(T("Add links"), theme.NewPrimaryThemedResource(theme.ContentAddIcon()), func() { q.showAddDialog("") })
+	q.addBtn = newToolItem(T("Add links"), addLinksIcon(), q.addOrStop)
 	q.resumeSel = newToolItem(T("Resume"), theme.MediaPlayIcon(), q.resumeSelected)
 	q.pauseSel = newToolItem(T("Pause"), theme.MediaPauseIcon(), q.pauseSelected)
 	q.removeSel = newToolItem(T("Remove"), theme.DeleteIcon(), q.removeSelected)
@@ -193,8 +206,49 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.tree.Select(q.cat)
 	if autoRefresh {
 		go q.refreshLoop()
+		go q.clipboardLoop()
 	}
 	return q, root
+}
+
+func addLinksIcon() fyne.Resource { return theme.NewPrimaryThemedResource(theme.ContentAddIcon()) }
+
+// addOrStop is the Add button: the Add dialog, or while links are being
+// resolved, stopping that (the links not added yet wait in the next dialog).
+func (q *queueTab) addOrStop() {
+	if q.adding > 0 && q.addCancel != nil {
+		q.addCancel()
+		return
+	}
+	q.showAddDialog("")
+}
+
+// startAdding counts a link batch in and turns the Add button into Stop.
+// UI thread only.
+func (q *queueTab) startAdding() {
+	if q.adding == 0 {
+		q.addCtx, q.addCancel = context.WithCancel(context.Background())
+	}
+	q.adding++
+	q.addBtn.SetText(T("Stop adding"))
+	q.addBtn.SetIcon(theme.CancelIcon())
+}
+
+// doneAdding counts a link batch out; after the last one the button is Add
+// again. UI thread only.
+func (q *queueTab) doneAdding() {
+	if q.adding > 0 {
+		q.adding--
+	}
+	if q.adding > 0 {
+		return
+	}
+	if q.addCancel != nil {
+		q.addCancel()
+	}
+	q.addCtx, q.addCancel = nil, nil
+	q.addBtn.SetText(T("Add links"))
+	q.addBtn.SetIcon(addLinksIcon())
 }
 
 // toolGap separates groups of toolbar buttons.
@@ -322,7 +376,8 @@ func (q *queueTab) bindKeys() {
 func (q *queueTab) refreshLoop() {
 	t := time.NewTicker(refreshEvery)
 	defer t.Stop()
-	for range t.C {
+	for now := range t.C {
+		q.vm.Tick(now) // a stalled download loses its rate even without events
 		if !q.vm.TakeDirty() {
 			continue
 		}
@@ -532,7 +587,9 @@ func (q *queueTab) copySelectedLinks() {
 	if len(links) == 0 {
 		return
 	}
-	fyne.CurrentApp().Clipboard().SetContent(strings.Join(links, "\n"))
+	text := strings.Join(links, "\n")
+	fyne.CurrentApp().Clipboard().SetContent(text)
+	q.clipLast = text // Siphon's own copy isn't offered back by the clipboard watch
 	if len(links) == 1 {
 		q.vm.Notify(T("Link copied."))
 	} else {
@@ -601,7 +658,9 @@ func (q *queueTab) removeSelected() {
 func (q *queueTab) showInFolder(j queue.Job) {
 	target, sel := j.Path, true
 	if fi, err := os.Stat(j.Path); j.Path == "" || err != nil {
-		target, sel = filepath.Join(j.OutDir, dirOnDisk(j.Dir)), false
+		// The folder as the downloader made it: every level sanitized the
+		// same way, so a name with ":" or a trailing dot is found too.
+		target, sel = filepath.Join(j.OutDir, dl.DirPath(j.Dir)), false
 		if d := filepath.Dir(j.Path); j.Path != "" && isDir(d) {
 			target = d
 		}
@@ -614,11 +673,6 @@ func (q *queueTab) showInFolder(j queue.Job) {
 	if err := openInExplorer(target, sel); err != nil {
 		q.vm.Notify(Tf("Could not open the folder: %s", err.Error()))
 	}
-}
-
-// dirOnDisk turns a job's folder ("/" between levels) into a path.
-func dirOnDisk(dir string) string {
-	return filepath.FromSlash(strings.Trim(dir, "/"))
 }
 
 func isDir(p string) bool {

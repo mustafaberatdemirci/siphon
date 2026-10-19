@@ -60,7 +60,7 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 	}
 
 	// Connections per file: segmented download. The site ceiling
-	// (max_segments) clips it: 1 on pixeldrain, 3 on bunkr, 8 on mega. The
+	// (max_segments) clips it: 1 on pixeldrain, bunkr and cyberfile, 8 on mega. The
 	// user choice is the "request", the ceiling the "permission"; picking a
 	// number says which sites cap it, and every running row shows the
 	// connections its download really got. It reaches running downloads too.
@@ -118,6 +118,9 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 		}
 	}
 
+	watch := widget.NewCheck("", func(on bool) { prefs.SetBool(prefWatchClipboard, on) })
+	watch.SetChecked(prefs.BoolWithFallback(prefWatchClipboard, true))
+
 	item := func(label string, obj fyne.CanvasObject, hint string) *widget.FormItem {
 		it := widget.NewFormItem(label, obj)
 		it.HintText = hint
@@ -131,9 +134,13 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 			T("For all downloads together; 0 or empty is no limit.")),
 		item(T("Downloads at once"), active, T("Files downloading at the same time.")),
 		item(T("Connections per file"), q.segments,
-			T("A site may allow fewer: bunkr 3, pixeldrain 1. Each row shows what it really gets.")),
+			T("A site may allow fewer: bunkr, cyberfile and pixeldrain 1. Each row shows what it really gets.")),
 		item(T("VPN switch command"), container.NewBorder(nil, nil, nil, test, q.quotaCmd),
 			T("For mega's quota, optional: runs when it runs out. Empty: you get a notification and switch the VPN yourself.")),
+		item(T("Watch the clipboard"), watch,
+			T("Links of supported sites you copy anywhere open the Add dialog.")),
+		item(T("Browser integration"), q.browserSettings(),
+			T("Lets the Siphon extension for Chrome, Edge, Brave and Firefox hand links and downloads to Siphon.")),
 	)
 }
 
@@ -199,7 +206,7 @@ func (q *queueTab) showAddDialog(extra string) {
 	entry := widget.NewMultiLineEntry()
 	entry.Wrapping = fyne.TextWrapOff
 	entry.SetMinRowsVisible(8)
-	entry.SetPlaceHolder(T("One link per line: mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop,\n" +
+	entry.SetPlaceHolder(T("One link per line: mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile,\n" +
 		"any direct file link, and video or gallery pages if yt-dlp / gallery-dl is installed"))
 	entry.SetText(strings.TrimSpace(strings.Join([]string{q.pending, strings.TrimSpace(extra)}, "\n")))
 	folder := widget.NewEntry()
@@ -220,9 +227,44 @@ func (q *queueTab) showAddDialog(extra string) {
 	q.win.Canvas().Focus(entry)
 }
 
+// receiveLinks puts links from outside (the browser, the clipboard, a launch
+// with links) into the Add dialog, the open one or a new one, and brings the
+// window up. Nothing is queued before the user presses Add. UI thread only.
+func (q *queueTab) receiveLinks(links []string) {
+	if len(links) == 0 {
+		return
+	}
+	q.win.Show()
+	q.win.RequestFocus()
+	if q.addEntry == nil {
+		q.showAddDialog(strings.Join(links, "\n"))
+		return
+	}
+	have := map[string]bool{}
+	for _, l := range parseLinks(q.addEntry.Text) {
+		have[l] = true
+	}
+	var add []string
+	for _, l := range links {
+		if !have[l] {
+			have[l] = true
+			add = append(add, l)
+		}
+	}
+	if len(add) == 0 {
+		return
+	}
+	text := strings.TrimRight(q.addEntry.Text, "\n")
+	if text != "" {
+		text += "\n"
+	}
+	q.addEntry.SetText(text + strings.Join(add, "\n"))
+}
+
 // addLinks resolves the links in the background and adds their files to
 // the queue, saving to dir (which becomes the default folder). Resolution
-// needs the network; it runs in a goroutine so it doesn't lock the UI.
+// needs the network; it runs in a goroutine so it doesn't lock the UI. The
+// Add button stops it meanwhile, and more links can be added in parallel.
 func (q *queueTab) addLinks(text, dir string) {
 	urls := parseLinks(text)
 	if len(urls) == 0 {
@@ -237,33 +279,47 @@ func (q *queueTab) addLinks(text, dir string) {
 	}
 	q.prefs.SetString(prefOutDir, outDir)
 	q.pending = ""
-	q.addBtn.Disable()
+	q.startAdding()
+	ctx := q.addCtx
 	q.vm.Notify(Tf("Resolving links: %d...", len(urls)))
 
 	go func() {
-		added, errs, failed := q.resolveLinks(urls, outDir)
+		added, errs, failed := q.resolveLinks(ctx, urls, outDir)
 		q.vm.Replace(q.eng.Jobs())
-		msg := addSummary(added, errs)
-		if len(failed) > 0 {
-			msg += " " + T("(Add links opens with them.)")
+		var msg string
+		if ctx.Err() != nil {
+			msg = Tf("Stopped adding. Files added: %d; links not added: %d (Add links opens with them).", added, len(failed))
+		} else {
+			msg = addSummary(added, errs)
+			if len(failed) > 0 {
+				msg += " " + T("(Add links opens with them.)")
+			}
 		}
 		q.vm.Notify(msg)
 		fyne.Do(func() {
-			q.addBtn.Enable()
+			q.doneAdding()
 			// Links that couldn't be added wait in the Add dialog; the user
 			// fixes and retries them without copying.
-			q.pending = strings.Join(failed, "\n")
+			q.pending = strings.TrimSpace(strings.Join(append([]string{q.pending}, failed...), "\n"))
 			q.render()
 		})
 	}()
 }
 
 // resolveLinks adds each link's files to the queue and says what happened.
-func (q *queueTab) resolveLinks(urls []string, outDir string) (added int, errs, failed []string) {
-	for _, u := range urls {
-		n, err := q.eng.Add(context.Background(), u, outDir)
+// Once ctx ends (the user stopped it) the links not added yet are failed
+// ones too, kept for the next Add dialog, but not errors.
+func (q *queueTab) resolveLinks(ctx context.Context, urls []string, outDir string) (added int, errs, failed []string) {
+	for i, u := range urls {
+		if ctx.Err() != nil {
+			failed = append(failed, urls[i:]...)
+			break
+		}
+		n, err := q.eng.Add(ctx, u, outDir)
 		added += n
 		switch {
+		case err != nil && ctx.Err() != nil:
+			failed = append(failed, u)
 		case err != nil:
 			errs = append(errs, firstLine(err.Error()))
 			failed = append(failed, u)
@@ -368,7 +424,7 @@ func (q *queueTab) tryQuotaCommand() {
 // showAbout names the program, its version and where it lives.
 func (q *queueTab) showAbout() {
 	title := widget.NewLabelWithStyle("Siphon "+version, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	desc := widget.NewLabel(T("A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop and direct links."))
+	desc := widget.NewLabel(T("A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile and direct links."))
 	desc.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(title, desc)
 	if u, err := url.Parse("https://github.com/mustafaberatdemirci/siphon"); err == nil {

@@ -57,6 +57,63 @@ func TestViewModelTracksRateOnlyWhileRunning(t *testing.T) {
 	}
 }
 
+// A download whose bytes stopped coming shows no rate (and so no time left)
+// instead of its last one: the list only redraws on changes, so a stalled row
+// used to keep showing "5 MB/s".
+func TestStalledDownloadLosesItsRate(t *testing.T) {
+	vm := newViewModel()
+	now := time.Now()
+	vm.mu.Lock()
+	vm.apply(job("a", queue.StateRunning, 0, 1<<30), now)
+	vm.apply(job("a", queue.StateRunning, 4<<20, 1<<30), now.Add(time.Second))
+	vm.mu.Unlock()
+	if r, _ := vm.Row(0); r.Rate <= 0 {
+		t.Fatalf("no rate while bytes come: %v", r.Rate)
+	}
+	vm.TakeDirty()
+	vm.Tick(now.Add(2 * time.Second))
+	if r, _ := vm.Row(0); r.Rate <= 0 {
+		t.Fatal("the rate went before the download had stalled long enough")
+	}
+	vm.Tick(now.Add(time.Second + staleAfter + time.Millisecond))
+	if r, _ := vm.Row(0); r.Rate != 0 {
+		t.Fatalf("a stalled download still shows %v B/s", r.Rate)
+	}
+	if !vm.TakeDirty() {
+		t.Fatal("losing the rate didn't ask for a redraw")
+	}
+	// Bytes again: the rate is measured afresh, not mixed with the stall.
+	vm.mu.Lock()
+	vm.apply(job("a", queue.StateRunning, 5<<20, 1<<30), now.Add(10*time.Second))
+	vm.apply(job("a", queue.StateRunning, 6<<20, 1<<30), now.Add(11*time.Second))
+	vm.mu.Unlock()
+	if r, _ := vm.Row(0); r.Rate < 900<<10 || r.Rate > 1100<<10 {
+		t.Fatalf("rate after the stall = %v B/s, want about 1 MB/s", r.Rate)
+	}
+}
+
+// An event that moved no bytes (a connection joined or left) is not a speed
+// sample: taking it as one pulled the rate down by a third each time.
+func TestEventWithoutNewBytesKeepsRate(t *testing.T) {
+	vm := newViewModel()
+	now := time.Now()
+	vm.mu.Lock()
+	vm.apply(job("a", queue.StateRunning, 0, 1<<30), now)
+	vm.apply(job("a", queue.StateRunning, 4<<20, 1<<30), now.Add(time.Second))
+	before := vm.rate["a"]
+	conns := job("a", queue.StateRunning, 4<<20, 1<<30)
+	conns.Conns = 3
+	vm.apply(conns, now.Add(time.Second+10*time.Millisecond))
+	after := vm.rate["a"]
+	vm.mu.Unlock()
+	if before <= 0 || after != before {
+		t.Fatalf("a connections event changed the rate from %v to %v", before, after)
+	}
+	if r, _ := vm.Row(0); r.Job.Conns != 3 {
+		t.Error("the connection count wasn't applied")
+	}
+}
+
 // Replace syncs with the full list from the engine: a removed job must drop.
 func TestViewModelReplaceDropsMissing(t *testing.T) {
 	vm := newViewModel()

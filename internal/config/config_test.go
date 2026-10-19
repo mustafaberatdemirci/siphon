@@ -26,25 +26,45 @@ max_delay = "60s"
 max_elapsed = "10m"
 `
 
-// isolatedCwd moves the working directory into an empty folder.
-//
-// Why it is needed: sites.toml now lives under internal/config (so both
-// binaries can use the same embedded copy). Tests run in this package's
-// directory, so locate() finds THAT file in the cwd and tests that expect
-// "the embedded copy is used" silently read the external file instead.
-// Without isolation those tests don't measure the right thing.
-//
-// chdir affects the whole process, so these tests must NOT run in parallel.
-func isolatedCwd(t *testing.T) {
+// chdirTemp moves the working directory into an empty folder and returns it.
+// chdir affects the whole process, so tests using it must NOT run in parallel.
+func chdirTemp(t *testing.T) string {
 	t.Helper()
 	old, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(t.TempDir()); err != nil {
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(old) })
+	return dir
+}
+
+// A sites.toml in the working directory is NOT read. The working directory
+// is the command line's default output folder: a downloaded file named
+// sites.toml would be laid over the site definitions on the next run, and it
+// can name the programs Siphon runs (the direct entry's tool paths). The
+// tests in this package also run where the repo's own sites.toml lies.
+func TestWorkingDirectorySitesTomlIsIgnored(t *testing.T) {
+	dir := chdirTemp(t)
+	planted := baseTOML + "\n[[site]]\nname = \"direct\"\ndomains = []\n[site.extra]\nyt_dlp = \"not-this.exe\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "sites.toml"), []byte(planted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgs, src, err := Load([]byte(baseTOML), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !src.Embedded {
+		t.Fatalf("the working directory's sites.toml was read: %s", src)
+	}
+	for _, c := range cfgs {
+		if c.Name == "direct" {
+			t.Fatal("a site from the working directory's sites.toml was added")
+		}
+	}
 }
 
 func writeTemp(t *testing.T, content string) string {
@@ -57,13 +77,12 @@ func writeTemp(t *testing.T, content string) string {
 }
 
 func TestLoadEmbeddedOnly(t *testing.T) {
-	isolatedCwd(t)
 	cfgs, src, err := Load([]byte(baseTOML), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	// There can be no external config in an isolated cwd, so this is now a
-	// firm claim.
+	// Only -c and the folder of the test binary are searched, and neither
+	// has a sites.toml, so this is a firm claim.
 	if !src.Embedded {
 		t.Fatalf("embedded copy was not used: %s", src)
 	}
@@ -173,7 +192,6 @@ func TestMissingExplicitConfigIsUsageError(t *testing.T) {
 }
 
 func TestEmbeddedMissingSchemaVersion(t *testing.T) {
-	isolatedCwd(t)
 	_, _, err := Load([]byte("[[site]]\nname=\"a\"\ndomains=[\"a.com\"]\n"), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
 		t.Fatalf("schema_version must be mandatory in the embedded copy, err=%v", err)
@@ -181,7 +199,6 @@ func TestEmbeddedMissingSchemaVersion(t *testing.T) {
 }
 
 func TestDurationsParsed(t *testing.T) {
-	isolatedCwd(t)
 	cfgs, _, err := Load([]byte(baseTOML), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -193,7 +210,6 @@ func TestDurationsParsed(t *testing.T) {
 }
 
 func TestBadDurationIsUsageError(t *testing.T) {
-	isolatedCwd(t)
 	bad := strings.Replace(baseTOML, `base_delay = "1s"`, `base_delay = "one second"`, 1)
 	_, _, err := Load([]byte(bad), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
@@ -202,7 +218,6 @@ func TestBadDurationIsUsageError(t *testing.T) {
 }
 
 func TestBadRefererPolicyIsUsageError(t *testing.T) {
-	isolatedCwd(t)
 	bad := strings.Replace(baseTOML, `referer_policy = "none"`, `referer_policy = "always"`, 1)
 	_, _, err := Load([]byte(bad), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
@@ -211,7 +226,6 @@ func TestBadRefererPolicyIsUsageError(t *testing.T) {
 }
 
 func TestEmptyDomainsIsUsageError(t *testing.T) {
-	isolatedCwd(t)
 	_, _, err := Load([]byte("schema_version = 1\n[[site]]\nname=\"a\"\n"), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
 		t.Fatalf("domains cannot be empty, err=%v", err)
@@ -219,7 +233,6 @@ func TestEmptyDomainsIsUsageError(t *testing.T) {
 }
 
 func TestDuplicateSiteNameIsUsageError(t *testing.T) {
-	isolatedCwd(t)
 	dup := baseTOML + "\n[[site]]\nname = \"pixeldrain\"\ndomains = [\"x.com\"]\n"
 	_, _, err := Load([]byte(dup), "")
 	if err == nil || !errors.Is(err, ErrUsage) {
@@ -233,7 +246,6 @@ func TestDuplicateSiteNameIsUsageError(t *testing.T) {
 // so a typo like "sign_endpont" would be ignored without any symptom and you
 // would believe the fix you wrote into the config was applied.
 func TestEmbeddedBunkrExtrasAreComplete(t *testing.T) {
-	isolatedCwd(t)
 	cfgs, _, err := Load(Embedded, "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -259,12 +271,11 @@ func TestEmbeddedBunkrExtrasAreComplete(t *testing.T) {
 
 // max_segments is a per-site CEILING; the embedded config has deliberate values.
 func TestEmbeddedMaxSegments(t *testing.T) {
-	isolatedCwd(t)
 	cfgs, _, err := Load(Embedded, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]int{"pixeldrain": 1, "bunkr": 3, "mega": 8}
+	want := map[string]int{"pixeldrain": 1, "bunkr": 1, "mega": 8, "cyberfile": 1}
 	for _, c := range cfgs {
 		if w, ok := want[c.Name]; ok && c.MaxSegments != w {
 			t.Errorf("%s max_segments = %d, want %d", c.Name, c.MaxSegments, w)
@@ -275,12 +286,11 @@ func TestEmbeddedMaxSegments(t *testing.T) {
 // max_connections: the embedded values, the default when unset (files x
 // connections per file), and an external file overriding it like any scalar.
 func TestMaxConnections(t *testing.T) {
-	isolatedCwd(t)
 	cfgs, _, err := Load(Embedded, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]int{"pixeldrain": 3, "bunkr": 6, "mega": 32}
+	want := map[string]int{"pixeldrain": 3, "bunkr": 1, "mega": 32, "cyberfile": 1}
 	for _, c := range cfgs {
 		if w, ok := want[c.Name]; ok && c.MaxConnections != w {
 			t.Errorf("%s max_connections = %d, want %d", c.Name, c.MaxConnections, w)

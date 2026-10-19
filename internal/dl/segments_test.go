@@ -329,6 +329,85 @@ func TestSegmentedResumeContinuesPartialSegments(t *testing.T) {
 	}
 }
 
+// The segment state must never count bytes that aren't on the disk yet: a
+// power cut would leave a state ahead of the pre-sized .part, and its zeros
+// pass every check of a site that gives no hash. So progress is saved only
+// after the data was synced; when syncing fails, none is saved.
+func TestSegmentStateWaitsForDataSync(t *testing.T) {
+	s := newSegServer(t, 1<<20)
+	s.mu.Lock()
+	s.holdAll = make(chan struct{})
+	s.mu.Unlock()
+	out := tempDir(t)
+	d := &Downloader{Client: s.srv.Client(), Segments: 4, MinSegmentSize: 64 << 10}
+	it := segItem(s, "large.bin")
+
+	var syncs atomic.Int32
+	syncFile = func(*os.File) error {
+		syncs.Add(1)
+		return errors.New("sync not possible (test)")
+	}
+	t.Cleanup(func() { syncFile = (*os.File).Sync })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(600 * time.Millisecond); cancel() }()
+	_, err := d.Download(ctx, out, it)
+	s.mu.Lock()
+	close(s.holdAll)
+	s.holdAll = nil
+	s.mu.Unlock()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation: %v", err)
+	}
+	if syncs.Load() == 0 {
+		t.Fatal("the data was never synced")
+	}
+	raw, rerr := os.ReadFile(filepath.Join(out, "large.bin.part.state"))
+	if rerr != nil {
+		t.Fatalf("no segment state: %v", rerr)
+	}
+	var st State
+	_ = json.Unmarshal(raw, &st)
+	if len(st.Segments) == 0 {
+		t.Fatal("the state has no segments")
+	}
+	for _, sg := range st.Segments {
+		if sg.Done != 0 {
+			t.Fatalf("segment %d-%d records %d bytes that were never synced", sg.Start, sg.End, sg.Done)
+		}
+	}
+
+	// With syncing back, the download finishes correctly from that state.
+	syncFile = (*os.File).Sync
+	res, err := d.Download(context.Background(), out, it)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got, _ := os.ReadFile(res.Path); !bytes.Equal(got, s.body) {
+		t.Fatal("content corrupted after resume")
+	}
+}
+
+// Hashing a finished file reads all of it, minutes for a large one: a pause
+// or quit must not wait for the end. The state stays complete, so the next
+// run only hashes again.
+func TestHashFileStopsWhenCanceled(t *testing.T) {
+	p := filepath.Join(tempDir(t), "big.bin")
+	if err := os.WriteFile(p, bytes.Repeat([]byte("x"), 4<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := hashFile(ctx, p, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashFile on a canceled context = %v, want context.Canceled", err)
+	}
+	sum, err := hashFile(context.Background(), p, nil)
+	want := sha256.Sum256(bytes.Repeat([]byte("x"), 4<<20))
+	if err != nil || sum != hex.EncodeToString(want[:]) {
+		t.Fatalf("hashFile = %s, %v", sum, err)
+	}
+}
+
 // If the server changes the file while continuing (If-Range rejected -> 200)
 // the old segments must be discarded and it must start over; the result must
 // still be correct.

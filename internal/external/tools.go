@@ -39,11 +39,16 @@ var ErrUnsupported = errors.New("the tool doesn't support this link")
 
 // Find locates the tools. For each: the path configured in sites.toml (if
 // given it is the only place looked at: a wrong setting should show, not be
-// papered over), then next to Siphon's own executable, then Siphon's tools
-// folder (where "Install tools" puts them), then PATH. Siphon's own copies
-// come before PATH so that an update installed from Siphon isn't shadowed by
-// an older copy elsewhere. Cheap enough to call for every link, so a tool
-// installed while Siphon runs is picked up.
+// papered over), then Siphon's tools folder (where "Install tools" puts
+// them), then PATH. Siphon's own copies come before PATH so that an update
+// installed from Siphon isn't shadowed by an older copy elsewhere. Cheap
+// enough to call for every link, so a tool installed while Siphon runs is
+// picked up.
+//
+// The folder Siphon's executable sits in is NOT looked at, and a configured
+// path must be absolute: either can be a download folder (the command line
+// saves to the working directory by default), and a file Siphon downloaded
+// must never be taken for a tool and run.
 func Find(configured map[string]string) Tools {
 	return Tools{
 		YtDlp:     lookup(configured["yt_dlp"], "yt-dlp"),
@@ -55,19 +60,12 @@ func Find(configured map[string]string) Tools {
 
 func lookup(configured, name string) string {
 	if configured != "" {
-		if isFile(configured) {
+		if filepath.IsAbs(configured) && isFile(configured) {
 			return configured
 		}
 		return ""
 	}
-	var dirs []string
-	if exe, err := os.Executable(); err == nil {
-		dirs = append(dirs, filepath.Dir(exe))
-	}
-	if d, err := ToolsDir(); err == nil {
-		dirs = append(dirs, d)
-	}
-	for _, dir := range dirs {
+	if dir, err := ToolsDir(); err == nil {
 		for _, cand := range []string{name + ".exe", name} {
 			if p := filepath.Join(dir, cand); isFile(p) {
 				return p
@@ -121,9 +119,11 @@ func run(cmd *exec.Cmd, onLine func(string)) (stderrTail string, err error) {
 	if err != nil {
 		return "", err
 	}
-	if err := cmd.Start(); err != nil {
+	release, err := startTree(cmd)
+	if err != nil {
 		return "", err
 	}
+	defer release()
 	sc := bufio.NewScanner(out)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {

@@ -562,12 +562,15 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		}
 	}
 
-	// The subfolder path is built as "Root/Sub"; the downloader turns "/"
-	// into "-" and downloads into a single folder ("Root-Sub"). The structure
-	// information is kept, nested folders are not created. Enough for v1.
+	// The subfolder path is built as "Root/Sub"; the downloader makes a folder
+	// on disk for every level (dl.DirPath).
+	//
+	// Both walks up the parent chain stop after as many steps as there are
+	// nodes: a listing whose parents loop (corrupt, or not from mega) must not
+	// hang resolution.
 	pathOf := func(h string) string {
 		var parts []string
-		for cur := h; cur != ""; {
+		for cur, steps := h, 0; cur != "" && steps <= len(byHandle); steps++ {
 			n, ok := byHandle[cur]
 			if !ok {
 				break
@@ -585,7 +588,7 @@ func (m *mega) listFolder(ctx context.Context, ref megaRef) ([]megaEntry, error)
 		if ref.node == "" {
 			return true
 		}
-		for cur := h; cur != ""; {
+		for cur, steps := h, 0; cur != "" && steps <= len(byHandle); steps++ {
 			if cur == ref.node {
 				return true
 			}

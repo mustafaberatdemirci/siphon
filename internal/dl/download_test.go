@@ -225,8 +225,8 @@ func TestStateSavedForMaxLengthName(t *testing.T) {
 // If a file already exists under the final name and its size DOESN'T MATCH
 // the item's, it is a different file (another album with the same name, the
 // user's own file). Counting it as "already downloaded" and returning success
-// is a silent failure; the error must be visible. If the size matches or is
-// unknown, the old behavior applies: it is skipped.
+// is a silent failure; the error must be visible. If the size matches it is
+// skipped. When the resolver gives no size, the server is asked for it.
 func TestExistingFinalWithDifferentSizeIsAnError(t *testing.T) {
 	srv := rangeServer(t, `"v1"`, nil)
 	out := tempDir(t)
@@ -248,11 +248,46 @@ func TestExistingFinalWithDifferentSizeIsAnError(t *testing.T) {
 		t.Error("the existing file was touched")
 	}
 
-	// With an unknown size (the resolver said -1) there is nothing to compare.
+	// The resolver gives no size (bunkr's single files): the server's size
+	// tells the files apart. It used to count any file there as done.
 	unknown := testItem(srv.URL+"/data.bin", "data.bin")
 	unknown.Size = -1
-	if _, err := d.Download(context.Background(), out, unknown); err != nil {
-		t.Errorf("with an unknown size the existing file should have been skipped: %v", err)
+	if _, err := d.Download(context.Background(), out, unknown); err == nil {
+		t.Error("an existing file of another size counted as done because the resolver gave no size")
+	}
+	if got, _ := os.ReadFile(final); string(got) != "a different file" {
+		t.Error("the existing file was touched")
+	}
+	if err := os.WriteFile(final, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := d.Download(context.Background(), out, unknown); err != nil || res.Path != final {
+		t.Errorf("an existing file of the server's size should have been skipped: %v", err)
+	}
+}
+
+// A server that doesn't say how big the file is can't tell an existing file
+// apart from the one asked for: neither is counted done nor overwritten.
+func TestExistingFinalWithNoSizeAnywhereIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.(http.Flusher).Flush() // chunked: no Content-Length
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+	out := tempDir(t)
+	final := filepath.Join(out, "data.bin")
+	if err := os.WriteFile(final, []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	it := testItem(srv.URL+"/data.bin", "data.bin")
+	it.Size = -1
+	d := &Downloader{Client: srv.Client()}
+	if _, err := d.Download(context.Background(), out, it); err == nil {
+		t.Error("a file that couldn't be compared counted as done")
+	}
+	if got, _ := os.ReadFile(final); string(got) != "mine" {
+		t.Error("the existing file was touched")
 	}
 }
 

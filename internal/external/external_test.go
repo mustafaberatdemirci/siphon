@@ -1,6 +1,7 @@
 package external
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
@@ -156,6 +158,41 @@ func TestGalleryDL(t *testing.T) {
 	}
 }
 
+// Stopping a tool stops what it started too (yt-dlp starts ffmpeg): a pause
+// used to kill the tool alone and leave its child running.
+func TestCancelStopsTheToolsChildren(t *testing.T) {
+	tools, _ := fakeTools(t)
+	beat := filepath.Join(t.TempDir(), "heartbeat")
+	t.Setenv(testutil.FakeToolHeartbeatEnv, beat)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := tools.YtDlpDownload(ctx, "https://v.test/spawn", t.TempDir(), nil)
+		done <- err
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(beat); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the tool's child never started")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the download didn't stop")
+	}
+	time.Sleep(200 * time.Millisecond) // a beat that was already being written
+	before, _ := os.ReadFile(beat)
+	time.Sleep(500 * time.Millisecond)
+	if after, _ := os.ReadFile(beat); !bytes.Equal(before, after) {
+		t.Fatal("the tool's child kept running after the download was stopped")
+	}
+}
+
 // A configured path is the only place looked at: a wrong setting shows as
 // "not installed" instead of quietly using another copy.
 func TestFindConfiguredPath(t *testing.T) {
@@ -163,6 +200,27 @@ func TestFindConfiguredPath(t *testing.T) {
 	got := Find(map[string]string{"yt_dlp": exe, "gallery_dl": filepath.Join(t.TempDir(), "missing.exe")})
 	if got.YtDlp != exe || got.GalleryDL != "" {
 		t.Errorf("Find = %+v", got)
+	}
+}
+
+// A configured path must be absolute: a relative one is resolved against the
+// working directory, which is where the command line saves downloads by
+// default.
+func TestFindIgnoresRelativeConfiguredPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tool.exe"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if got := Find(map[string]string{"yt_dlp": "tool.exe"}); got.YtDlp != "" {
+		t.Errorf("a relative configured path was taken: %q", got.YtDlp)
 	}
 }
 

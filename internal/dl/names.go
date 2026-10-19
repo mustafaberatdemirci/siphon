@@ -120,6 +120,9 @@ func replaceForbidden(name string) string {
 		switch {
 		case r < 0x20, r == 0x7f:
 			// Control characters are dropped entirely; a "-" would only add noise.
+		case isBidiControl(r):
+			// Dropped too: a right-to-left override shows "photo‮gpj.exe"
+			// as "photoexe.jpg", a program dressed up as a picture.
 		case strings.ContainsRune(forbidden, r):
 			b.WriteByte('-')
 		default:
@@ -127,6 +130,21 @@ func replaceForbidden(name string) string {
 		}
 	}
 	return b.String()
+}
+
+// isBidiControl reports the invisible characters that change the display
+// order of text: marks, embeddings, overrides and isolates. Right-to-left
+// letters themselves are not touched.
+func isBidiControl(r rune) bool {
+	switch {
+	case r == 0x061C, r == 0x200E, r == 0x200F:
+		return true
+	case r >= 0x202A && r <= 0x202E:
+		return true
+	case r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }
 
 // escapeReserved prefixes reserved device names with an underscore.
