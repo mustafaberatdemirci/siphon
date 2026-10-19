@@ -27,6 +27,7 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
+	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
 )
@@ -50,6 +51,10 @@ type Options struct {
 	// hits again the command runs again; at most MaxQuotaRounds rounds.
 	OnQuota         string
 	QuotaRetryDelay time.Duration // 0 = 3 s (for the tunnel to settle)
+	// CheckNetwork, if set, is asked after a link fails with a network error
+	// whether the user's network blocks its site (netcheck.Check), once per
+	// host; a blocked one is said so after the error.
+	CheckNetwork func(ctx context.Context, host string) netcheck.Finding
 }
 
 // MaxQuotaRounds is the per-URL upper bound of the quota command + probe +
@@ -273,6 +278,7 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 	if inFlight <= 0 {
 		inFlight = DefaultMaxInFlight
 	}
+	checked := map[string]bool{} // hosts whose network was checked (explainNetwork)
 
 	// The resolvers and the downloader share the same client (and connection pool).
 	httpClient := snet.NewClient()
@@ -334,6 +340,9 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 		}
 		if res.resolveErr != nil {
 			ev.errorf("%s: %v", u, res.resolveErr)
+			if note := explainNetwork(ctx, opt.CheckNetwork, checked, res.resolveErr, u); note != "" {
+				ev.errorf("  %s", note)
+			}
 			if layer, ok := site.LayerOf(res.resolveErr); ok {
 				ev.debugf("  broken layer: %s", layer)
 			}
@@ -589,4 +598,22 @@ func ToolPaths(cfgPath string) map[string]string {
 		}
 	}
 	return nil
+}
+
+// explainNetwork: after a link's network error, the user's network checked
+// on its host (once per host per run); the finding's line when it blocks the
+// site, "" otherwise.
+func explainNetwork(ctx context.Context, check func(context.Context, string) netcheck.Finding, checked map[string]bool, err error, link string) string {
+	if check == nil || !snet.IsTransient(err) {
+		return ""
+	}
+	host := netcheck.HostOfError(err, link)
+	if host == "" || checked[host] {
+		return ""
+	}
+	checked[host] = true
+	if f := check(ctx, host); f.Blocked() {
+		return f.Summary() + " (" + f.Evidence() + ")"
+	}
+	return ""
 }

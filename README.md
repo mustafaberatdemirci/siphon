@@ -407,6 +407,31 @@ single item. The exit code is 1 if any layer failed. `WARN` does not affect
 the exit code; for example, an unknown CDN host is worth knowing about but
 doesn't break anything.
 
+When `DNS`, `TLS` or `Fetch` fails, a `Network` row says whether your own
+network blocks the site, and how:
+
+- **DNS:** your DNS server's answer is compared with a public resolver's
+  (1.1.1.1, asked over HTTPS). It counts as blocked when your DNS gives no
+  address, or one that doesn't serve the site (a provider's block page).
+  Another DNS server, or a VPN, gets around this.
+- **The site's name:** a connection naming the site gets no answer, while the
+  same server answers at once under another name. Something on the way
+  reads the name and drops the connection. Only a VPN, or another network,
+  gets around this.
+
+```
+cyberfile
+  DNS        FAIL  the address isn't the site's (see Network)
+  TLS        FAIL  a handshake naming the site gets no answer (see Network)
+  Fetch      FAIL  failed
+  Network    FAIL  your network blocks cyberfile.me: its DNS gives a wrong address, and connections naming the site are cut; a VPN gets around it, another DNS server alone doesn't
+                     system DNS: 195.175.254.2; public DNS (1.1.1.1): 91.149.226.12
+```
+
+The window version and the command line make the same check when a link
+can't be added, or a download keeps failing, with a network error. They then
+say it in the error or the status line instead of a bare "timeout".
+
 | Flag | Meaning |
 | --- | --- |
 | `-c <file>` | Use this `sites.toml`. |

@@ -14,6 +14,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
+	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
@@ -68,6 +69,10 @@ type Options struct {
 	// single download with "too many connections" (doubled on each
 	// consecutive refusal); 0 means DefaultBusyRetryBase.
 	BusyRetryBase time.Duration
+
+	// CheckNetwork, if set, is asked whether the user's network blocks a
+	// host after a network error (netcheck.Check; netblock.go). Optional.
+	CheckNetwork func(ctx context.Context, host string) netcheck.Finding
 
 	// For tests: if given, the config isn't loaded and these are used.
 	Resolvers []site.Resolver
@@ -132,6 +137,8 @@ type Engine struct {
 	busyFails map[string]int
 	siteCap   map[string]int
 	siteCapAt map[string]time.Time
+	// netChecks: host -> the last network check (netblock.go).
+	netChecks map[string]netCheck
 
 	wake chan struct{}
 
@@ -184,6 +191,7 @@ func New(opt Options) (*Engine, error) {
 		busyFails: map[string]int{},
 		siteCap:   map[string]int{},
 		siteCapAt: map[string]time.Time{},
+		netChecks: map[string]netCheck{},
 	}
 	if e.opt.QuotaProbeEvery <= 0 {
 		e.opt.QuotaProbeEvery = DefaultQuotaProbeEvery
@@ -296,7 +304,7 @@ func (e *Engine) Add(ctx context.Context, rawURL, outDir string) (int, error) {
 	e.scheduleSave()
 	e.kick()
 	if err != nil {
-		return added, err
+		return added, e.withNetworkNote(ctx, err, rawURL)
 	}
 	return added, nil
 }
@@ -782,6 +790,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	var netWait time.Duration
 	netNotice := false
 	var busyNotice string
+	var netCause error // a failure that may be the network blocking the site
 	if still {
 		live.Path, live.Filename = j.Path, j.Filename
 		live.Conns = 0
@@ -852,6 +861,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 			if outcome.Err != nil {
 				live.Error = outcome.Err.Error()
 			}
+			netCause = outcome.Err
 		}
 		if outcome.Kind == run.OutcomeStopped {
 			// A captcha affects THAT SITE (pixeldrain's per-file counter):
@@ -891,6 +901,12 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	}
 	if busyNotice != "" {
 		e.notice(busyNotice)
+	}
+	if netNotice {
+		netCause = outcome.Err
+	}
+	if netCause != nil {
+		e.explainLater(netCause, snap.SourcePage)
 	}
 	e.scheduleSave()
 	e.kick()

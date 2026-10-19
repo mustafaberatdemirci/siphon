@@ -21,6 +21,7 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/doctor"
 	"github.com/mustafaberatdemirci/siphon/internal/external"
+	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
@@ -140,6 +141,8 @@ func runCLI() int {
 		ConfigPath:  cfgPath,
 		ResolveOnly: resolveOnly,
 		OnQuota:     onQuota,
+		// "timeout" alone sends the user looking for the fault in Siphon.
+		CheckNetwork: netcheck.Check,
 	}, log.events())
 	if err != nil {
 		log.errorf("%v", err)
@@ -218,7 +221,7 @@ func runDoctor(args []string) int {
 		if len(want) > 0 && !want[strings.ToLower(name)] {
 			continue
 		}
-		sites = append(sites, doctor.Named{Name: name, Resolver: r})
+		sites = append(sites, doctor.Named{Name: name, Resolver: r, Host: doctor.HostOf(cfgs[i])})
 	}
 	if len(sites) == 0 {
 		log.errorf("no site to diagnose (known: %s)", strings.Join(siteNames(cfgs), ", "))

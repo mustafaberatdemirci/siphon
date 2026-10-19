@@ -29,6 +29,7 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/browser"
 	"github.com/mustafaberatdemirci/siphon/internal/instance"
 	"github.com/mustafaberatdemirci/siphon/internal/logfile"
+	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 )
@@ -114,6 +115,8 @@ func main() {
 		},
 		OnChange: vm.Apply,
 		OnNotice: vm.Notify,
+		// After a network error: is the user's network blocking the site?
+		CheckNetwork: netcheck.Check,
 		// A system notification when the quota runs out: the user gets the
 		// "switch the VPN" news even when not looking at the window; once they
 		// switch, the queue goes on by itself (probing). If the command box is

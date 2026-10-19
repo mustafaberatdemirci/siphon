@@ -60,7 +60,7 @@ func (d *doctorTab) run() {
 			if _, fallback := r.(site.Fallback); fallback {
 				continue // plain file links: no site to diagnose
 			}
-			named = append(named, doctor.Named{Name: cfgs[i].Name, Resolver: r})
+			named = append(named, doctor.Named{Name: cfgs[i].Name, Resolver: r, Host: doctor.HostOf(cfgs[i])})
 		}
 		reports := doctor.Run(context.Background(), named)
 		worst := doctor.Format(&out, reports)

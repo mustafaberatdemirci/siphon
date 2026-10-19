@@ -11,13 +11,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
@@ -25,7 +28,35 @@ import (
 type Named struct {
 	Name     string
 	Resolver site.Resolver
+	// Host is the site's host to check the network against when no failing
+	// layer names one (see HostOf); "" skips that check.
+	Host string
 }
+
+// HostOf is the host a site is diagnosed on: its first canary's, or its
+// first domain without a wildcard.
+func HostOf(cfg site.SiteConfig) string {
+	for _, c := range cfg.CanaryURLs {
+		if u, err := url.Parse(c); err == nil && u.Hostname() != "" {
+			return u.Hostname()
+		}
+	}
+	for _, d := range cfg.Domains {
+		if !strings.Contains(d, "*") {
+			return d
+		}
+	}
+	return ""
+}
+
+// LayerNetwork is doctor's own line: whether the user's network blocks the
+// site (internal/netcheck). It comes after a DNS, TLS or Fetch failure,
+// which on its own says "timeout" and sends the user looking for the fault
+// in Siphon.
+const LayerNetwork site.Layer = "Network"
+
+// checkNetwork is netcheck.Check; tests play a network instead.
+var checkNetwork = netcheck.Check
 
 // Report is the diagnosis result of a single site.
 type Report struct {
@@ -61,9 +92,76 @@ func Run(ctx context.Context, sites []Named) []Report {
 	out := make([]Report, 0, len(sites))
 	for _, s := range sites {
 		res, err := s.Resolver.Diagnose(ctx)
+		if host, ok := networkFailure(res, s.Host); ok {
+			res = withNetwork(res, checkNetwork(ctx, host))
+		}
 		out = append(out, Report{Site: s.Name, Results: res, Err: err})
 	}
 	return out
+}
+
+// networkFailure reports whether a layer the network can break failed, and
+// the host it failed on: the one its evidence names, or fallback.
+func networkFailure(res []site.LayerResult, fallback string) (string, bool) {
+	for _, r := range res {
+		if r.Status != site.StatusFail || (r.Layer != site.LayerDNS && r.Layer != site.LayerTLS && r.Layer != site.LayerFetch) {
+			continue
+		}
+		host := hostIn(r.Evidence)
+		if host == "" {
+			host = fallback
+		}
+		return host, host != ""
+	}
+	return "", false
+}
+
+var (
+	urlIn  = regexp.MustCompile(`https?://[^\s"'()]+`)
+	hostAt = regexp.MustCompile(`^([a-z0-9-]+(\.[a-z0-9-]+)+): `) // DNS evidence: "host: error"
+)
+
+// hostIn finds the host a failure's evidence is about.
+func hostIn(evidence string) string {
+	if m := urlIn.FindString(evidence); m != "" {
+		if u, err := url.Parse(m); err == nil && u.Hostname() != "" {
+			return u.Hostname()
+		}
+	}
+	if m := hostAt.FindStringSubmatch(strings.ToLower(evidence)); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// withNetwork adds the network's line, and corrects the lines a site's
+// diagnosis wrote as OK only because its failure came later: the DNS line
+// when the address is a block page, the TLS line when the handshake is what
+// gets no answer, and the Challenge line then (it couldn't be reached).
+func withNetwork(res []site.LayerResult, f netcheck.Finding) []site.LayerResult {
+	status := site.StatusWarn
+	switch {
+	case f.Blocked():
+		status = site.StatusFail
+	case f.Reached:
+		status = site.StatusOK
+	}
+	out := make([]site.LayerResult, 0, len(res)+1)
+	for _, r := range res {
+		if r.Status == site.StatusOK {
+			switch {
+			case f.DNSBlocked && r.Layer == site.LayerDNS:
+				r.Status, r.Detail = site.StatusFail, "the address isn't the site's (see Network)"
+			case f.NameFiltered && r.Layer == site.LayerTLS:
+				r = site.LayerResult{Layer: site.LayerTLS, Status: site.StatusFail,
+					Detail: "a handshake naming the site gets no answer (see Network)"}
+			case f.NameFiltered && r.Layer == site.LayerChallenge:
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return append(out, site.LayerResult{Layer: LayerNetwork, Status: status, Detail: f.Summary(), Evidence: f.Evidence()})
 }
 
 // Format writes the reports and returns the worst status.

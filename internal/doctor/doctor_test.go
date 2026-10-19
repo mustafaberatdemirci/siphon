@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
@@ -305,5 +306,72 @@ func TestSafeFilename(t *testing.T) {
 		if got := safe(c.in); got != c.want {
 			t.Errorf("safe(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// A layer the network can break failed: the network is checked on the host
+// the failure names, and its line explains the "timeout". The lines written
+// OK only because the failure came later are corrected.
+func TestRunChecksTheNetworkAfterAFailure(t *testing.T) {
+	var asked []string
+	old := checkNetwork
+	checkNetwork = func(_ context.Context, host string) netcheck.Finding {
+		asked = append(asked, host)
+		return netcheck.Finding{Host: host, DNSBlocked: true, NameFiltered: true,
+			SystemIPs: []string{"195.175.254.2"}, PublicIPs: []string{"91.149.226.12"}, Public: "1.1.1.1"}
+	}
+	t.Cleanup(func() { checkNetwork = old })
+
+	blocked := &fakeResolver{results: []site.LayerResult{
+		ok(site.LayerDNS, "1 address"), ok(site.LayerTLS, "handshake OK"), ok(site.LayerChallenge, "no challenge"),
+		{Layer: site.LayerFetch, Status: site.StatusFail, Detail: "failed",
+			Evidence: `Fetch: Get "https://cyberfile.me/": dial tcp 195.175.254.2:443: i/o timeout`},
+	}}
+	fine := &fakeResolver{results: []site.LayerResult{ok(site.LayerDNS, "a"), ok(site.LayerFetch, "200")}}
+	parse := &fakeResolver{results: []site.LayerResult{{Layer: site.LayerParse, Status: site.StatusFail}}}
+	reports := Run(context.Background(), []Named{
+		{Name: "cyberfile", Resolver: blocked, Host: "fallback.example"},
+		{Name: "fine", Resolver: fine, Host: "fine.example"},
+		{Name: "parse", Resolver: parse, Host: "parse.example"},
+	})
+	if strings.Join(asked, ",") != "cyberfile.me" {
+		t.Fatalf("the network was checked for %v, want only cyberfile.me (the failure's host)", asked)
+	}
+	var b bytes.Buffer
+	Format(&b, reports[:1])
+	out := b.String()
+	for _, want := range []string{
+		"DNS        FAIL  the address isn't the site's",
+		"TLS        FAIL  a handshake naming the site gets no answer",
+		"Network    FAIL  your network blocks cyberfile.me",
+		"system DNS: 195.175.254.2; public DNS (1.1.1.1): 91.149.226.12",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Challenge") {
+		t.Errorf("a challenge that was never reached is reported:\n%s", out)
+	}
+}
+
+func TestHostIn(t *testing.T) {
+	for in, want := range map[string]string{
+		`Fetch: Get "https://www.mediafire.com/api/1.4/x.php?a=b": net/http: TLS handshake timeout`: "www.mediafire.com",
+		"bunkr.cr: lookup bunkr.cr: no such host":                                                   "bunkr.cr",
+		"no host in here": "",
+	} {
+		if got := hostIn(in); got != want {
+			t.Errorf("hostIn(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHostOf(t *testing.T) {
+	if got := HostOf(site.SiteConfig{CanaryURLs: []string{"https://www.mediafire.com/file/x"}, Domains: []string{"mediafire.com"}}); got != "www.mediafire.com" {
+		t.Errorf("canary: %q", got)
+	}
+	if got := HostOf(site.SiteConfig{Domains: []string{"bunkr.*", "bunkr.cr"}}); got != "bunkr.cr" {
+		t.Errorf("domains: %q", got)
 	}
 }

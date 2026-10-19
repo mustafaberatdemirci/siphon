@@ -55,6 +55,16 @@ Each version's section is also its release notes on GitHub.
   **Help → Copy diagnostic info** puts its end on the clipboard with the
   version and the queue's numbers per site, for a bug report.
 
+**Blocked sites**
+
+- When a link fails with a network error (a timeout, a connection cut),
+  Siphon checks whether your own network blocks the site and says so: a DNS
+  server that gives a provider's block page instead of the site, or a
+  network that cuts every connection naming the site. It also says what gets
+  around it (another DNS server, or only a VPN). `siphon doctor` shows it as
+  a `Network` row, and no longer reports TLS as OK when the handshake is what
+  got no answer.
+
 **Queue**
 
 - A site's server answering "too many connections" (`503`/`429`) no longer
