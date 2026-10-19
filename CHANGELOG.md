@@ -64,6 +64,11 @@ Each version's section is also its release notes on GitHub.
   seconds, doubling up to 5 minutes) and fails only when the server keeps
   refusing.
 
+**Project**
+
+- A weekly check of the real sites on GitHub (`siphon doctor` and the live
+  tests) opens an issue when one of them changed.
+
 **Fixes**
 
 - Removing a running download and adding the same link right away no longer

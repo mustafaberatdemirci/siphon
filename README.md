@@ -585,6 +585,11 @@ for:
 SIPHON_LIVE=1 go test ./internal/site -run Live -v
 ```
 
+Every Monday the **Sites** workflow runs them together with `siphon doctor`
+on GitHub (or on demand from the Actions tab). A failure opens an issue
+labeled `site-check`, or comments on the one still open. Some sites block
+cloud addresses, so check a failure from a home connection first.
+
 The screenshot and the moving picture above are drawn by tests, off screen,
 with sample jobs; after changing the window, regenerate them with
 `SIPHON_SCREENSHOT=1 go test ./cmd/siphon-gui -run READMEScreenshot` and

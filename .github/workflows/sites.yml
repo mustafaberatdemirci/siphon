@@ -1,0 +1,81 @@
+name: Sites
+
+# Once a week, against the real sites: `siphon doctor` and the live tests.
+# Sites change their pages, APIs and limits without notice; this is meant to
+# find out before a user does. A failure opens an issue labeled site-check,
+# or comments on the one still open.
+#
+# Some sites block or slow down cloud addresses, so a failure here is a lead
+# to check from a home connection, not proof that the site broke.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Exit code 1 means at least one layer FAILed; WARN doesn't count.
+      - name: siphon doctor
+        id: doctor
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          go run . doctor -v 2>&1 | tee doctor.txt
+
+      - name: Live tests
+        id: live
+        continue-on-error: true
+        shell: bash
+        env:
+          SIPHON_LIVE: "1"
+        run: |
+          set -o pipefail
+          go test ./internal/site -run Live -v -count=1 2>&1 | tee live.txt
+
+      - name: Report
+        if: steps.doctor.outcome == 'failure' || steps.live.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DOCTOR: ${{ steps.doctor.outcome }}
+          LIVE: ${{ steps.live.outcome }}
+        run: |
+          section() { # title, file: the end of the output, folded
+            printf '<details><summary>%s</summary>\n\n```\n' "$1"
+            tail -c 25000 "$2" 2>/dev/null
+            printf '\n```\n</details>\n\n'
+          }
+          {
+            printf 'The weekly site check failed on %s: doctor %s, live tests %s.\n\n' \
+              "$(date -u +%Y-%m-%d)" "$DOCTOR" "$LIVE"
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf 'Check from a home connection before changing anything: some sites block cloud addresses.\n\n'
+            section "siphon doctor -v" doctor.txt
+            section "live tests" live.txt
+          } > report.md
+
+          open=$(gh issue list --state open --label site-check --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body-file report.md
+          else
+            gh label create site-check --color d93f0b --description "The weekly site check failed" 2>/dev/null || true
+            gh issue create --title "Weekly site check failed" --label site-check --body-file report.md
+          fi
+          exit 1 # the run shows red too
