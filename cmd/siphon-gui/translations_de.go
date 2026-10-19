@@ -192,4 +192,8 @@ var german = map[string]string{
 	"Siphon's command line program (%s) must be next to this one: the browser starts it.": "Siphons Kommandozeilenprogramm (%s) muss neben diesem liegen: der Browser startet es.",
 	"Watch the clipboard":                       "Zwischenablage überwachen",
 	"the browser folder of the Siphon download": "dem browser-Ordner des Siphon-Downloads",
+
+	// Help → Copy diagnostic info
+	"Copy diagnostic info": "Diagnoseinfos kopieren",
+	"Copied to the clipboard: Siphon's version, your system, the number of downloads per site and the end of the log. Links' keys and tokens and your user folder are left out. Paste it into a bug report on GitHub.": "In die Zwischenablage kopiert: Siphons Version, Ihr System, die Zahl der Downloads je Seite und das Ende des Protokolls. Schlüssel und Tokens von Links sowie Ihr Benutzerordner sind entfernt. Fügen Sie es in einen Fehlerbericht auf GitHub ein.",
 }

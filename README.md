@@ -284,7 +284,7 @@ The menu bar has the rest:
 | --- | --- |
 | Tasks | Add links, Open download folder (the selected download's, or the last finished file's), Settings, Quit. |
 | Downloads | Resume, Pause, Remove, Select all; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
-| Help | Diagnose, Install tools, About Siphon. |
+| Help | Diagnose, Install tools, Copy diagnostic info (the version, your system, the number of downloads per site and the last 200 lines of `siphon.log`, for a bug report; links' keys and tokens and your user folder are left out), About Siphon. |
 
 In **Settings**, changes take effect right away (the language after a
 restart, which Siphon offers to do on the spot):
@@ -550,6 +550,7 @@ embedded copy.
 | `<name>.part`, `<name>.part.state` | Next to the file being downloaded | Partial data and resume state; removed when the file completes. |
 | `done.jsonl` | Output root | Ledger of finished downloads (used to skip them next time). Like `queue.json` it holds the source links, a mega link's key included; a new one is readable by your user only. |
 | `queue.json` | `%AppData%\Siphon\` (the user config folder) | The GUI's queue. It holds the source links, and a mega link includes its key. |
+| `siphon.log`, `siphon.log.1` | `%AppData%\Siphon\` | The window version's log: what each download did, its retries and errors. About 1 MB at most, the older half in `siphon.log.1`. Links' keys, query values (tokens, signed links) and your home folder are taken out before a line is written. |
 | `instance.port` | `%AppData%\Siphon\` | While the window version runs: how a second launch and the browser extension reach it, with a key only your user can read. Removed on exit. |
 | `browser\` | `%AppData%\Siphon\` | Windows only: the browser integration's registration files (**Settings → Browser integration**). |
 | `tools\` | `%AppData%\Siphon\` | The tools installed with **Install tools** (yt-dlp, ffmpeg, gallery-dl, deno). Delete the folder to remove them. |

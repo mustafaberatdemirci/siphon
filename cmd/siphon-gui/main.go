@@ -12,10 +12,12 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/browser"
 	"github.com/mustafaberatdemirci/siphon/internal/instance"
+	"github.com/mustafaberatdemirci/siphon/internal/logfile"
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/run"
 )
@@ -82,10 +85,23 @@ func main() {
 	}
 	defer releaseInstance()
 
+	// The engine's log goes to a file next to the queue file (and stderr),
+	// not the window; the UI already shows errors in the job row (the Error
+	// field) and in the status line. Help → Copy diagnostic info reads it.
+	if statePath != "" {
+		if l, err := logfile.Open(filepath.Join(filepath.Dir(statePath), "siphon.log"), 0); err == nil {
+			appLog = l
+			defer l.Close()
+			log.SetFlags(0)
+			log.SetOutput(io.MultiWriter(os.Stderr, logWriter{l}))
+		} else {
+			log.Printf("could not open the log file: %v", err)
+		}
+	}
+	appLog.Printf("Siphon %s started (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
+
 	vm := newViewModel()
 
-	// The engine's log goes to stderr, not the window; the UI already shows
-	// errors in the job row (the Error field) and in the status line.
 	eng, err := queue.New(queue.Options{
 		StatePath: statePath,
 		// Read here, not in the tab: the engine starts dispatching before the tab
@@ -93,6 +109,8 @@ func main() {
 		MaxActive: a.Preferences().IntWithFallback(prefMaxActive, queue.DefaultMaxActive),
 		Events: run.Events{
 			Errorf: func(f string, a ...any) { log.Printf("ERROR "+f, a...) },
+			Infof:  func(f string, a ...any) { appLog.Printf(f, a...) },
+			Debugf: func(f string, a ...any) { appLog.Printf("debug "+f, a...) },
 		},
 		OnChange: vm.Apply,
 		OnNotice: vm.Notify,

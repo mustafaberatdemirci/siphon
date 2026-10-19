@@ -192,4 +192,8 @@ var turkish = map[string]string{
 	"Siphon's command line program (%s) must be next to this one: the browser starts it.": "Siphon'un komut satırı programı (%s) bu programın yanında olmalı: tarayıcı onu başlatır.",
 	"Watch the clipboard":                       "Panoyu izle",
 	"the browser folder of the Siphon download": "Siphon indirmesindeki browser klasörü",
+
+	// Help → Copy diagnostic info
+	"Copy diagnostic info": "Tanı bilgisini kopyala",
+	"Copied to the clipboard: Siphon's version, your system, the number of downloads per site and the end of the log. Links' keys and tokens and your user folder are left out. Paste it into a bug report on GitHub.": "Panoya kopyalandı: Siphon'un sürümü, sisteminiz, site başına indirme sayıları ve günlüğün sonu. Linklerin anahtarları, tokenlar ve kullanıcı klasörünüz çıkarıldı. GitHub'daki bir hata bildirimine yapıştırın.",
 }

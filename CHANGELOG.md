@@ -48,6 +48,13 @@ Each version's section is also its release notes on GitHub.
 - A new `done.jsonl` is readable by your user only: like the queue file, it
   holds the source links, a mega link's key included.
 
+**Window**
+
+- The window version keeps a log, `siphon.log` next to `queue.json` (about
+  1 MB at most), with links' keys, tokens and your home folder taken out.
+  **Help → Copy diagnostic info** puts its end on the clipboard with the
+  version and the queue's numbers per site, for a bug report.
+
 **Queue**
 
 - A site's server answering "too many connections" (`503`/`429`) no longer

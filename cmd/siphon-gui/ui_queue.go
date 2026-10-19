@@ -321,6 +321,7 @@ func (q *queueTab) mainMenu(quit func()) *fyne.MainMenu {
 	help := []*fyne.MenuItem{
 		item(T("Diagnose…"), theme.InfoIcon(), q.diagnose),
 		item(T("Install tools…"), theme.DownloadIcon(), func() { showInstallTools(q.win, func() {}) }),
+		item(T("Copy diagnostic info"), theme.ContentCopyIcon(), q.copyDiagnostics),
 		fyne.NewMenuItemSeparator(),
 		item(T("About Siphon"), theme.HelpIcon(), q.showAbout),
 	}
