@@ -15,6 +15,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 )
 
 // Installing the tools is the user's choice, never automatic: "Install
@@ -348,12 +350,12 @@ func replace(src, dst string) error {
 	old := dst + ".old"
 	_ = os.Remove(old)
 	if _, err := os.Stat(dst); err == nil {
-		if err := os.Rename(dst, old); err != nil {
+		if err := fsx.Rename(dst, old); err != nil {
 			return err
 		}
 	}
-	if err := os.Rename(src, dst); err != nil {
-		_ = os.Rename(old, dst) // put the previous one back
+	if err := fsx.Rename(src, dst); err != nil {
+		_ = fsx.Rename(old, dst) // put the previous one back
 		return err
 	}
 	_ = os.Chmod(dst, 0o755)

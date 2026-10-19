@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
@@ -504,7 +505,7 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 		return Result{}, fmt.Errorf("%w: expected %s, computed %s (%s) — .part deleted, can be retried",
 			ErrSHA256Mismatch, item.SHA256, sum, filepath.Base(final))
 	}
-	if err := os.Rename(part, final); err != nil {
+	if err := fsx.Rename(part, final); err != nil {
 		return Result{}, fmt.Errorf("rename: %w", err)
 	}
 	_ = os.Remove(statePath)
@@ -986,7 +987,7 @@ func saveState(path string, st State, hasher hash.Hash) {
 	if os.WriteFile(tmp, data, 0o644) != nil {
 		return
 	}
-	_ = os.Rename(tmp, path)
+	_ = fsx.Rename(tmp, path)
 }
 
 // stateTmpPath is the temp file name for the state's atomic write. It must

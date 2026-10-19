@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 )
 
 // DefaultMax is the size at which the log moves to <name>.1 and starts over.
@@ -94,7 +96,7 @@ func (l *File) rotate() {
 	l.f = nil
 	old := l.path + ".1"
 	_ = os.Remove(old)
-	if err := os.Rename(l.path, old); err != nil {
+	if err := fsx.Rename(l.path, old); err != nil {
 		// Can't move it (another program has it open): start it over instead
 		// of growing without end.
 		_ = os.Truncate(l.path, 0)

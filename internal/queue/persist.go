@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 )
 
 // stateVersion is the format version of the queue file. An unknown version
@@ -58,7 +60,7 @@ func save(path string, jobs []*Job) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return fsx.Rename(tmp, path)
 }
 
 // DefaultStatePath is the default location of the queue file: the user's

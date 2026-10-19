@@ -129,6 +129,10 @@ Each version's section is also its release notes on GitHub.
   longer waits for the check to finish.
 - The same link saved into two folders at once shows each download's
   progress in its own row.
+- On Windows, a finished download no longer fails, and a saved state is
+  no longer lost, when another program (an antivirus scanning the file it
+  just saw closed, the search indexer) holds the file for a moment: the
+  rename is retried for up to 2 seconds.
 - The window version and the command line recognize each other's finished
   downloads in the same folder when a file's name had to be changed for the
   disk: the window version recorded it under the changed name.

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 )
 
 // GofileName is the registry key.
@@ -296,7 +298,7 @@ func (g *gofile) saveGuest(tok string) {
 	if os.WriteFile(tmp, data, 0o600) != nil {
 		return
 	}
-	if os.Rename(tmp, p) != nil {
+	if fsx.Rename(tmp, p) != nil {
 		_ = os.Remove(tmp)
 	}
 }

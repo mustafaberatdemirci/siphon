@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
@@ -598,7 +599,7 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		return Result{}, fmt.Errorf("%w: expected %s, computed %s (%s) — .part deleted, can be retried",
 			ErrSHA256Mismatch, it.SHA256, sum, filepath.Base(final))
 	}
-	if err := os.Rename(part, final); err != nil {
+	if err := fsx.Rename(part, final); err != nil {
 		return Result{}, fmt.Errorf("rename: %w", err)
 	}
 	_ = os.Remove(statePath)
