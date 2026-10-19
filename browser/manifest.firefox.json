@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Siphon",
+  "version": "0.1.2",
+  "description": "Send links, a page's file links and downloads to Siphon.",
+  "icons": {
+    "128": "icon.png"
+  },
+  "action": {
+    "default_title": "Send this page's file links to Siphon",
+    "default_icon": "icon.png"
+  },
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "permissions": [
+    "contextMenus",
+    "nativeMessaging",
+    "downloads",
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
+  "options_ui": {
+    "page": "options.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "siphon@mustafaberatdemirci.github.io",
+      "strict_min_version": "128.0"
+    }
+  }
+}

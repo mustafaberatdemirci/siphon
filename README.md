@@ -341,13 +341,14 @@ To set the extension up:
    a small file in `%AppData%\Siphon\browser` and a registry entry under
    your user on Windows, a file in each browser's profile folder on Linux
    and macOS. Only the Siphon extension can start it; web pages can't.
-2. Load the extension from the `browser` folder next to Siphon:
+2. Load the extension from the `browser` folder next to Siphon, which has
+   one for each kind of browser:
    - **Chrome, Edge, Brave**: open the extensions page (`chrome://extensions`,
      `edge://extensions`), turn on **Developer mode**, choose **Load
-     unpacked** and pick the folder.
+     unpacked** and pick `browser/chromium`.
    - **Firefox**: open `about:debugging`, **This Firefox**, **Load Temporary
-     Add-on…**, and pick `manifest.json` in the folder. A temporary add-on
-     stays until Firefox restarts.
+     Add-on…**, and pick `manifest.json` in `browser/firefox`. A temporary
+     add-on stays until Firefox restarts.
 3. The extension's **Options** page has **Check the connection to Siphon**.
 
 If Siphon isn't running, the extension starts it. **Remove** in Settings
@@ -577,6 +578,11 @@ with sample jobs; after changing the window, regenerate them with
 `SIPHON_SOCIAL=1 go test ./cmd/siphon-gui -run SocialPreview` redraws
 `docs/social-preview.png`, the card shown where the repository's link is
 shared; upload it in the repository's settings (Social preview).
+
+**The browser extension** lives in `browser/`: one set of scripts and a
+manifest for each kind of browser (Chromium and Firefox read the background
+script differently). `sh browser/pack.sh <folder>` builds both into
+`<folder>/chromium` and `<folder>/firefox`, the way the release packs them.
 
 **Translations.** The window's texts are written in English in the code and
 wrapped in `T(...)` (or `Tf(...)` with format verbs); the English text is the

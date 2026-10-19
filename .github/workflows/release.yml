@@ -67,7 +67,7 @@ jobs:
           # -H=windowsgui: no console window behind the window.
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -H=windowsgui" -o "dist/$name/siphon-gui.exe" ./cmd/siphon-gui
           cp LICENSE README.md "dist/$name/"
-          cp -r browser "dist/$name/"
+          sh browser/pack.sh "dist/$name/browser"
           cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
 
       - name: Build (Linux)
@@ -79,7 +79,7 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon" .
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon-gui" ./cmd/siphon-gui
           cp LICENSE README.md "dist/$name/"
-          cp -r browser "dist/$name/"
+          sh browser/pack.sh "dist/$name/browser"
           cp docs/icon.png "dist/$name/siphon.png"
           cd dist && tar czf "$name.tar.gz" "$name"
 
@@ -133,7 +133,7 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep "$app"
           cp LICENSE README.md "dist/$name/"
-          cp -r browser "dist/$name/"
+          sh browser/pack.sh "dist/$name/browser"
           # ditto keeps the app bundle intact; a .zip is what Finder opens.
           cd dist && ditto -c -k --keepParent "$name" "$name.zip"
 

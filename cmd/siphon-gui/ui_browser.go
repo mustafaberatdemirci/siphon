@@ -49,10 +49,11 @@ func hostPath() string {
 	return ""
 }
 
-// extensionDir is the extension's folder shipped with Siphon, "" if missing.
+// extensionDir is the folder of the extensions shipped with Siphon (one per
+// browser kind, browser/pack.sh makes them), "" if missing.
 func extensionDir() string {
 	p := filepath.Join(shippedDir(), "browser")
-	if _, err := os.Stat(filepath.Join(p, "manifest.json")); err == nil {
+	if _, err := os.Stat(filepath.Join(p, "chromium", "manifest.json")); err == nil {
 		return p
 	}
 	return ""
@@ -106,9 +107,8 @@ func (q *queueTab) installBrowser() {
 	if ext == "" {
 		ext = T("the browser folder of the Siphon download")
 	}
-	showInfo(T("Browser integration"), Tf("Installed for %s.\n\n"+
-		"Now load the Siphon extension from this folder:\n%s\n\n"+
-		"Chrome, Edge, Brave: open the extensions page (chrome://extensions), turn on Developer mode, choose Load unpacked and pick the folder.\n\n"+
-		"Firefox: open about:debugging, This Firefox, Load Temporary Add-on, and pick manifest.json in the folder (it stays until Firefox restarts).",
-		strings.Join(names, ", "), ext), q.win)
+	showInfo(T("Browser integration"), Tf("Installed for %s. Now load the Siphon extension.\n\n"+
+		"Chrome, Edge, Brave: open the extensions page (chrome://extensions), turn on Developer mode, choose Load unpacked and pick this folder:\n%s\n\n"+
+		"Firefox: open about:debugging, This Firefox, Load Temporary Add-on, and pick manifest.json in this folder (it stays until Firefox restarts):\n%s",
+		strings.Join(names, ", "), filepath.Join(ext, "chromium"), filepath.Join(ext, "firefox")), q.win)
 }
