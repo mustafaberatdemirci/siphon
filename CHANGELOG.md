@@ -53,6 +53,12 @@ Each version's section is also its release notes on GitHub.
 
 **Window**
 
+- **The queue's order can be changed**: Move to top, up, down or to the
+  bottom (right-click, the Downloads menu, or Ctrl+Home, Ctrl+Up, Ctrl+Down,
+  Ctrl+End). The order is the order downloads start in, and it is kept
+  across restarts.
+- **A search box** above the queue (Ctrl+F) shows only the rows with every
+  word typed in their name or folder.
 - A system notification when the downloads finish: how many files came,
   and how many failed. **Settings → Notify when downloads finish** turns it
   off.

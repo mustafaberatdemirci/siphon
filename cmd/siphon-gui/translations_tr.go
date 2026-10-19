@@ -217,4 +217,11 @@ var turkish = map[string]string{
 	"Notify when downloads finish":     "İndirmeler bitince bildir",
 	"A system notification once nothing is left to download: how many files came, and how many failed.":               "İndirilecek bir şey kalmayınca bir sistem bildirimi: kaç dosya indi, kaçı hatalı.",
 	"No links found in %s. Siphon takes links from text files (.txt), link shortcuts (.url) and saved pages (.html).": "%s içinde link bulunamadı. Siphon linkleri metin dosyalarından (.txt), link kısayollarından (.url) ve kaydedilmiş sayfalardan (.html) alır.",
+
+	// Queue order, search
+	"Move to top":    "En üste taşı",
+	"Move up":        "Yukarı taşı",
+	"Move down":      "Aşağı taşı",
+	"Move to bottom": "En alta taşı",
+	"Search":         "Ara",
 }

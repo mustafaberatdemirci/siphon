@@ -217,4 +217,11 @@ var german = map[string]string{
 	"Notify when downloads finish":     "Benachrichtigen, wenn Downloads fertig sind",
 	"A system notification once nothing is left to download: how many files came, and how many failed.":               "Eine Systembenachrichtigung, sobald nichts mehr herunterzuladen ist: wie viele Dateien kamen und wie viele fehlschlugen.",
 	"No links found in %s. Siphon takes links from text files (.txt), link shortcuts (.url) and saved pages (.html).": "Keine Links in %s gefunden. Siphon nimmt Links aus Textdateien (.txt), Link-Verknüpfungen (.url) und gespeicherten Seiten (.html).",
+
+	// Queue order, search
+	"Move to top":    "Ganz nach oben",
+	"Move up":        "Nach oben",
+	"Move down":      "Nach unten",
+	"Move to bottom": "Ganz nach unten",
+	"Search":         "Suchen",
 }

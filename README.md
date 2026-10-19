@@ -270,6 +270,12 @@ failed), and **Finished**.
   any has a partial file, Siphon asks first and offers to delete it.
 - **Double-click** a finished row to show the file in its folder, a failed
   one to read the whole error.
+- **Change the order** with **Move to top / up / down / to bottom** in the
+  right-click menu, or Ctrl+Home, Ctrl+Up, Ctrl+Down, Ctrl+End. The queue's
+  order is the order downloads start in: a file moved to the top gets the
+  next free slot, before an album added earlier. Running downloads go on.
+- **Search** with the box at the right of the toolbar (Ctrl+F): only the
+  rows with every word typed in their name or folder are shown.
 
 The toolbar has:
 
@@ -287,7 +293,7 @@ The menu bar has the rest:
 | Menu | Items |
 | --- | --- |
 | Tasks | Add links, Open download folder (the selected download's, or the last finished file's), Settings, Quit. |
-| Downloads | Resume, Pause, Remove, Select all; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
+| Downloads | Resume, Pause, Remove, Select all; Move to top, up, down, to bottom; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
 | Help | Diagnose, Install tools, Check for updates (asks now), Copy diagnostic info (the version, your system, the number of downloads per site and the last 200 lines of `siphon.log`, for a bug report; links' keys and tokens and your user folder are left out), About Siphon. |
 
 In **Settings**, changes take effect right away (the language after a

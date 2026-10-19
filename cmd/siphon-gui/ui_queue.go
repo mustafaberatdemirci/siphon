@@ -75,6 +75,8 @@ type queueTab struct {
 	// pending are links that couldn't be added: the Add dialog opens with
 	// them, so the user fixes them instead of copying them again.
 	pending string
+	// search is the box that filters the rows by name (search.go).
+	search *widget.Entry
 	// addEntry is the open Add dialog's link box; nil when it is closed.
 	addEntry *widget.Entry
 	// adding counts the link batches being resolved; while it is above zero
@@ -131,8 +133,10 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.clearDone = newToolItem(T("Clear done"), theme.ContentClearIcon(), q.clearFinished)
 	settings := newToolItem(T("Settings"), theme.SettingsIcon(), q.showSettings)
 	diagnose := newToolItem(T("Diagnose"), theme.InfoIcon(), q.diagnose)
-	toolbar := container.NewHBox(q.addBtn, toolGap(), q.resumeSel, q.pauseSel, q.removeSel, toolGap(),
-		q.pauseAll, q.clearDone, toolGap(), settings, diagnose)
+	toolbar := container.NewBorder(nil, nil,
+		container.NewHBox(q.addBtn, toolGap(), q.resumeSel, q.pauseSel, q.removeSel, toolGap(),
+			q.pauseAll, q.clearDone, toolGap(), settings, diagnose),
+		q.newSearch())
 
 	// --- Quota banner ---
 	// Sits above the table while jobs wait for quota; independent of the
@@ -201,6 +205,7 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	root := container.NewBorder(top, bottom, nil, nil, body)
 
 	q.bindKeys()
+	q.bindMoveKeys()
 	q.render()
 	q.tree.OpenAllBranches()
 	q.tree.Select(q.cat)
@@ -303,6 +308,10 @@ func (q *queueTab) mainMenu(quit func()) *fyne.MainMenu {
 		item(T("Remove"), theme.DeleteIcon(), q.removeSelected),
 		item(T("Select all"), nil, q.selectAll),
 		fyne.NewMenuItemSeparator(),
+	}
+	downloads = append(downloads, q.moveItems(false)...)
+	downloads = append(downloads, []*fyne.MenuItem{
+		fyne.NewMenuItemSeparator(),
 		item(T("Resume all"), theme.MediaPlayIcon(), func() {
 			q.eng.ResumeAll()
 			q.vm.Replace(q.eng.Jobs())
@@ -317,7 +326,7 @@ func (q *queueTab) mainMenu(quit func()) *fyne.MainMenu {
 		item(T("Retry failed"), theme.ViewRefreshIcon(), q.retryFailed),
 		item(T("Clear finished"), theme.ContentClearIcon(), q.clearFinished),
 		item(T("Cancel all…"), theme.CancelIcon(), q.confirmCancelAll),
-	}
+	}...)
 	help := []*fyne.MenuItem{
 		item(T("Diagnose…"), theme.InfoIcon(), q.diagnose),
 		item(T("Install tools…"), theme.DownloadIcon(), func() { showInstallTools(q.win, func() {}) }),
@@ -391,7 +400,7 @@ func (q *queueTab) refreshLoop() {
 // render takes a fresh picture of the queue and redraws what depends on it.
 // UI thread only.
 func (q *queueTab) render() {
-	q.visible = q.vm.ViewCategory(categoryOf(q.cat), q.order)
+	q.visible = filterRows(q.vm.ViewCategory(categoryOf(q.cat), q.order), searchWords(q.search.Text))
 	q.visibleIDs = q.visibleIDs[:0]
 	for _, r := range q.visible {
 		q.visibleIDs = append(q.visibleIDs, r.Job.ID)
@@ -559,8 +568,11 @@ func (q *queueTab) rowMenu() *fyne.Menu {
 		q.sel.all(q.visibleIDs)
 		q.renderSelection()
 	})
-	return fyne.NewMenu("", resume, pause, fyne.NewMenuItemSeparator(),
-		show, showErr, copyLinks, fyne.NewMenuItemSeparator(), remove, fyne.NewMenuItemSeparator(), selectAll)
+	items := []*fyne.MenuItem{resume, pause, fyne.NewMenuItemSeparator(),
+		show, showErr, copyLinks, fyne.NewMenuItemSeparator()}
+	items = append(items, q.moveItems(false)...)
+	items = append(items, fyne.NewMenuItemSeparator(), remove, fyne.NewMenuItemSeparator(), selectAll)
+	return fyne.NewMenu("", items...)
 }
 
 func (q *queueTab) resumeSelected() {
