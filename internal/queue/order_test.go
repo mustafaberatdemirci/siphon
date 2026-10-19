@@ -71,6 +71,9 @@ func TestOrderDecidesWhatStartsNext(t *testing.T) {
 		if _, err := h.e.Add(context.Background(), "file://"+n, h.out); err != nil {
 			t.Fatal(err)
 		}
+		// Apart in time, as added by hand: the queue file used to be written
+		// in the order jobs were added, and c moved back to the end.
+		time.Sleep(20 * time.Millisecond)
 	}
 	h.e.MoveToTop(ids(h.e, "c"))
 	h.e.flush()

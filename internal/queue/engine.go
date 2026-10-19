@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -777,7 +776,8 @@ func (e *Engine) flush() {
 		jobs[i] = &c
 	}
 	e.mu.Unlock()
-	sort.SliceStable(jobs, func(a, b int) bool { return jobs[a].AddedAt.Before(jobs[b].AddedAt) })
+	// In the queue's order, which the user may have changed (order.go): it
+	// is the order jobs start in after a restart too.
 	if err := save(e.opt.StatePath, jobs); err != nil {
 		e.opt.Events.Errorf("could not write the queue: %v", err)
 	}
