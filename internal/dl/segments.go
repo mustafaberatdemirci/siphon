@@ -796,6 +796,11 @@ func (e *overloadedError) Retryable() bool { return true }
 func isOverloaded(err error) bool          { var o *overloadedError; return errors.As(err, &o) }
 func firstLineOf(err error) string         { return firstLine(err.Error()) }
 
+// IsOverloaded reports whether err (a download's, its retries spent) says
+// the server answered "too many connections" (503 or 429): the queue then
+// runs fewer of the site's downloads at once instead of failing them.
+func IsOverloaded(err error) bool { return isOverloaded(err) }
+
 // firstLine is the first line of a multi-line error message (so a log line stays one line).
 func firstLine(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {

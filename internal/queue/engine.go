@@ -64,6 +64,11 @@ type Options struct {
 	// means DefaultNetRetryBase.
 	NetRetryBase time.Duration
 
+	// BusyRetryBase is the first wait for a site whose server refuses even a
+	// single download with "too many connections" (doubled on each
+	// consecutive refusal); 0 means DefaultBusyRetryBase.
+	BusyRetryBase time.Duration
+
 	// For tests: if given, the config isn't loaded and these are used.
 	Resolvers []site.Resolver
 	Configs   []site.SiteConfig
@@ -120,6 +125,13 @@ type Engine struct {
 	// Network outage: site -> jobs aren't started until this moment / consecutive error count.
 	netBackoffUntil map[string]time.Time
 	netFails        map[string]int
+	// Busy servers (busy.go): site -> jobs aren't started until this moment /
+	// consecutive refusals; and the lowered number of the site's jobs that
+	// may run at once / when it last changed.
+	busyUntil map[string]time.Time
+	busyFails map[string]int
+	siteCap   map[string]int
+	siteCapAt map[string]time.Time
 
 	wake chan struct{}
 
@@ -167,12 +179,20 @@ func New(opt Options) (*Engine, error) {
 		quotaNotified:   map[string]time.Time{},
 		netBackoffUntil: map[string]time.Time{},
 		netFails:        map[string]int{},
+
+		busyUntil: map[string]time.Time{},
+		busyFails: map[string]int{},
+		siteCap:   map[string]int{},
+		siteCapAt: map[string]time.Time{},
 	}
 	if e.opt.QuotaProbeEvery <= 0 {
 		e.opt.QuotaProbeEvery = DefaultQuotaProbeEvery
 	}
 	if e.opt.NetRetryBase <= 0 {
 		e.opt.NetRetryBase = DefaultNetRetryBase
+	}
+	if e.opt.BusyRetryBase <= 0 {
+		e.opt.BusyRetryBase = DefaultBusyRetryBase
 	}
 	if e.client == nil {
 		e.client = snet.NewClient()
@@ -335,6 +355,7 @@ func (e *Engine) Resume(id string) {
 	delete(e.captchaHold, j.Site)
 	delete(e.netFails, j.Site)
 	delete(e.netBackoffUntil, j.Site)
+	e.clearBusy(j.Site)
 	snap := *j
 	e.mu.Unlock()
 	e.changed(snap)
@@ -438,6 +459,8 @@ func (e *Engine) CancelAll(deleteFiles bool) int {
 	e.probeItem = map[string]site.Item{}
 	e.netBackoffUntil = map[string]time.Time{}
 	e.netFails = map[string]int{}
+	e.busyUntil = map[string]time.Time{}
+	e.busyFails = map[string]int{}
 	e.mu.Unlock()
 
 	for _, p := range wipe {
@@ -652,9 +675,11 @@ func (e *Engine) nextRetry() (time.Time, bool) {
 		}
 	}
 	now := time.Now()
-	for _, until := range e.netBackoffUntil {
-		if until.After(now) && (next.IsZero() || until.Before(next)) {
-			next = until
+	for _, holds := range []map[string]time.Time{e.netBackoffUntil, e.busyUntil} {
+		for _, until := range holds {
+			if until.After(now) && (next.IsZero() || until.Before(next)) {
+				next = until
+			}
 		}
 	}
 	return next, !next.IsZero()
@@ -699,7 +724,7 @@ func (e *Engine) dispatch(ctx context.Context) {
 		if _, busy := e.active[j.ID]; busy {
 			continue
 		}
-		if e.captchaHold[j.Site] || e.netHeld(j.Site, now) {
+		if e.captchaHold[j.Site] || e.netHeld(j.Site, now) || e.busyHeld(j.Site, now) {
 			continue
 		}
 		w, ok := e.workers[j.Site]
@@ -709,7 +734,7 @@ func (e *Engine) dispatch(ctx context.Context) {
 			failed = append(failed, *j)
 			continue
 		}
-		if c := w.Cfg.MaxConcurrent; c > 0 && perSite[j.Site] >= c {
+		if c := e.siteLimit(j.Site, w.Cfg.MaxConcurrent, now); c > 0 && perSite[j.Site] >= c {
 			continue
 		}
 		perSite[j.Site]++
@@ -756,6 +781,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	quotaHit := false
 	var netWait time.Duration
 	netNotice := false
+	var busyNotice string
 	if still {
 		live.Path, live.Filename = j.Path, j.Filename
 		live.Conns = 0
@@ -773,6 +799,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 			}
 			live.FinishedAt = time.Now()
 			live.Error = ""
+			e.clearBusy(live.Site)
 			extra = e.releaseSite(live.Site, started)
 		case run.OutcomeSkipped:
 			live.State = StateSkipped
@@ -808,6 +835,16 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 					live.State = StateQueued
 					live.Error = ""
 					netWait, netNotice = wait, fresh
+					break
+				}
+			}
+			// The server said "too many connections" through all the
+			// retries: run fewer of the site's jobs at once, or wait for it.
+			if dl.IsOverloaded(outcome.Err) {
+				if keep, msg := e.overloaded(live, time.Now()); keep {
+					live.State = StateQueued
+					live.Error = ""
+					busyNotice = msg
 					break
 				}
 			}
@@ -851,6 +888,9 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	if netNotice {
 		e.notice(fmt.Sprintf("%s: network unreachable (%s); retrying in %s.",
 			snap.Site, firstLineOf(outcome.Err.Error()), humanWait(netWait)))
+	}
+	if busyNotice != "" {
+		e.notice(busyNotice)
 	}
 	e.scheduleSave()
 	e.kick()
@@ -935,6 +975,7 @@ func (e *Engine) RetryFailed() {
 			j.Error = ""
 			delete(e.netFails, j.Site)
 			delete(e.netBackoffUntil, j.Site)
+			e.clearBusy(j.Site)
 			snaps = append(snaps, *j)
 		}
 	}

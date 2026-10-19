@@ -69,7 +69,8 @@ To build it yourself instead, see [Building](#building).
   once (4 by default), and a large file is split into chunks fetched over
   several connections. A connection that finishes its chunk takes the next
   one, so all of them stay busy until the end of the file. The number of
-  connections drops by itself when a server answers `503`/`429`. See
+  connections drops by itself when a server answers `503`/`429`, and so
+  does the number of a site's files downloading at once. See
   [Connections per file](#connections-per-file).
 - **Integrity checks.** Every file is hashed with SHA-256, and compared with
   the site's hash when it gives one. mega files are also checked against
@@ -447,6 +448,18 @@ Even within the ceiling, a file gets fewer connections in these cases:
   free up.
 - The server pushes back with `503`/`429`. Parallelism then drops by one per
   complaint.
+
+When a file's download still gets `503`/`429` after its retries, the window
+version doesn't count it as failed:
+
+- If other files of the same site were downloading, the server allows fewer
+  at once. The queue downloads that many of the site's files from then on
+  and puts the file back in line. Every 15 minutes it tries one more, up to
+  the site's `max_concurrent`, since sites loosen their limits too.
+- If it was the only one, the server is busy. The site's downloads wait 30
+  seconds, then 1, 2, 4 and 5 minutes; a file fails only when the server
+  still refuses after that. **Resume** or **Retry failed** tries again at
+  once.
 
 Each running row shows how many connections its download really has (for
 example `8 connections`), so you can see the effective value.

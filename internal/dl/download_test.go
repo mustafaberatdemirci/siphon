@@ -642,3 +642,34 @@ func TestPlanMatchesDownloadPath(t *testing.T) {
 		t.Fatalf("Plan said %q, Download wrote %q", planned, res.Path)
 	}
 }
+
+// 503 and 429 tell the queue "too many connections" (it runs fewer of the
+// site's downloads); another 5xx is only transient, and a 4xx is final.
+func TestServerRefusalsAreTold(t *testing.T) {
+	for _, tc := range []struct {
+		status          int
+		overloaded, try bool
+	}{
+		{http.StatusServiceUnavailable, true, true},
+		{http.StatusTooManyRequests, true, true},
+		{http.StatusInternalServerError, false, true},
+		{http.StatusNotFound, false, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "no", tc.status)
+		}))
+		d := &Downloader{Client: srv.Client()}
+		_, err := d.Download(context.Background(), tempDir(t), testItem(srv.URL+"/data.bin", "data.bin"))
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%d: no error", tc.status)
+		}
+		if got := IsOverloaded(err); got != tc.overloaded {
+			t.Errorf("%d: IsOverloaded = %v, want %v (%v)", tc.status, got, tc.overloaded, err)
+		}
+		var rt interface{ Retryable() bool }
+		if got := errors.As(err, &rt) && rt.Retryable(); got != tc.try {
+			t.Errorf("%d: retryable = %v, want %v (%v)", tc.status, got, tc.try, err)
+		}
+	}
+}

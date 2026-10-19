@@ -48,6 +48,15 @@ Each version's section is also its release notes on GitHub.
 - A new `done.jsonl` is readable by your user only: like the queue file, it
   holds the source links, a mega link's key included.
 
+**Queue**
+
+- A site's server answering "too many connections" (`503`/`429`) no longer
+  fails downloads. If other files of the site were downloading, the queue
+  downloads fewer of them at once from then on (one more every 15 minutes,
+  up to the site's limit); if the file was alone, the site waits a while (30
+  seconds, doubling up to 5 minutes) and fails only when the server keeps
+  refusing.
+
 **Fixes**
 
 - Removing a running download and adding the same link right away no longer

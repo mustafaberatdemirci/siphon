@@ -759,10 +759,14 @@ func (d *Downloader) attempt(
 				return false, st, nil, cerr
 			}
 		}
+		// 503 and 429 say "too many connections" (the queue then runs fewer
+		// downloads of the site); other 5xx are server side, transient. The
+		// rest of 4xx is our fault; retrying brings the same answer.
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+			return false, st, nil, &overloadedError{status: resp.StatusCode}
+		}
 		err := fmt.Errorf("%s: HTTP %s", it.URL, resp.Status)
-		// 5xx and 429 are server side, transient. The rest of 4xx is our
-		// fault; retrying brings the same answer.
-		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode >= 500 {
 			return false, st, nil, Retryable(err)
 		}
 		return false, st, nil, err

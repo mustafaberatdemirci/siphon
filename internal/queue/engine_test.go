@@ -44,6 +44,10 @@ type fakeSite struct {
 	// gen plays mega's IP-bound URLs: a URL handed out before the last
 	// switchIP (an older ?gen=) is answered with 403.
 	gen int
+	// connLimit, if set, answers 503 to a request while that many are being
+	// served (bunkr's and cyberfile's one connection per IP); busy answers
+	// 503 to the next that many requests (a busy server).
+	connLimit, inflight, busy int
 }
 
 func newFakeSite(t *testing.T, names ...string) *fakeSite {
@@ -86,7 +90,23 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	delay := f.delay
 	forbid := f.forbid[name]
 	quota := f.quota
+	overloaded := f.busy > 0 || f.connLimit > 0 && f.inflight >= f.connLimit
+	if f.busy > 0 {
+		f.busy--
+	}
+	if !overloaded {
+		f.inflight++
+	}
 	f.mu.Unlock()
+	if overloaded {
+		http.Error(w, "Service Temporarily Unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() {
+		f.mu.Lock()
+		f.inflight--
+		f.mu.Unlock()
+	}()
 	if stale {
 		http.Error(w, "URL bound to another IP", http.StatusForbidden)
 		return
@@ -325,8 +345,13 @@ type harness struct {
 
 func newHarness(t *testing.T, f *fakeSite, statePath string, maxActive int) *harness {
 	t.Helper()
+	return newHarnessWith(t, f, statePath, maxActive, site.SiteConfig{Name: "fake", MaxConcurrent: 8, MaxRetries: 2}.WithDefaults())
+}
+
+// newHarnessWith is newHarness with the fake site's own config.
+func newHarnessWith(t *testing.T, f *fakeSite, statePath string, maxActive int, cfg site.SiteConfig) *harness {
+	t.Helper()
 	h := &harness{t: t, f: f, out: testutil.TempDir(t), state: statePath}
-	cfg := site.SiteConfig{Name: "fake", MaxConcurrent: 8, MaxRetries: 2}.WithDefaults()
 	e, err := New(Options{
 		StatePath: statePath,
 		MaxActive: maxActive,
