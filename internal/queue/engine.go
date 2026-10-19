@@ -265,6 +265,7 @@ func (e *Engine) Add(ctx context.Context, rawURL, outDir string) (int, error) {
 			OutDir:     outDir,
 			Dir:        it.Dir,
 			Filename:   it.Filename,
+			Name:       it.Filename,
 			Size:       it.Size,
 			Index:      it.Index,
 			State:      StateQueued,
@@ -792,7 +793,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	var busyNotice string
 	var netCause error // a failure that may be the network blocking the site
 	if still {
-		live.Path, live.Filename = j.Path, j.Filename
+		live.Path, live.Filename, live.Name = j.Path, j.Filename, j.Name
 		live.Conns = 0
 		if j.Size > 0 {
 			live.Size = j.Size
@@ -949,9 +950,16 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 		e.mu.Unlock()
 		it = fresh
 		it.Dir, it.Index = j.Dir, j.Index
+		if j.Name == "" {
+			j.Name = fresh.Filename
+		}
 		if j.Filename != "" {
 			it.Filename = j.Filename
 		}
+	}
+
+	if j.Name == "" { // a job of an older queue file, its item still in memory
+		j.Name = it.Filename
 	}
 
 	// The final name is decided BEFORE the download and written to the queue:
@@ -970,6 +978,8 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 	}
 	// Progress and connection reports find the job by this.
 	it.Tag = j.ID
+	// The ledger knows the file by the site's name, as the command line does.
+	it.LedgerName = j.Name
 
 	ledger, err := e.ledgerFor(j.OutDir)
 	if err != nil {

@@ -58,9 +58,13 @@ type Job struct {
 	// the guarantee of continuing under the same name when the app is closed
 	// and reopened.
 	Filename string `json:"filename"`
-	Path     string `json:"path,omitempty"` // final path (Plan / Download)
-	Size     int64  `json:"size"`
-	Index    int    `json:"index"`
+	// Name is the file name the site gave, before planning; the ledger is
+	// keyed by it, as on the command line. Empty in queue files written
+	// before it existed: it is taken from the next resolution then.
+	Name  string `json:"name,omitempty"`
+	Path  string `json:"path,omitempty"` // final path (Plan / Download)
+	Size  int64  `json:"size"`
+	Index int    `json:"index"`
 
 	State      State     `json:"state"`
 	Done       int64     `json:"done"` // last known downloaded bytes

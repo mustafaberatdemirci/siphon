@@ -160,6 +160,13 @@ type Item struct {
 	// the ledger.
 	Tag string
 
+	// LedgerName belongs to the caller too: the resolver's own file name when
+	// Filename was replaced by a name already planned (the queue keeps a
+	// job's final name across restarts). The ledger is keyed by the
+	// resolver's name, so the window version and the command line recognize
+	// each other's downloads. "" means Filename.
+	LedgerName string
+
 	// Secret is resolver-private material; the downloader never touches it,
 	// it is never written to the ledger and never logged. For mega it is the
 	// content key + nonce + meta-MAC (32 bytes). It travels inside the Item so

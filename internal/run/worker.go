@@ -141,7 +141,7 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 	// that the file really is in place. If the user deleted the file, looking
 	// at the ledger and skipping would be a silent failure.
 	if ledger != nil {
-		if e, ok := ledger.Lookup(it.Dir, it.SourcePage, it.Filename); ok {
+		if e, ok := ledger.Lookup(it.Dir, it.SourcePage, ledgerName(it)); ok {
 			if fi, serr := os.Stat(filepath.Join(outDir, e.Path)); serr == nil && (!fi.IsDir() || w.SelfDownloads(it)) {
 				if ev.ItemSkipped != nil {
 					ev.ItemSkipped(it, e)
@@ -187,7 +187,7 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 			if lerr := ledger.Add(store.Entry{
 				SourcePage: it.SourcePage,
 				Dir:        it.Dir,
-				Filename:   it.Filename,
+				Filename:   ledgerName(it),
 				Path:       rel,
 				Size:       res.Size,
 				SHA256:     res.SHA256,
@@ -258,4 +258,12 @@ func (w *Worker) downloadSelf(ctx context.Context, outDir string, it site.Item) 
 		dl.MarkDownloaded(path, it.SourcePage)
 	}
 	return dl.Result{Path: path, Size: size}, nil
+}
+
+// ledgerName is the name an item is keyed by in the ledger: the resolver's.
+func ledgerName(it site.Item) string {
+	if it.LedgerName != "" {
+		return it.LedgerName
+	}
+	return it.Filename
 }
