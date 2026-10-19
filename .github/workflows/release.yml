@@ -145,8 +145,45 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
+  # The Firefox extension, signed by Mozilla (an "unlisted" add-on: not in
+  # the add-on store, but it installs for good, where an unsigned one is a
+  # temporary add-on gone at the next restart). Runs only when the
+  # repository has the add-on store's API key as secrets (AMO_JWT_ISSUER,
+  # AMO_JWT_SECRET; addons.mozilla.org -> Tools -> Manage API Keys), and not
+  # for a pre-release: Mozilla signs each version number once.
+  firefox:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+      AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Sign the Firefox extension
+        if: env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' && !contains(github.ref_name, '-')
+        run: |
+          set -euo pipefail
+          ver="${VERSION#v}"
+          sh browser/pack.sh build
+          got=$(jq -r .version build/firefox/manifest.json)
+          if [ "$got" != "$ver" ]; then
+            echo "browser/manifest.firefox.json says $got, the tag $ver"; exit 1
+          fi
+          npx --yes web-ext@8.3.0 sign --source-dir build/firefox --artifacts-dir build/signed \
+            --channel unlisted --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET" \
+            --approval-timeout 900000
+          mkdir -p dist
+          cp build/signed/*.xpi "dist/siphon-firefox-${VERSION}.xpi"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: siphon-firefox
+          path: dist/*.xpi
+          if-no-files-found: ignore
+
   release:
-    needs: build
+    needs: [build, firefox]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

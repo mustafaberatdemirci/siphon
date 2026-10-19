@@ -350,7 +350,9 @@ To set the extension up:
      unpacked** and pick `browser/chromium`.
    - **Firefox**: open `about:debugging`, **This Firefox**, **Load Temporary
      Add-on…**, and pick `manifest.json` in `browser/firefox`. A temporary
-     add-on stays until Firefox restarts.
+     add-on stays until Firefox restarts. When the release page has a
+     `siphon-firefox-<version>.xpi` (signed by Mozilla), open it in Firefox
+     instead: it installs for good.
 3. The extension's **Options** page has **Check the connection to Siphon**.
 
 If Siphon isn't running, the extension starts it. **Remove** in Settings
@@ -628,6 +630,13 @@ shared; upload it in the repository's settings (Social preview).
 manifest for each kind of browser (Chromium and Firefox read the background
 script differently). `sh browser/pack.sh <folder>` builds both into
 `<folder>/chromium` and `<folder>/firefox`, the way the release packs them.
+`npx web-ext lint --source-dir <folder>/firefox` runs Mozilla's add-on check.
+The release has Mozilla sign the Firefox one (an unlisted add-on: not in the
+store, but it installs for good) when the repository has the add-on store's
+API key as the secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`
+(addons.mozilla.org → Tools → Manage API Keys). Mozilla signs a version
+number once, so the manifest's version must be the tag's, and pre-releases
+aren't signed.
 
 **Translations.** The window's texts are written in English in the code and
 wrapped in `T(...)` (or `Tf(...)` with format verbs); the English text is the

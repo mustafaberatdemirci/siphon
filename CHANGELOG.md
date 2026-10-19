@@ -18,6 +18,9 @@ Each version's section is also its release notes on GitHub.
 - `siphon-gui <link> …` hands the links to the running window.
 - Whichever way links come, they open the Add dialog: nothing is queued
   before you press **Add**.
+- The release can carry the Firefox extension signed by Mozilla
+  (`siphon-firefox-<version>.xpi`), which installs for good; a temporary
+  add-on is gone when Firefox restarts.
 
 **Sites**
 

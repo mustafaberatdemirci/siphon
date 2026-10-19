@@ -1,11 +1,11 @@
 package browser
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"image/png"
 	"os"
 	"path/filepath"
 	"slices"
@@ -107,15 +107,18 @@ func TestExtensionMatchesTheHost(t *testing.T) {
 		}
 	}
 
-	icon, err := os.ReadFile(filepath.Join(extDir, "icon.png"))
+	// The manifests declare a 128-pixel icon; Firefox's add-on check warns
+	// about any other size. It is docs/icon.png made smaller.
+	icon, err := os.Open(filepath.Join(extDir, "icon.png"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := os.ReadFile(filepath.Join("..", "..", "docs", "icon.png"))
+	defer icon.Close()
+	cfg, err := png.DecodeConfig(icon)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(icon, app) {
-		t.Error("browser/icon.png differs from docs/icon.png; copy it over")
+	if cfg.Width != 128 || cfg.Height != 128 {
+		t.Errorf("browser/icon.png is %dx%d, want 128x128", cfg.Width, cfg.Height)
 	}
 }
