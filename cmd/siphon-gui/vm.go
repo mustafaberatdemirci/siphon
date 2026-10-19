@@ -32,6 +32,16 @@ type viewModel struct {
 	// StatusLine combines it with the summary.
 	notice   string
 	noticeAt time.Time
+
+	// batch is what finished since the queue last had nothing to do
+	// (TakeFinishedBatch).
+	batch finishedBatch
+}
+
+// finishedBatch counts downloads that ended while the queue was busy.
+type finishedBatch struct {
+	done, failed int
+	bytes        int64
 }
 
 // noticeTTL: with a non-empty queue the notice gives way to the summary
@@ -65,6 +75,17 @@ func (vm *viewModel) apply(j queue.Job, now time.Time) {
 		vm.order = append(vm.order, j.ID)
 	}
 	vm.jobs[j.ID] = j
+	// Only an end seen happening counts: jobs loaded from the queue file
+	// arrive unknown, already finished.
+	if known && prev.State != j.State {
+		switch j.State {
+		case queue.StateDone:
+			vm.batch.done++
+			vm.batch.bytes += j.Done
+		case queue.StateFailed, queue.StateStopped:
+			vm.batch.failed++
+		}
+	}
 	switch j.State {
 	case queue.StateRunning:
 		sp := vm.speed[j.ID]
@@ -394,4 +415,24 @@ func actionFor(s queue.State) rowAction {
 		return actionResume
 	}
 	return actionNone
+}
+
+// TakeFinishedBatch returns what finished, once the queue has nothing left
+// to do (no job running or queued) after downloads ended; the count starts
+// over then. A job waiting for its quota doesn't keep the batch open: that
+// can take hours.
+func (vm *viewModel) TakeFinishedBatch() (finishedBatch, bool) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	if vm.batch.done+vm.batch.failed == 0 {
+		return finishedBatch{}, false
+	}
+	for _, j := range vm.jobs {
+		if j.State == queue.StateRunning || j.State == queue.StateQueued {
+			return finishedBatch{}, false
+		}
+	}
+	b := vm.batch
+	vm.batch = finishedBatch{}
+	return b, true
 }

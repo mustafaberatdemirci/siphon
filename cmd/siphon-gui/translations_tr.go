@@ -208,4 +208,13 @@ var turkish = map[string]string{
 	"Siphon %s is available; you have %s. Download it from its page; your queue and settings stay.":           "Siphon %s çıktı; sizdeki %s. Sayfasından indirin; kuyruğunuz ve ayarlarınız korunur.",
 	"Open the release page":                                                                                   "Sürüm sayfasını aç",
 	"Once a day, asks GitHub for the latest version and says when a newer one is out. Nothing is downloaded.": "Günde bir kez GitHub'dan en son sürümü sorar, daha yenisi çıktığında haber verir. Hiçbir şey indirilmez.",
+
+	// Finished downloads, dropped files
+	"Downloaded: %d (%s).":             "İndirilen: %d (%s).",
+	"Failed: %d.":                      "Hatalı: %d.",
+	"Downloaded: %d (%s). Failed: %d.": "İndirilen: %d (%s). Hatalı: %d.",
+	"Siphon — downloads finished":      "Siphon — indirmeler bitti",
+	"Notify when downloads finish":     "İndirmeler bitince bildir",
+	"A system notification once nothing is left to download: how many files came, and how many failed.":               "İndirilecek bir şey kalmayınca bir sistem bildirimi: kaç dosya indi, kaçı hatalı.",
+	"No links found in %s. Siphon takes links from text files (.txt), link shortcuts (.url) and saved pages (.html).": "%s içinde link bulunamadı. Siphon linkleri metin dosyalarından (.txt), link kısayollarından (.url) ve kaydedilmiş sayfalardan (.html) alır.",
 }

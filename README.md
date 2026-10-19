@@ -241,6 +241,10 @@ tests Linux and macOS too.
 1. Press **Add links** (or just press Ctrl+V in the window: the dialog opens
    with what you copied), put in one link per line (blank lines and lines
    starting with `#` are ignored), check the folder and press **Add**.
+   Dropping a file on the window opens the dialog with its links too: a
+   list of links (`.txt`), a link shortcut (`.url`, what dragging a link
+   from the browser to the desktop makes) or a saved page (`.html`, only the
+   links of supported sites).
 2. Siphon resolves each link and queues its files; each one starts as soon
    as it is queued. While links are being resolved, **Add links** turns into
    **Stop adding**: the links not added yet wait in the dialog, and more
@@ -297,6 +301,7 @@ restart, which Siphon offers to do on the spot):
 | Downloads at once | How many files download at the same time (default 4). |
 | Connections per file | How many connections a single file may use; also applies to downloads already running. See below. |
 | VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
+| Notify when downloads finish | A system notification once nothing is left to download: how many files came, and how many failed (on by default). |
 | Watch the clipboard | Links of supported sites you copy anywhere open the Add dialog (on by default). See [Browser integration](#browser-integration). |
 | Browser integration | Lets the Siphon extension hand links and downloads to Siphon; **Install** and **Remove**. See [Browser integration](#browser-integration). |
 | Check for updates | Once a day Siphon asks GitHub for the latest release (one request, nothing about you in it) and says on the status line when a newer one is out, with a notification the first time. Nothing is downloaded or installed: the release page has the files, and your queue and settings stay when you replace the program. On by default. |

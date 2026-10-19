@@ -208,4 +208,13 @@ var german = map[string]string{
 	"Siphon %s is available; you have %s. Download it from its page; your queue and settings stay.":           "Siphon %s ist erschienen; Sie haben %s. Laden Sie es von seiner Seite herunter; Warteschlange und Einstellungen bleiben erhalten.",
 	"Open the release page":                                                                                   "Versionsseite öffnen",
 	"Once a day, asks GitHub for the latest version and says when a newer one is out. Nothing is downloaded.": "Fragt einmal am Tag bei GitHub nach der neuesten Version und meldet, wenn eine neuere erscheint. Es wird nichts heruntergeladen.",
+
+	// Finished downloads, dropped files
+	"Downloaded: %d (%s).":             "Heruntergeladen: %d (%s).",
+	"Failed: %d.":                      "Fehlgeschlagen: %d.",
+	"Downloaded: %d (%s). Failed: %d.": "Heruntergeladen: %d (%s). Fehlgeschlagen: %d.",
+	"Siphon — downloads finished":      "Siphon — Downloads fertig",
+	"Notify when downloads finish":     "Benachrichtigen, wenn Downloads fertig sind",
+	"A system notification once nothing is left to download: how many files came, and how many failed.":               "Eine Systembenachrichtigung, sobald nichts mehr herunterzuladen ist: wie viele Dateien kamen und wie viele fehlschlugen.",
+	"No links found in %s. Siphon takes links from text files (.txt), link shortcuts (.url) and saved pages (.html).": "Keine Links in %s gefunden. Siphon nimmt Links aus Textdateien (.txt), Link-Verknüpfungen (.url) und gespeicherten Seiten (.html).",
 }

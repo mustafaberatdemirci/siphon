@@ -380,6 +380,7 @@ func (q *queueTab) refreshLoop() {
 	defer t.Stop()
 	for now := range t.C {
 		q.vm.Tick(now) // a stalled download loses its rate even without events
+		q.checkFinished()
 		if !q.vm.TakeDirty() {
 			continue
 		}

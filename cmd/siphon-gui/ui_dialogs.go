@@ -122,6 +122,8 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 	watch.SetChecked(prefs.BoolWithFallback(prefWatchClipboard, true))
 	updates := widget.NewCheck("", func(on bool) { prefs.SetBool(prefCheckUpdates, on) })
 	updates.SetChecked(prefs.BoolWithFallback(prefCheckUpdates, true))
+	notifyDone := widget.NewCheck("", func(on bool) { prefs.SetBool(prefNotifyDone, on) })
+	notifyDone.SetChecked(prefs.BoolWithFallback(prefNotifyDone, true))
 
 	item := func(label string, obj fyne.CanvasObject, hint string) *widget.FormItem {
 		it := widget.NewFormItem(label, obj)
@@ -139,6 +141,8 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 			T("A site may allow fewer: bunkr, cyberfile and pixeldrain 1. Each row shows what it really gets.")),
 		item(T("VPN switch command"), container.NewBorder(nil, nil, nil, test, q.quotaCmd),
 			T("For mega's quota, optional: runs when it runs out. Empty: you get a notification and switch the VPN yourself.")),
+		item(T("Notify when downloads finish"), notifyDone,
+			T("A system notification once nothing is left to download: how many files came, and how many failed.")),
 		item(T("Watch the clipboard"), watch,
 			T("Links of supported sites you copy anywhere open the Add dialog.")),
 		item(T("Browser integration"), q.browserSettings(),

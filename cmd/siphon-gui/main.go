@@ -200,6 +200,7 @@ func main() {
 	}
 	w.SetMainMenu(q.mainMenu(quit))
 	w.SetContent(queueView)
+	w.SetOnDropped(q.onDropped)
 	go q.updateLoop()
 
 	if statePath == "" {

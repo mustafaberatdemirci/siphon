@@ -53,6 +53,11 @@ Each version's section is also its release notes on GitHub.
 
 **Window**
 
+- A system notification when the downloads finish: how many files came,
+  and how many failed. **Settings → Notify when downloads finish** turns it
+  off.
+- Dropping a list of links (`.txt`), a link shortcut (`.url`) or a saved
+  page (`.html`) on the window opens the Add dialog with its links.
 - The window version says when a new version is out: once a day it asks
   GitHub for the latest release, and **Help → Check for updates** asks now.
   It only links to the release page; nothing is downloaded or installed.
