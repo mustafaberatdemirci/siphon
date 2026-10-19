@@ -98,6 +98,7 @@ type Engine struct {
 	wipeWant  map[string]bool               // should the removed job's partial file be deleted when it ends?
 	ledgers   map[string]*store.Ledger      // outDir -> ledger
 	pausedAll bool
+	offHours  bool // outside the download hours (hours.go)
 	// captchaHold: sites asking for a captcha; that site's jobs aren't
 	// started. A captcha is SITE-specific (pixeldrain's counter): a global
 	// pause used to be switched on and mega/bunkr jobs stopped for nothing.
@@ -388,7 +389,7 @@ func (e *Engine) kick() {
 // dispatch starts queued jobs while there are free slots.
 func (e *Engine) dispatch(ctx context.Context) {
 	e.mu.Lock()
-	if e.pausedAll || e.closing {
+	if e.pausedAll || e.offHours || e.closing {
 		e.mu.Unlock()
 		return
 	}

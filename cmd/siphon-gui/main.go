@@ -138,6 +138,9 @@ func main() {
 		return
 	}
 	vm.Replace(eng.Jobs())
+	// Outside the download hours nothing may start, not even before the
+	// window is built.
+	eng.SetOffHours(hoursHold(a.Preferences(), time.Now()) != "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	engineDone := make(chan struct{})
@@ -198,9 +201,12 @@ func main() {
 		restartAfter = true
 		quit()
 	}
+	q.quit = quit
 	w.SetMainMenu(q.mainMenu(quit))
 	w.SetContent(queueView)
 	w.SetOnDropped(q.onDropped)
+	q.applyHours(time.Now()) // before the first download starts, if outside the hours
+	go q.hoursLoop()
 	go q.updateLoop()
 
 	if statePath == "" {

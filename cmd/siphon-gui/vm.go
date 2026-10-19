@@ -33,6 +33,10 @@ type viewModel struct {
 	notice   string
 	noticeAt time.Time
 
+	// hold is why the queue doesn't start downloads now (outside the
+	// download hours); "" for none. It leads the status line while it lasts.
+	hold string
+
 	// batch is what finished since the queue last had nothing to do
 	// (TakeFinishedBatch).
 	batch finishedBatch
@@ -254,8 +258,11 @@ func (vm *viewModel) StatusLine() string {
 func (vm *viewModel) statusLine(now time.Time) string {
 	summary := vm.Summary()
 	vm.mu.Lock()
-	notice, at, empty := vm.notice, vm.noticeAt, len(vm.order) == 0
+	notice, at, empty, hold := vm.notice, vm.noticeAt, len(vm.order) == 0, vm.hold
 	vm.mu.Unlock()
+	if hold != "" {
+		summary = hold + "  ·  " + summary
+	}
 	if notice == "" {
 		return summary
 	}
@@ -435,4 +442,26 @@ func (vm *viewModel) TakeFinishedBatch() (finishedBatch, bool) {
 	b := vm.batch
 	vm.batch = finishedBatch{}
 	return b, true
+}
+
+// SetHold sets why the queue doesn't start downloads now; "" for none.
+func (vm *viewModel) SetHold(msg string) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	if vm.hold != msg {
+		vm.hold = msg
+		vm.dirty = true
+	}
+}
+
+// Busy reports whether a download is running or queued.
+func (vm *viewModel) Busy() bool {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	for _, j := range vm.jobs {
+		if j.State == queue.StateRunning || j.State == queue.StateQueued {
+			return true
+		}
+	}
+	return false
 }

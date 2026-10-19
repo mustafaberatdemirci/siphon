@@ -59,6 +59,12 @@ Each version's section is also its release notes on GitHub.
   across restarts.
 - **A search box** above the queue (Ctrl+F) shows only the rows with every
   word typed in their name or folder.
+- **Download hours** (Settings): only between two times, e.g. 02:00–08:00.
+  Outside them nothing starts, and running downloads stop and go on by
+  themselves when the hours come.
+- **Tasks → When downloads finish**: quit Siphon, sleep, or shut the
+  computer down once nothing is left to download, after a minute's
+  countdown with Cancel. The choice isn't kept for the next start.
 - A system notification when the downloads finish: how many files came,
   and how many failed. **Settings → Notify when downloads finish** turns it
   off.

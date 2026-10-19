@@ -292,7 +292,7 @@ The menu bar has the rest:
 
 | Menu | Items |
 | --- | --- |
-| Tasks | Add links, Open download folder (the selected download's, or the last finished file's), Settings, Quit. |
+| Tasks | Add links, Open download folder (the selected download's, or the last finished file's), Settings, When downloads finish (do nothing, quit Siphon, sleep, or shut the computer down; a dialog counts down a minute first, with Cancel, and the choice isn't kept for the next start), Quit. |
 | Downloads | Resume, Pause, Remove, Select all; Move to top, up, down, to bottom; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
 | Help | Diagnose, Install tools, Check for updates (asks now), Copy diagnostic info (the version, your system, the number of downloads per site and the last 200 lines of `siphon.log`, for a bug report; links' keys and tokens and your user folder are left out), About Siphon. |
 
@@ -305,6 +305,7 @@ restart, which Siphon offers to do on the spot):
 | Download folder | Where new links are saved; the Add dialog can change it for a batch, and remembers it. |
 | Speed limit | Total limit in MB/s across all downloads (empty or 0 = unlimited). |
 | Downloads at once | How many files download at the same time (default 4). |
+| Download hours | **Only between** two times, e.g. 02:00–08:00 for a night tariff (23:00–07:00 goes past midnight). Outside them nothing starts, and running downloads stop and go on by themselves when the hours come; the status line says when. |
 | Connections per file | How many connections a single file may use; also applies to downloads already running. See below. |
 | VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
 | Notify when downloads finish | A system notification once nothing is left to download: how many files came, and how many failed (on by default). |

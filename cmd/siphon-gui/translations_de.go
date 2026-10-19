@@ -224,4 +224,21 @@ var german = map[string]string{
 	"Move down":      "Nach unten",
 	"Move to bottom": "Ganz nach unten",
 	"Search":         "Suchen",
+
+	// Download hours, when downloads finish
+	"Not a time of day: %q (like 02:00)":                         "Keine Uhrzeit: %q (etwa 02:00)",
+	"Outside the download hours (%s–%s): downloads start at %s.": "Außerhalb der Download-Zeiten (%s–%s): Downloads beginnen um %s.",
+	"Only between":   "Nur zwischen",
+	"Download hours": "Download-Zeiten",
+	"Outside these hours nothing starts, and running downloads stop and go on when the hours come. 23:00–07:00 goes past midnight.": "Außerhalb dieser Zeiten startet nichts; laufende Downloads halten an und machen weiter, wenn die Zeit kommt. 23:00–07:00 geht über Mitternacht.",
+	"Put the computer to sleep": "Computer in den Ruhezustand versetzen",
+	"Shut the computer down":    "Computer herunterfahren",
+	"Do nothing":                "Nichts tun",
+	"The downloads are finished. Siphon quits in %d s.":               "Die Downloads sind fertig. Siphon beendet sich in %d s.",
+	"The downloads are finished. The computer goes to sleep in %d s.": "Die Downloads sind fertig. Der Computer geht in %d s in den Ruhezustand.",
+	"The downloads are finished. The computer shuts down in %d s.":    "Die Downloads sind fertig. Der Computer fährt in %d s herunter.",
+	"When downloads finish":                                 "Wenn die Downloads fertig sind",
+	"When the downloads finish: %s.":                        "Wenn die Downloads fertig sind: %s.",
+	"Canceled; when the downloads finish, nothing is done.": "Abgebrochen; wenn die Downloads fertig sind, geschieht nichts.",
+	"%s: it didn't work (%v)":                               "%s: hat nicht geklappt (%v)",
 }

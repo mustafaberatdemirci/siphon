@@ -224,4 +224,21 @@ var turkish = map[string]string{
 	"Move down":      "Aşağı taşı",
 	"Move to bottom": "En alta taşı",
 	"Search":         "Ara",
+
+	// Download hours, when downloads finish
+	"Not a time of day: %q (like 02:00)":                         "Geçerli bir saat değil: %q (02:00 gibi)",
+	"Outside the download hours (%s–%s): downloads start at %s.": "İndirme saatleri dışında (%s–%s): indirmeler %s'de başlar.",
+	"Only between":   "Yalnızca şu saatlerde",
+	"Download hours": "İndirme saatleri",
+	"Outside these hours nothing starts, and running downloads stop and go on when the hours come. 23:00–07:00 goes past midnight.": "Bu saatlerin dışında hiçbir şey başlamaz; süren indirmeler durur ve saat gelince kaldığı yerden devam eder. 23:00–07:00 gece yarısını aşar.",
+	"Put the computer to sleep": "Bilgisayarı uyku moduna al",
+	"Shut the computer down":    "Bilgisayarı kapat",
+	"Do nothing":                "Hiçbir şey yapma",
+	"The downloads are finished. Siphon quits in %d s.":               "İndirmeler bitti. Siphon %d sn içinde kapanacak.",
+	"The downloads are finished. The computer goes to sleep in %d s.": "İndirmeler bitti. Bilgisayar %d sn içinde uyku moduna geçecek.",
+	"The downloads are finished. The computer shuts down in %d s.":    "İndirmeler bitti. Bilgisayar %d sn içinde kapanacak.",
+	"When downloads finish":                                 "İndirmeler bitince",
+	"When the downloads finish: %s.":                        "İndirmeler bitince: %s.",
+	"Canceled; when the downloads finish, nothing is done.": "İptal edildi; indirmeler bitince hiçbir şey yapılmayacak.",
+	"%s: it didn't work (%v)":                               "%s: olmadı (%v)",
 }

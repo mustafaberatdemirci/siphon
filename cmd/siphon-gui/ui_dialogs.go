@@ -137,6 +137,8 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 		item(T("Speed limit"), container.NewBorder(nil, nil, nil, widget.NewLabel(T("MB/s")), q.speed),
 			T("For all downloads together; 0 or empty is no limit.")),
 		item(T("Downloads at once"), active, T("Files downloading at the same time.")),
+		item(T("Download hours"), q.hoursSettings(),
+			T("Outside these hours nothing starts, and running downloads stop and go on when the hours come. 23:00–07:00 goes past midnight.")),
 		item(T("Connections per file"), q.segments,
 			T("A site may allow fewer: bunkr, cyberfile and pixeldrain 1. Each row shows what it really gets.")),
 		item(T("VPN switch command"), container.NewBorder(nil, nil, nil, test, q.quotaCmd),

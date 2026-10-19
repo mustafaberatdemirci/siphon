@@ -75,6 +75,14 @@ type queueTab struct {
 	// pending are links that couldn't be added: the Add dialog opens with
 	// them, so the user fixes them instead of copying them again.
 	pending string
+	// whenDone is what is done once the downloads finish (whendone.go),
+	// its menu items, and the countdown dialog while one runs. UI thread.
+	whenDone      whenDone
+	whenDoneItems []*fyne.MenuItem
+	countdown     dialog.Dialog
+	// quit ends the app the way the notification area's Quit does. May be nil.
+	quit func()
+
 	// search is the box that filters the rows by name (search.go).
 	search *widget.Entry
 	// addEntry is the open Add dialog's link box; nil when it is closed.
@@ -298,6 +306,8 @@ func (q *queueTab) mainMenu(quit func()) *fyne.MainMenu {
 		item(T("Open download folder"), theme.FolderOpenIcon(), q.openFolder),
 		fyne.NewMenuItemSeparator(),
 		item(T("Settings…"), theme.SettingsIcon(), q.showSettings),
+		fyne.NewMenuItemSeparator(),
+		q.whenDoneMenu(),
 	}
 	if quit != nil {
 		tasks = append(tasks, fyne.NewMenuItemSeparator(), &fyne.MenuItem{Label: T("Quit"), IsQuit: true, Action: quit})

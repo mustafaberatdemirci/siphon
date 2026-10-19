@@ -30,9 +30,11 @@ func (q *queueTab) checkFinished() {
 		return
 	}
 	fyne.Do(func() {
-		if !q.prefs.BoolWithFallback(prefNotifyDone, true) {
-			return
+		if q.prefs.BoolWithFallback(prefNotifyDone, true) {
+			fyne.CurrentApp().SendNotification(fyne.NewNotification(T("Siphon — downloads finished"), batchMessage(b)))
 		}
-		fyne.CurrentApp().SendNotification(fyne.NewNotification(T("Siphon — downloads finished"), batchMessage(b)))
+		if q.whenDone != doneNothing {
+			q.startWhenDone()
+		}
 	})
 }
