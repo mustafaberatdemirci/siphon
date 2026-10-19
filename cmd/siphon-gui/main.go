@@ -200,6 +200,7 @@ func main() {
 	}
 	w.SetMainMenu(q.mainMenu(quit))
 	w.SetContent(queueView)
+	go q.updateLoop()
 
 	if statePath == "" {
 		showInfo(T("Persistence off"),

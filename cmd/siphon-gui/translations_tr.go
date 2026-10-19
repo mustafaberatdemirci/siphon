@@ -196,4 +196,16 @@ var turkish = map[string]string{
 	// Help → Copy diagnostic info
 	"Copy diagnostic info": "Tanı bilgisini kopyala",
 	"Copied to the clipboard: Siphon's version, your system, the number of downloads per site and the end of the log. Links' keys and tokens and your user folder are left out. Paste it into a bug report on GitHub.": "Panoya kopyalandı: Siphon'un sürümü, sisteminiz, site başına indirme sayıları ve günlüğün sonu. Linklerin anahtarları, tokenlar ve kullanıcı klasörünüz çıkarıldı. GitHub'daki bir hata bildirimine yapıştırın.",
+
+	// Help → Check for updates
+	"Check for updates…": "Güncellemeleri denetle…",
+	"Check for updates":  "Güncellemeleri denetle",
+	"Siphon %s is available (you have %s): Help → Check for updates.": "Siphon %s çıktı (sizdeki %s): Yardım → Güncellemeleri denetle.",
+	"Siphon %s is available": "Siphon %s çıktı",
+	"This is a development build (%s): there is no version to compare.":                                       "Bu bir geliştirme derlemesi (%s): karşılaştırılacak sürüm yok.",
+	"Could not check for a new version: %s":                                                                   "Yeni sürüm denetlenemedi: %s",
+	"You have the latest version (%s).":                                                                       "En son sürüm sizde (%s).",
+	"Siphon %s is available; you have %s. Download it from its page; your queue and settings stay.":           "Siphon %s çıktı; sizdeki %s. Sayfasından indirin; kuyruğunuz ve ayarlarınız korunur.",
+	"Open the release page":                                                                                   "Sürüm sayfasını aç",
+	"Once a day, asks GitHub for the latest version and says when a newer one is out. Nothing is downloaded.": "Günde bir kez GitHub'dan en son sürümü sorar, daha yenisi çıktığında haber verir. Hiçbir şey indirilmez.",
 }

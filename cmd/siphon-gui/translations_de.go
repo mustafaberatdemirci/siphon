@@ -196,4 +196,16 @@ var german = map[string]string{
 	// Help → Copy diagnostic info
 	"Copy diagnostic info": "Diagnoseinfos kopieren",
 	"Copied to the clipboard: Siphon's version, your system, the number of downloads per site and the end of the log. Links' keys and tokens and your user folder are left out. Paste it into a bug report on GitHub.": "In die Zwischenablage kopiert: Siphons Version, Ihr System, die Zahl der Downloads je Seite und das Ende des Protokolls. Schlüssel und Tokens von Links sowie Ihr Benutzerordner sind entfernt. Fügen Sie es in einen Fehlerbericht auf GitHub ein.",
+
+	// Help → Check for updates
+	"Check for updates…": "Nach Updates suchen…",
+	"Check for updates":  "Nach Updates suchen",
+	"Siphon %s is available (you have %s): Help → Check for updates.": "Siphon %s ist erschienen (Sie haben %s): Hilfe → Nach Updates suchen.",
+	"Siphon %s is available": "Siphon %s ist erschienen",
+	"This is a development build (%s): there is no version to compare.":                                       "Dies ist ein Entwicklungs-Build (%s): Es gibt keine Version zum Vergleichen.",
+	"Could not check for a new version: %s":                                                                   "Konnte nicht nach einer neuen Version suchen: %s",
+	"You have the latest version (%s).":                                                                       "Sie haben die neueste Version (%s).",
+	"Siphon %s is available; you have %s. Download it from its page; your queue and settings stay.":           "Siphon %s ist erschienen; Sie haben %s. Laden Sie es von seiner Seite herunter; Warteschlange und Einstellungen bleiben erhalten.",
+	"Open the release page":                                                                                   "Versionsseite öffnen",
+	"Once a day, asks GitHub for the latest version and says when a newer one is out. Nothing is downloaded.": "Fragt einmal am Tag bei GitHub nach der neuesten Version und meldet, wenn eine neuere erscheint. Es wird nichts heruntergeladen.",
 }

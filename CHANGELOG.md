@@ -50,6 +50,10 @@ Each version's section is also its release notes on GitHub.
 
 **Window**
 
+- The window version says when a new version is out: once a day it asks
+  GitHub for the latest release, and **Help → Check for updates** asks now.
+  It only links to the release page; nothing is downloaded or installed.
+  **Settings → Check for updates** turns it off.
 - The window version keeps a log, `siphon.log` next to `queue.json` (about
   1 MB at most), with links' keys, tokens and your home folder taken out.
   **Help → Copy diagnostic info** puts its end on the clipboard with the

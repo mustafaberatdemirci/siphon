@@ -120,6 +120,8 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 
 	watch := widget.NewCheck("", func(on bool) { prefs.SetBool(prefWatchClipboard, on) })
 	watch.SetChecked(prefs.BoolWithFallback(prefWatchClipboard, true))
+	updates := widget.NewCheck("", func(on bool) { prefs.SetBool(prefCheckUpdates, on) })
+	updates.SetChecked(prefs.BoolWithFallback(prefCheckUpdates, true))
 
 	item := func(label string, obj fyne.CanvasObject, hint string) *widget.FormItem {
 		it := widget.NewFormItem(label, obj)
@@ -141,6 +143,8 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 			T("Links of supported sites you copy anywhere open the Add dialog.")),
 		item(T("Browser integration"), q.browserSettings(),
 			T("Lets the Siphon extension for Chrome, Edge, Brave and Firefox hand links and downloads to Siphon.")),
+		item(T("Check for updates"), updates,
+			T("Once a day, asks GitHub for the latest version and says when a newer one is out. Nothing is downloaded.")),
 	)
 }
 

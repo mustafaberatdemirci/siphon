@@ -284,7 +284,7 @@ The menu bar has the rest:
 | --- | --- |
 | Tasks | Add links, Open download folder (the selected download's, or the last finished file's), Settings, Quit. |
 | Downloads | Resume, Pause, Remove, Select all; Resume all, Pause all; Retry failed (every failed job back in the queue), Clear finished, Cancel all (stops and removes every unfinished download, asking first and offering to delete the partial files; finished files are never touched). |
-| Help | Diagnose, Install tools, Copy diagnostic info (the version, your system, the number of downloads per site and the last 200 lines of `siphon.log`, for a bug report; links' keys and tokens and your user folder are left out), About Siphon. |
+| Help | Diagnose, Install tools, Check for updates (asks now), Copy diagnostic info (the version, your system, the number of downloads per site and the last 200 lines of `siphon.log`, for a bug report; links' keys and tokens and your user folder are left out), About Siphon. |
 
 In **Settings**, changes take effect right away (the language after a
 restart, which Siphon offers to do on the spot):
@@ -299,6 +299,7 @@ restart, which Siphon offers to do on the spot):
 | VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
 | Watch the clipboard | Links of supported sites you copy anywhere open the Add dialog (on by default). See [Browser integration](#browser-integration). |
 | Browser integration | Lets the Siphon extension hand links and downloads to Siphon; **Install** and **Remove**. See [Browser integration](#browser-integration). |
+| Check for updates | Once a day Siphon asks GitHub for the latest release (one request, nothing about you in it) and says on the status line when a newer one is out, with a notification the first time. Nothing is downloaded or installed: the release page has the files, and your queue and settings stay when you replace the program. On by default. |
 
 **Closing the window doesn't stop the downloads.** Siphon hides in the
 notification area next to the clock (on Windows 11 the icon may be under the
