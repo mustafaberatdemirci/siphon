@@ -1,4 +1,5 @@
 /dist/
+/build/
 /recordings/
 *.exe
 # Windows resources (icon, version); the release workflow makes them.

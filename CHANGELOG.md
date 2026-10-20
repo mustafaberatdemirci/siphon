@@ -4,6 +4,20 @@ Each version's section is also its release notes on GitHub.
 
 ## 0.1.2
 
+**Install**
+
+- **Scoop** (Windows): `scoop bucket add siphon
+  https://github.com/mustafaberatdemirci/siphon`, then `scoop install
+  siphon`. Siphon is in the Start menu, and `scoop update siphon` updates it.
+- **.deb and .rpm packages** for Linux (x64 and ARM64): the programs, the
+  browser extension, a menu entry and the icon.
+- The Linux window version runs on older systems: 0.1.1's needed glibc 2.38
+  (Ubuntu 24.04, Debian 13 and later); this one needs 2.34 (Ubuntu 22.04,
+  Debian 12, RHEL 9 and later).
+- When the browser integration points at a copy of Siphon that is gone (a
+  package manager's update removed the old version's folder, or the download
+  was moved), the window version moves it to itself when it starts.
+
 **Browser integration**
 
 - **The Siphon extension** for Chrome, Edge, Brave and Firefox (in the

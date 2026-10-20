@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Siphon
+GenericName=Download Manager
+Comment=Download from mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile and direct links
+Exec=siphon-gui %U
+Icon=io.github.mustafaberatdemirci.siphon
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=download;downloader;mega;gofile;mediafire;pixeldrain;bunkr;

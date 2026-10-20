@@ -51,9 +51,30 @@ of every archive.
   choose *Open Anyway*; on earlier versions right-click `Siphon.app` and
   choose *Open*. Or once, in a terminal:
   `xattr -dr com.apple.quarantine /Applications/Siphon.app`.
-- **Linux:** the window version needs the OpenGL, X11 and Wayland client
+- **Linux:** the window version needs glibc 2.34 or newer (Ubuntu 22.04,
+  Debian 12, RHEL 9 and later) and the OpenGL, X11 and Wayland client
   libraries, present on any desktop install. `siphon.png` is its icon, for a
   launcher entry.
+
+### With a package manager
+
+- **Windows, [Scoop](https://scoop.sh):**
+  ```
+  scoop bucket add siphon https://github.com/mustafaberatdemirci/siphon
+  scoop install siphon
+  ```
+  Siphon is then in the Start menu, `siphon` on the PATH, and
+  `scoop update siphon` updates both.
+- **Debian, Ubuntu, Mint** (x64 or ARM64): download the `.deb` from the
+  release and `sudo apt install ./siphon_<version>_amd64.deb`.
+- **Fedora, RHEL, openSUSE:** download the `.rpm` and
+  `sudo dnf install ./siphon-<version>-1.x86_64.rpm` (`zypper install` on
+  openSUSE).
+
+The packages put both programs in `/usr/lib/siphon` with the browser
+extension, `siphon` and `siphon-gui` on the PATH, and Siphon in the
+applications menu. Siphon tells you about new versions; the package manager
+installs them.
 
 To build it yourself instead, see [Building](#building).
 
@@ -355,8 +376,9 @@ To set the extension up:
    a small file in `%AppData%\Siphon\browser` and a registry entry under
    your user on Windows, a file in each browser's profile folder on Linux
    and macOS. Only the Siphon extension can start it; web pages can't.
-2. Load the extension from the `browser` folder next to Siphon, which has
-   one for each kind of browser:
+2. Load the extension from the `browser` folder next to Siphon
+   (`/usr/lib/siphon/browser` from a Linux package; **Install** shows where),
+   which has one for each kind of browser:
    - **Chrome, Edge, Brave**: open the extensions page (`chrome://extensions`,
      `edge://extensions`), turn on **Developer mode**, choose **Load
      unpacked** and pick `browser/chromium`.
@@ -368,7 +390,9 @@ To set the extension up:
 3. The extension's **Options** page has **Check the connection to Siphon**.
 
 If Siphon isn't running, the extension starts it. **Remove** in Settings
-takes the registration away again.
+takes the registration away again. When the registration points at a copy
+of Siphon that is gone (an update removed the old version's folder, or you
+moved the download), the window version moves it to itself when it starts.
 
 ## Using the command line
 
@@ -672,9 +696,16 @@ then push a tag such as `v1.0.0`. The release workflow builds both programs
 for Windows (with the icon and version details Explorer shows), Linux (x64
 and ARM64) and macOS (a universal `Siphon.app`), stamps the version into
 them (`siphon -version`) and publishes the archives with their checksums,
-with that section as the release notes. A tag with a dash, such as
+with that section as the release notes. Linux also gets `.deb` and `.rpm`
+packages (`packaging/linux/nfpm.yaml`), built on Debian 12 so that they run
+on systems with glibc 2.34 or newer. After the release, the workflow moves
+the Scoop bucket (`bucket/siphon.json`, written by `packaging/scoop.sh`) to
+the new version with a commit on `main`, and, when the repository has the
+secret `WINGET_TOKEN` (a classic GitHub token with the `public_repo`
+scope), sends the winget manifests (`packaging/winget.sh`) to
+microsoft/winget-pkgs as a pull request. A tag with a dash, such as
 `v1.0.0-rc.1`, publishes a pre-release: a way to try the whole release out
-before announcing it.
+before announcing it; it doesn't touch Scoop or winget.
 
 ## Responsible use
 

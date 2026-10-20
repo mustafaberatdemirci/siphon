@@ -1,0 +1,105 @@
+# The .deb and .rpm packages (nfpm.goreleaser.com), made from the folder of
+# the Linux archive. The release workflow runs, for each package format:
+#   SIPHON_DIR=dist/siphon-v1.2.3-linux-amd64 VERSION=1.2.3 ARCH=amd64 \
+#     nfpm package -f packaging/linux/nfpm.yaml -p deb -t dist/
+#
+# The programs live in /usr/lib/siphon with the browser extension, as they
+# do in the archive: the window version finds the command line program (the
+# browser's native messaging host) and the extension next to itself.
+# /usr/bin has links to them.
+name: siphon
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: net
+priority: optional
+maintainer: Mustafa Berat Demirci <mustafaberatdemirci@gmail.com>
+vendor: Mustafa Berat Demirci
+homepage: https://github.com/mustafaberatdemirci/siphon
+license: MIT
+description: |-
+  Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop,
+  cyberfile and direct links.
+  A window with a persistent download queue (siphon-gui) and a command line
+  tool (siphon) that share one download pipeline. With yt-dlp or gallery-dl
+  installed, it also queues video and gallery pages from thousands more sites.
+
+# The window version's libraries: it links OpenGL and the Wayland client and
+# loads X11's when it opens on X11 (and the rest of Wayland's on Wayland).
+# glibc 2.34 is what the release build (on Debian 12) needs. The command line
+# program is static.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.34)
+      - libgl1
+      - libwayland-client0
+      - libx11-6
+      - libxcursor1
+      - libxext6
+      - libxi6
+      - libxinerama1
+      - libxrandr2
+      - libxrender1
+      - libxxf86vm1
+    recommends:
+      - libwayland-cursor0
+      - libwayland-egl1
+      - libxkbcommon0
+  rpm:
+    depends:
+      - libc.so.6(GLIBC_2.34)(64bit)
+      - libGL.so.1()(64bit)
+      - libwayland-client.so.0()(64bit)
+      - libX11.so.6()(64bit)
+      - libXcursor.so.1()(64bit)
+      - libXext.so.6()(64bit)
+      - libXi.so.6()(64bit)
+      - libXinerama.so.1()(64bit)
+      - libXrandr.so.2()(64bit)
+      - libXrender.so.1()(64bit)
+      - libXxf86vm.so.1()(64bit)
+    recommends:
+      - libwayland-cursor.so.0()(64bit)
+      - libwayland-egl.so.1()(64bit)
+      - libxkbcommon.so.0()(64bit)
+
+contents:
+  - src: build/linux/siphon
+    dst: /usr/lib/siphon/siphon
+    file_info: {mode: 0755}
+  - src: build/linux/siphon-gui
+    dst: /usr/lib/siphon/siphon-gui
+    file_info: {mode: 0755}
+  - src: build/linux/browser
+    dst: /usr/lib/siphon/browser
+    type: tree
+  - src: ../lib/siphon/siphon
+    dst: /usr/bin/siphon
+    type: symlink
+  - src: ../lib/siphon/siphon-gui
+    dst: /usr/bin/siphon-gui
+    type: symlink
+
+  - src: packaging/linux/io.github.mustafaberatdemirci.siphon.desktop
+    dst: /usr/share/applications/io.github.mustafaberatdemirci.siphon.desktop
+  - src: packaging/linux/io.github.mustafaberatdemirci.siphon.metainfo.xml
+    dst: /usr/share/metainfo/io.github.mustafaberatdemirci.siphon.metainfo.xml
+  - src: browser/icon.png
+    dst: /usr/share/icons/hicolor/128x128/apps/io.github.mustafaberatdemirci.siphon.png
+  - src: packaging/linux/siphon-256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/io.github.mustafaberatdemirci.siphon.png
+  - src: packaging/linux/siphon-512.png
+    dst: /usr/share/icons/hicolor/512x512/apps/io.github.mustafaberatdemirci.siphon.png
+
+  - src: README.md
+    dst: /usr/share/doc/siphon/README.md
+    type: doc
+  - src: LICENSE
+    dst: /usr/share/doc/siphon/copyright
+    packager: deb
+  - src: LICENSE
+    dst: /usr/share/licenses/siphon/LICENSE
+    type: license
+    packager: rpm

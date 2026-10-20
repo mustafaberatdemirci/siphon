@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- What software centers (GNOME Software, KDE Discover) show for Siphon. -->
+<component type="desktop-application">
+  <id>io.github.mustafaberatdemirci.siphon</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Siphon</name>
+  <summary>Download manager for file hosts and direct links</summary>
+  <developer id="io.github.mustafaberatdemirci">
+    <name>Mustafa Berat Demirci</name>
+  </developer>
+  <description>
+    <p>
+      A downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop,
+      cyberfile and direct links, with a persistent queue: pause, resume, several
+      downloads at once, and a command line tool for scripts.
+    </p>
+    <p>
+      mega downloads over 8 connections, and when the transfer quota runs out
+      they resume by themselves after a VPN switch. With yt-dlp or gallery-dl
+      installed, Siphon also queues video and gallery pages from thousands more
+      sites.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.mustafaberatdemirci.siphon.desktop</launchable>
+  <url type="homepage">https://github.com/mustafaberatdemirci/siphon</url>
+  <url type="bugtracker">https://github.com/mustafaberatdemirci/siphon/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/mustafaberatdemirci/siphon/main/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>siphon</binary>
+    <binary>siphon-gui</binary>
+  </provides>
+</component>

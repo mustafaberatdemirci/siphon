@@ -1,0 +1,33 @@
+{
+    "version": "0.1.1",
+    "description": "Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile and direct links, with a persistent queue.",
+    "homepage": "https://github.com/mustafaberatdemirci/siphon",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/mustafaberatdemirci/siphon/releases/download/v0.1.1/siphon-v0.1.1-windows-amd64.zip",
+            "hash": "4ca873bbef289e99517cf4b27c51f4114725cea7123fa6a423229eac25e53362",
+            "extract_dir": "siphon-v0.1.1-windows-amd64"
+        }
+    },
+    "bin": "siphon.exe",
+    "shortcuts": [
+        [
+            "siphon-gui.exe",
+            "Siphon"
+        ]
+    ],
+    "notes": "The window version is Siphon in the Start menu; the browser extension is in $dir\\browser.",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/mustafaberatdemirci/siphon/releases/download/v$version/siphon-v$version-windows-amd64.zip",
+                "extract_dir": "siphon-v$version-windows-amd64"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS.txt"
+        }
+    }
+}

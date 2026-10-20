@@ -18,15 +18,11 @@ jobs:
         include:
           - os: windows-latest
             target: windows-amd64
-          - os: ubuntu-latest
-            target: linux-amd64
-          - os: ubuntu-24.04-arm
-            target: linux-arm64
           - os: macos-latest
             target: macos-universal
     # The window version needs cgo, so every system builds on its own runner
     # instead of cross-compiling (macOS builds both of its architectures on
-    # one: Apple's compiler targets either).
+    # one: Apple's compiler targets either). Linux has its own job below.
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ github.ref_name }}
@@ -37,11 +33,6 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-
-      # Fyne's GLFW builds its X11 and Wayland backends.
-      - name: Install GUI build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
@@ -69,19 +60,6 @@ jobs:
           cp LICENSE README.md "dist/$name/"
           sh browser/pack.sh "dist/$name/browser"
           cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
-
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          name="siphon-${VERSION}-${TARGET}"
-          mkdir -p "dist/$name"
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon" .
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/siphon-gui" ./cmd/siphon-gui
-          cp LICENSE README.md "dist/$name/"
-          sh browser/pack.sh "dist/$name/browser"
-          cp docs/icon.png "dist/$name/siphon.png"
-          cd dist && tar czf "$name.tar.gz" "$name"
 
       # One download for every Mac: both programs are universal binaries
       # (Apple Silicon and Intel), and the window version is Siphon.app.
@@ -145,6 +123,83 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
+  # Linux: the archive, and .deb and .rpm packages of the same programs.
+  # Built on Debian 12 rather than the runner's newer Ubuntu: the window
+  # version needs at least the glibc it was built with, and Debian 12's
+  # (asking for 2.34) runs on Debian 12, Ubuntu 22.04, RHEL 9 and anything
+  # newer.
+  build-linux:
+    name: build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-amd64
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    container: golang:1.27-bookworm
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ github.ref_name }}
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      # The version comes from the tag; the container's checkout belongs to
+      # another user, which go's VCS stamping would refuse.
+      GOFLAGS: -buildvcs=false
+    steps:
+      - uses: actions/checkout@v7
+
+      # Fyne's GLFW builds its X11 and Wayland backends.
+      - name: Install GUI build dependencies
+        run: apt-get update && apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+
+      # build/linux is where packaging/linux/nfpm.yaml takes the programs
+      # from.
+      - name: Build
+        run: |
+          set -euo pipefail
+          name="siphon-${VERSION}-${TARGET}"
+          stage=build/linux
+          mkdir -p "$stage" "dist/$name"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$stage/siphon" .
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$stage/siphon-gui" ./cmd/siphon-gui
+          sh browser/pack.sh "$stage/browser"
+          cp -R "$stage/." "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          cp docs/icon.png "dist/$name/siphon.png"
+          (cd dist && tar czf "$name.tar.gz" "$name")
+
+      # A newer build image would quietly leave the older systems out.
+      - name: Check the glibc it needs
+        run: |
+          set -euo pipefail
+          need=$(objdump -T build/linux/siphon-gui | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "siphon-gui needs $need"
+          newest=$(printf '%s\n' "$need" GLIBC_2.34 | sort -V | tail -1)
+          [ "$newest" = GLIBC_2.34 ] || { echo "newer than GLIBC_2.34, what packaging/linux/nfpm.yaml asks for"; exit 1; }
+
+      - name: Packages
+        run: |
+          set -euo pipefail
+          for p in deb rpm; do
+            VERSION="${VERSION#v}" go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0 \
+              package -f packaging/linux/nfpm.yaml -p "$p" -t dist/
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: siphon-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
   # The Firefox extension, signed by Mozilla (an "unlisted" add-on: not in
   # the add-on store, but it installs for good, where an unsigned one is a
   # temporary add-on gone at the next restart). Runs only when the
@@ -183,8 +238,10 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    needs: [build, firefox]
+    needs: [build, build-linux, firefox]
     runs-on: ubuntu-latest
+    outputs:
+      windows-sha256: ${{ steps.sums.outputs.windows }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -197,7 +254,11 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS.txt
+        id: sums
+        run: |
+          set -euo pipefail
+          cd dist && sha256sum * > SHA256SUMS.txt
+          echo "windows=$(awk '/-windows-amd64\.zip$/ {print $1}' SHA256SUMS.txt)" >> "$GITHUB_OUTPUT"
 
       # The release text is this version's section of CHANGELOG.md (from its
       # "## <version>" heading to the next one; a pre-release such as
@@ -217,3 +278,70 @@ jobs:
           body_path: notes.md
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # The Scoop bucket (bucket/siphon.json on main) moves to the new version.
+  # The script comes from the tag, so a tag pushed before its branch is
+  # merged still finds it.
+  scoop:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      SHA256: ${{ needs.release.outputs.windows-sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tag
+          sparse-checkout: packaging
+
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          path: main
+
+      - name: Update bucket/siphon.json
+        working-directory: main
+        run: |
+          set -euo pipefail
+          mkdir -p bucket
+          sh ../tag/packaging/scoop.sh "${VERSION#v}" "$SHA256" > bucket/siphon.json
+          git add bucket/siphon.json
+          if git diff --cached --quiet; then echo "already up to date"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Scoop: Siphon ${VERSION#v}"
+          git push origin HEAD:main
+
+  # winget: the new version's manifests go to microsoft/winget-pkgs as a pull
+  # request, which winget's moderators merge (the first version of a package
+  # is reviewed by hand, later ones mostly by their checks). Runs only when
+  # the repository has the secret WINGET_TOKEN: a classic GitHub token with
+  # the public_repo scope, of the account whose fork of winget-pkgs
+  # wingetcreate uses (it makes one if missing).
+  winget:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      SHA256: ${{ needs.release.outputs.windows-sha256 }}
+      WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        if: env.WINGET_CREATE_GITHUB_TOKEN != ''
+        with:
+          sparse-checkout: packaging
+
+      - name: Submit to winget-pkgs
+        if: env.WINGET_CREATE_GITHUB_TOKEN != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${VERSION#v}"
+          sh packaging/winget.sh "$ver" "$SHA256" build/winget
+          curl -fsSL -o wingetcreate.exe https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe
+          echo "24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea  wingetcreate.exe" | sha256sum -c -
+          # The token comes from WINGET_CREATE_GITHUB_TOKEN, not the command
+          # line, where it could be logged.
+          ./wingetcreate.exe submit --no-open --prtitle "MustafaBeratDemirci.Siphon version $ver" build/winget
