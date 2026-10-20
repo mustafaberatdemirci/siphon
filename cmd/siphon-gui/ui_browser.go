@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -50,13 +51,50 @@ func hostPath() string {
 }
 
 // extensionDir is the folder of the extensions shipped with Siphon (one per
-// browser kind, browser/pack.sh makes them), "" if missing.
+// browser kind, browser/pack.sh makes them), "" if missing. Started through a
+// link (winget puts one on the PATH), it is next to where the link points.
 func extensionDir() string {
-	p := filepath.Join(shippedDir(), "browser")
-	if _, err := os.Stat(filepath.Join(p, "chromium", "manifest.json")); err == nil {
-		return p
+	dirs := []string{shippedDir()}
+	if exe, err := os.Executable(); err == nil {
+		if fi, err := os.Lstat(exe); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			if real, err := filepath.EvalSymlinks(exe); err == nil {
+				dirs = append(dirs, filepath.Dir(real))
+			}
+		}
+	}
+	for _, d := range dirs {
+		p := filepath.Join(d, "browser")
+		if _, err := os.Stat(filepath.Join(p, "chromium", "manifest.json")); err == nil {
+			return p
+		}
 	}
 	return ""
+}
+
+// registeredHost and installHost are browser.Registered and browser.Install;
+// tests replace them.
+var (
+	registeredHost = browser.Registered
+	installHost    = browser.Install
+)
+
+// followBrowserHost moves the browser integration to host, this copy of
+// Siphon's command line program, when it was installed for a program that is
+// gone: a package manager's update removed the old version's folder, or the
+// download was moved. The browsers would only fail to start it.
+func followBrowserHost(host string) {
+	reg := registeredHost()
+	if reg == "" || host == "" || strings.EqualFold(filepath.Clean(reg), filepath.Clean(host)) {
+		return
+	}
+	if _, err := os.Stat(reg); err == nil || !os.IsNotExist(err) {
+		return
+	}
+	if _, err := installHost(host); err != nil {
+		log.Printf("browser integration: %s is gone, and moving it to %s failed: %v", reg, host, err)
+		return
+	}
+	log.Printf("browser integration: %s is gone; moved to %s", reg, host)
 }
 
 // browserStatus says whether the browsers would reach this copy of Siphon.

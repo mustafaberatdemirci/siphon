@@ -208,6 +208,7 @@ func main() {
 	q.applyHours(time.Now()) // before the first download starts, if outside the hours
 	go q.hoursLoop()
 	go q.updateLoop()
+	go followBrowserHost(hostPath())
 
 	if statePath == "" {
 		showInfo(T("Persistence off"),
