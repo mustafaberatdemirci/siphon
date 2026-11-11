@@ -109,7 +109,10 @@ func Open(outRoot string) (*Ledger, error) {
 
 // openAppend opens the ledger file for appending, creating it if needed. A
 // new file is readable by its owner only: source_page carries a mega link's
-// key and a gofile folder's password hash, like the queue file does.
+// key and a gofile folder's password hash, like the queue file does. Only
+// where there are such mode bits: on Windows the file gets the folder's
+// permissions whatever is asked for here, and the folder is the user's
+// download folder (the README says so).
 func (l *Ledger) openAppend() (*os.File, error) {
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
