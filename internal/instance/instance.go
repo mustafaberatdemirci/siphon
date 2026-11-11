@@ -50,36 +50,66 @@ type Handlers struct {
 	Add  func(links []string)
 }
 
-// Claim returns running=true if another instance answered (it has been asked
+// lockName is the file whose lock says which process is the instance.
+const lockName = "instance.lock"
+
+// startWait is how long a launch waits for an instance that holds the lock
+// but doesn't answer yet (it is still starting) to show its window.
+var startWait = 3 * time.Second
+
+// Claim returns running=true if another instance is there (it has been asked
 // to show its window; this one should exit). Otherwise this process becomes
 // the instance: h is called whenever a later launch or the browser asks, and
-// release stops listening. If dir is empty or the listener can't be set up,
-// there is no guard (release is a no-op, running false).
+// release stops listening. If dir is empty there is no guard (release is a
+// no-op, running false).
+//
+// Who is the instance is decided by a lock on instance.lock, which the
+// operating system gives to one process only. Asking the port in
+// instance.port alone left a gap: two launches at the same moment both found
+// nobody listening yet, both became the instance, and two engines drove one
+// queue file and the same .part files. The port file stays how the instance
+// is reached, and how a Siphon from before the lock is found.
 func Claim(dir string, h Handlers) (release func(), running bool) {
 	noop := func() {}
 	if dir == "" {
 		return noop, false
 	}
 	path := filepath.Join(dir, fileName)
+	_ = os.MkdirAll(dir, 0o755)
+	unlock, got, lockErr := tryLock(filepath.Join(dir, lockName))
+	if lockErr == nil && !got {
+		// Another launch holds the lock. It may not listen yet: give it a
+		// moment to, but don't start beside it either way.
+		for deadline := time.Now().Add(startWait); ; time.Sleep(50 * time.Millisecond) {
+			if Show(dir) || time.Now().After(deadline) {
+				return noop, true
+			}
+		}
+	}
+	if lockErr != nil {
+		unlock = noop // a folder that takes no lock: the port file alone, as before
+	}
 	if Show(dir) {
+		unlock()
 		return noop, true
 	}
 
+	// Without a listener this process still is the one instance (it keeps
+	// the lock): a later launch exits, it only can't be asked to show.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return noop, false
+		return unlock, false
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		ln.Close()
-		return noop, false
+		return unlock, false
 	}
 	token := hex.EncodeToString(key)
-	_ = os.MkdirAll(dir, 0o755)
 	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	if err := os.WriteFile(path, []byte(port+"\n"+token+"\n"), 0o600); err != nil {
 		ln.Close()
-		return noop, false
+		return unlock, false
 	}
 	go func() {
 		for {
@@ -96,6 +126,7 @@ func Claim(dir string, h Handlers) (release func(), running bool) {
 		if p, _, err := readFile(path); err == nil && p == port {
 			_ = os.Remove(path)
 		}
+		unlock()
 	}, false
 }
 
