@@ -6,7 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/BurntSushi/toml v1.6.0
 	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.30.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
