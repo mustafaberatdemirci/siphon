@@ -1,0 +1,20 @@
+# Weekly pull requests for newer Go modules and GitHub Actions. Fyne and its
+# many indirect modules come as one pull request, the rest one by one.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      fyne:
+        patterns:
+          - "fyne.io/*"
+          - "github.com/fyne-io/*"
+          - "github.com/go-gl/*"
+          - "github.com/go-text/*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

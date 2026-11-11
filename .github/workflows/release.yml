@@ -7,8 +7,10 @@ on:
   push:
     tags: ["v*"]
 
+# Read-only unless a job says otherwise: only publishing the release and
+# moving the Scoop bucket write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -240,6 +242,8 @@ jobs:
   release:
     needs: [build, build-linux, firefox]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       windows-sha256: ${{ steps.sums.outputs.windows }}
     steps:
@@ -286,6 +290,8 @@ jobs:
     needs: release
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ github.ref_name }}
       SHA256: ${{ needs.release.outputs.windows-sha256 }}
