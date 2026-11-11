@@ -243,6 +243,19 @@ type SiteConfig struct {
 	// 0 means MaxConcurrent * MaxSegments.
 	MaxConnections int
 
+	// HostLimits caps the files downloaded at once from a pool of download
+	// hosts: a host pattern ("*.scdn.st", as in CDNPatterns) and how many.
+	// The pool's hosts share the number, whichever of them a file is on, and
+	// a file there gets no extra connections. Hosts no pattern names are
+	// only bound by MaxConcurrent (per host and per site).
+	//
+	// Why per pool: a site's limit is not one number. MEASURED 2026-11-11 on
+	// bunkr: its *.scdn.st file servers allow one connection per address
+	// between them (a second gets 503), while five files came from *.cdn.cr
+	// servers at once, two of them from the same one. With the site held to
+	// one file for scdn.st's sake, every album came down one file at a time.
+	HostLimits map[string]int
+
 	// CanaryURLs is a LIST, not a single URL. A measurement showed bunkr.cr
 	// blocked by the ISP on this network; a doctor tied to a single canary
 	// would have reported a working site as "dead". doctor tries until it

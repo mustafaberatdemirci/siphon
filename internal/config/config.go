@@ -54,6 +54,10 @@ type rawSite struct {
 	MaxConnections int    `toml:"max_connections"`
 	DNSResolver    string `toml:"dns_resolver"`
 
+	// HostLimits: files at once per pool of download hosts (a host pattern
+	// and a number). Overwritten per pattern, like Extra; 0 removes one.
+	HostLimits map[string]int `toml:"host_limits"`
+
 	MaxRetries int    `toml:"max_retries"`
 	BaseDelay  string `toml:"base_delay"`
 	MaxDelay   string `toml:"max_delay"`
@@ -197,6 +201,18 @@ func mergeSite(b, e rawSite) rawSite {
 			b.Extra[k] = v
 		}
 	}
+	if len(e.HostLimits) > 0 {
+		// Keyed by the pattern as it is matched (case doesn't count), so the
+		// external file's "*.CDN.example" replaces the embedded "*.cdn.example".
+		merged := make(map[string]int, len(b.HostLimits)+len(e.HostLimits))
+		for k, v := range b.HostLimits {
+			merged[hostPattern(k)] = v
+		}
+		for k, v := range e.HostLimits {
+			merged[hostPattern(k)] = v
+		}
+		b.HostLimits = merged
+	}
 	b.DomainsRemove = union(b.DomainsRemove, e.DomainsRemove)
 	b.CDNPatternsRemove = union(b.CDNPatternsRemove, e.CDNPatternsRemove)
 
@@ -233,6 +249,9 @@ func mergeSite(b, e rawSite) rawSite {
 	}
 	return b
 }
+
+// hostPattern is a host_limits pattern as it is compared.
+func hostPattern(p string) string { return strings.ToLower(strings.TrimSpace(p)) }
 
 // union merges preserving order and drops duplicates.
 func union(a, b []string) []string {
@@ -310,6 +329,21 @@ func build(f file) ([]site.SiteConfig, error) {
 			}
 		}
 
+		// A limit of 0 takes the pattern out (an external file lifting an
+		// embedded limit); a negative one is a mistake.
+		var hostLimits map[string]int
+		for pattern, n := range r.HostLimits {
+			switch {
+			case n < 0 || hostPattern(pattern) == "":
+				return nil, fmt.Errorf("%w: %s: invalid host_limits entry %q = %d", ErrUsage, r.Name, pattern, n)
+			case n > 0:
+				if hostLimits == nil {
+					hostLimits = map[string]int{}
+				}
+				hostLimits[hostPattern(pattern)] = n
+			}
+		}
+
 		base, err := dur(r.Name, "base_delay", r.BaseDelay)
 		if err != nil {
 			return nil, err
@@ -336,6 +370,7 @@ func build(f file) ([]site.SiteConfig, error) {
 			MaxConcurrent:  r.MaxConcurrent,
 			MaxSegments:    r.MaxSegments,
 			MaxConnections: r.MaxConnections,
+			HostLimits:     hostLimits,
 			DNSResolver:    r.DNSResolver,
 			MaxRetries:     r.MaxRetries,
 			BaseDelay:      base,

@@ -81,6 +81,34 @@ type HostLimiter struct {
 	n  int
 	mu sync.Mutex
 	ch map[string]chan struct{}
+	// own: keys with a limit of their own (SetLimit), instead of n.
+	own map[string]int
+}
+
+// SetLimit gives a key its own limit instead of the limiter's. It must be
+// called before the key is first used.
+func (l *HostLimiter) SetLimit(key string, n int) {
+	if n < 1 {
+		n = 1
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.own == nil {
+		l.own = map[string]int{}
+	}
+	l.own[key] = n
+}
+
+// LimitOf is how many slots a key has.
+func (l *HostLimiter) LimitOf(key string) int {
+	return cap(l.slot(key))
+}
+
+// Free reports whether the key has a slot free right now. Only a hint: the
+// slot may be taken by the time it is asked for (TryAcquire tells).
+func (l *HostLimiter) Free(key string) bool {
+	c := l.slot(key)
+	return len(c) < cap(c)
 }
 
 func NewHostLimiter(n int) *HostLimiter {
@@ -105,7 +133,11 @@ func (l *HostLimiter) slot(host string) chan struct{} {
 	defer l.mu.Unlock()
 	c, ok := l.ch[host]
 	if !ok {
-		c = make(chan struct{}, l.n)
+		n := l.n
+		if own, has := l.own[host]; has {
+			n = own
+		}
+		c = make(chan struct{}, n)
 		l.ch[host] = c
 	}
 	return c

@@ -139,6 +139,13 @@ type Engine struct {
 	siteCapAt map[string]time.Time
 	// netChecks: host -> the last network check (netblock.go).
 	netChecks map[string]netCheck
+	// File slots (a host's, or a pool of hosts' with a limit of its own,
+	// host_limits): slots counts the running jobs per site and slot key,
+	// jobSlot which one a running job holds. The worker's own limiter counts
+	// the same; the queue keeps its count to pass over a job whose host is
+	// full instead of starting it only to have it wait.
+	slots   map[string]int
+	jobSlot map[string]string
 
 	wake chan struct{}
 
@@ -198,6 +205,8 @@ func New(opt Options) (*Engine, error) {
 		siteCap:   map[string]int{},
 		siteCapAt: map[string]time.Time{},
 		netChecks: map[string]netCheck{},
+		slots:     map[string]int{},
+		jobSlot:   map[string]string{},
 	}
 	if e.opt.QuotaProbeEvery <= 0 {
 		e.opt.QuotaProbeEvery = DefaultQuotaProbeEvery
@@ -443,12 +452,20 @@ func (e *Engine) dispatch(ctx context.Context) {
 		if c := e.siteLimit(j.Site, w.Cfg.MaxConcurrent, now); c > 0 && perSite[j.Site] >= c {
 			continue
 		}
+		// Its host (or its pool of hosts, host_limits) is full: leave it
+		// queued and look further down, where a file of another host may be
+		// able to start. Only a job whose link is resolved tells its host; one
+		// that isn't is started, resolved, and comes back queued if its host
+		// turns out full (run.OutcomeBusy).
+		item, haveItem := e.items[j.ID]
+		if haveItem && !e.takeSlot(w, j, item) {
+			continue
+		}
 		perSite[j.Site]++
 		j.State = StateRunning
 		j.Error = ""
 		jctx, cancel := context.WithCancel(ctx)
 		e.active[j.ID] = cancel
-		item, haveItem := e.items[j.ID]
 		snap := *j
 		go e.runJob(jctx, w, j, snap, item, haveItem)
 	}
@@ -470,7 +487,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	e.changed(j)
 	e.scheduleSave()
 
-	outcome := e.execute(ctx, w, &j, it, haveItem)
+	outcome, resolved := e.execute(ctx, w, &j, it, haveItem)
 
 	e.mu.Lock()
 	live, still := e.byID[j.ID]
@@ -478,6 +495,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	// another one, waiting for this run to end (see dispatch).
 	still = still && live == owner
 	delete(e.active, j.ID)
+	e.freeSlot(j.ID)
 	wantedPause := e.pauseWant[j.ID]
 	delete(e.pauseWant, j.ID)
 	wipe := e.wipeWant[j.ID]
@@ -517,6 +535,13 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 			live.Size = outcome.Entry.Size
 			live.Path = filepath.Join(j.OutDir, outcome.Entry.Path)
 			live.FinishedAt = time.Now()
+		case run.OutcomeBusy:
+			// Its host has no room: back in line, with its link kept, so the
+			// scheduler knows the host and passes it over until there is.
+			live.State = StateQueued
+			if _, has := e.items[live.ID]; !has && resolved.URL != "" {
+				e.items[live.ID] = resolved
+			}
 		case run.OutcomeStopped:
 			live.State = StateStopped
 			live.Error = outcome.Err.Error()
@@ -630,13 +655,15 @@ func (e *Engine) notice(msg string) {
 	}
 }
 
-// execute hands the job to the Worker; without an Item it re-resolves from SourcePage.
-func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Item, haveItem bool) run.Outcome {
+// execute hands the job to the Worker; without an Item it re-resolves from
+// SourcePage. It also returns the item as it was handed over ("" URL if it
+// never got that far).
+func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Item, haveItem bool) (run.Outcome, site.Item) {
 	if !haveItem {
 		fresh, err := w.Resolver.ResolveOne(ctx, j.SourcePage)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				return run.Outcome{Kind: run.OutcomeCanceled, Err: err}
+				return run.Outcome{Kind: run.OutcomeCanceled, Err: err}, site.Item{}
 			}
 			err = fmt.Errorf("re-resolve: %w", err)
 			// If the network is unreachable (or every bunkr domain was
@@ -645,7 +672,7 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 			if snet.IsTransient(err) || errors.Is(err, site.ErrAllDomainsBurned) {
 				err = &netDownError{err: err}
 			}
-			return run.Outcome{Kind: run.OutcomeFailed, Err: err}
+			return run.Outcome{Kind: run.OutcomeFailed, Err: err}, site.Item{}
 		}
 		// Resolution passed: the network is there, reset the backoff counter.
 		e.mu.Lock()
@@ -663,6 +690,15 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 
 	if j.Name == "" { // a job of an older queue file, its item still in memory
 		j.Name = it.Filename
+	}
+
+	// Its host is known now, if it wasn't when the job started: no room
+	// there means back in line (runJob keeps the link for the scheduler).
+	e.mu.Lock()
+	room := e.takeSlot(w, j, it)
+	e.mu.Unlock()
+	if !room {
+		return run.Outcome{Kind: run.OutcomeBusy}, it
 	}
 
 	// The final name is decided BEFORE the download and written to the queue:
@@ -686,9 +722,40 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 
 	ledger, err := e.ledgerFor(j.OutDir)
 	if err != nil {
-		return run.Outcome{Kind: run.OutcomeFailed, Err: err}
+		return run.Outcome{Kind: run.OutcomeFailed, Err: err}, it
 	}
-	return w.DownloadItem(ctx, j.OutDir, ledger, it, e.opt.Events)
+	// Not waiting for a file slot: a job parked inside the worker would show
+	// as downloading at 0% and hold a place another host's file could use.
+	return w.DownloadItemIfFree(ctx, j.OutDir, ledger, it, e.opt.Events), it
+}
+
+// takeSlot, under the lock: gives the job a file slot of its item's host (or
+// pool of hosts) if it has none yet; false if there is none free. An item an
+// external tool downloads takes none: the tool makes its own connections.
+func (e *Engine) takeSlot(w *run.Worker, j *Job, it site.Item) bool {
+	if _, has := e.jobSlot[j.ID]; has || w.SelfDownloads(it) {
+		return true
+	}
+	key := w.SlotKey(it.URL)
+	slot := j.Site + "|" + key
+	if e.slots[slot] >= w.SlotLimit(key) {
+		return false
+	}
+	e.slots[slot]++
+	e.jobSlot[j.ID] = slot
+	return true
+}
+
+// freeSlot, under the lock: the job's run ended.
+func (e *Engine) freeSlot(id string) {
+	slot, ok := e.jobSlot[id]
+	if !ok {
+		return
+	}
+	delete(e.jobSlot, id)
+	if e.slots[slot]--; e.slots[slot] <= 0 {
+		delete(e.slots, slot)
+	}
 }
 
 // ledgerFor opens the output folder's ledger or returns it from the cache.

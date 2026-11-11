@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
@@ -83,10 +85,19 @@ func NewWorker(r site.Resolver, cfg site.SiteConfig, client *http.Client, ev Eve
 	// one pool: a file that took every slot for its segments kept the next
 	// file waiting at 0% until it finished.
 	limiter := snet.NewHostLimiter(cfg.MaxConcurrent)
+	// A pool of hosts with a limit of its own (host_limits) is one key: its
+	// hosts share the slots.
+	for pattern, n := range cfg.HostLimits {
+		limiter.SetLimit(pattern, n)
+	}
 	down.Segments = cfg.MaxSegments
 	if extra := cfg.MaxConnections - cfg.MaxConcurrent; extra > 0 {
 		extras := snet.NewHostLimiter(extra)
 		down.AcquireExtra = func(rawURL string, want int) (int, func()) {
+			if _, pooled := poolOf(cfg, rawURL); pooled {
+				// The pool's number is all the connections it gives.
+				return 0, func() {}
+			}
 			return extras.TryAcquire(snet.HostOf(rawURL), want)
 		}
 	} else {
@@ -116,6 +127,9 @@ const (
 	OutcomeFailed                      // permanent failure
 	OutcomeStopped                     // captcha: the run must stop
 	OutcomeCanceled                    // context cancellation (the user stopped it)
+	// OutcomeBusy: the item's host has no file slot free right now and the
+	// caller asked not to wait (DownloadItemIfFree). Nothing was done.
+	OutcomeBusy
 )
 
 // Outcome is the result of DownloadItem.
@@ -137,6 +151,57 @@ type Outcome struct {
 // ledger may be nil (a caller that keeps no ledger); then the skip check and
 // the ledger write are not done.
 func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.Ledger, it site.Item, ev Events) Outcome {
+	return w.downloadItem(ctx, outDir, ledger, it, ev, true)
+}
+
+// DownloadItemIfFree is DownloadItem for a caller with other work to do: if
+// the item's host (or its pool, host_limits) has no file slot free it
+// returns OutcomeBusy at once instead of waiting for one. The queue uses it:
+// a job waiting inside the worker would show as downloading at 0% and keep
+// a slot of the queue from a file of another host.
+func (w *Worker) DownloadItemIfFree(ctx context.Context, outDir string, ledger *store.Ledger, it site.Item, ev Events) Outcome {
+	return w.downloadItem(ctx, outDir, ledger, it, ev, false)
+}
+
+// SlotKey is what an item's file slot is counted under: its pool's pattern
+// when host_limits names one for its host, the host otherwise.
+func (w *Worker) SlotKey(rawURL string) string {
+	if pattern, ok := poolOf(w.Cfg, rawURL); ok {
+		return pattern
+	}
+	return snet.HostOf(rawURL)
+}
+
+// SlotLimit is how many files may download at once under a slot key.
+func (w *Worker) SlotLimit(key string) int {
+	return w.Limiter.LimitOf(key)
+}
+
+// poolOf returns the host_limits pattern rawURL's host falls under. With
+// several matching, the first in alphabetical order, so it is always the
+// same one.
+func poolOf(cfg site.SiteConfig, rawURL string) (string, bool) {
+	if len(cfg.HostLimits) == 0 {
+		return "", false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return "", false
+	}
+	patterns := make([]string, 0, len(cfg.HostLimits))
+	for p := range cfg.HostLimits {
+		patterns = append(patterns, p)
+	}
+	sort.Strings(patterns)
+	for _, p := range patterns {
+		if site.MatchHost(u.Hostname(), []string{p}) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+func (w *Worker) downloadItem(ctx context.Context, outDir string, ledger *store.Ledger, it site.Item, ev Events, wait bool) Outcome {
 	// Already downloaded? The ledger ALONE is not TRUSTED: it is also checked
 	// that the file really is in place. If the user deleted the file, looking
 	// at the ledger and skipping would be a silent failure.
@@ -153,9 +218,19 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 		}
 	}
 
-	release, aerr := w.Limiter.Acquire(ctx, snet.HostOf(it.URL))
-	if aerr != nil {
-		return Outcome{Kind: OutcomeCanceled, Err: aerr}
+	var release func()
+	if key := w.SlotKey(it.URL); wait {
+		r, aerr := w.Limiter.Acquire(ctx, key)
+		if aerr != nil {
+			return Outcome{Kind: OutcomeCanceled, Err: aerr}
+		}
+		release = r
+	} else {
+		got, r := w.Limiter.TryAcquire(key, 1)
+		if got == 0 {
+			return Outcome{Kind: OutcomeBusy}
+		}
+		release = r
 	}
 	defer release()
 

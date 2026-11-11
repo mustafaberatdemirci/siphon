@@ -292,7 +292,7 @@ func TestMaxConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]int{"pixeldrain": 3, "bunkr": 1, "mega": 32, "cyberfile": 1}
+	want := map[string]int{"pixeldrain": 3, "bunkr": 4, "mega": 32, "cyberfile": 1}
 	for _, c := range cfgs {
 		if w, ok := want[c.Name]; ok && c.MaxConnections != w {
 			t.Errorf("%s max_connections = %d, want %d", c.Name, c.MaxConnections, w)
@@ -317,4 +317,66 @@ max_connections = 10
 	if c := cfgs[0]; c.MaxConnections != 10 || c.MaxSegments != 4 {
 		t.Errorf("override: max_connections %d, max_segments %d; want 10, 4", c.MaxConnections, c.MaxSegments)
 	}
+}
+
+// host_limits: a pool of download hosts and how many files it gives at once.
+// An external file changes one pattern without repeating the others, and 0
+// lifts an embedded limit.
+func TestHostLimitsParseAndMerge(t *testing.T) {
+	base := baseTOML + "host_limits = { \"*.slow.test\" = 1, \"*.mid.test\" = 2 }\n"
+	cfgs, _, err := Load([]byte(base), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfgs[0].HostLimits; len(got) != 2 || got["*.slow.test"] != 1 || got["*.mid.test"] != 2 {
+		t.Fatalf("host limits = %v", got)
+	}
+
+	ext := filepath.Join(testutil.TempDir(t), "sites.toml")
+	over := "[[site]]\nname = \"pixeldrain\"\nhost_limits = { \"*.slow.test\" = 0, \"*.MID.test\" = 3, \"*.new.test\" = 1 }\n"
+	if err := os.WriteFile(ext, []byte(over), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgs, _, err = Load([]byte(base), ext)
+	if err != nil {
+		t.Fatalf("Load with an external file: %v", err)
+	}
+	got := cfgs[0].HostLimits
+	if _, still := got["*.slow.test"]; still {
+		t.Errorf("a limit set to 0 is still there: %v", got)
+	}
+	if got["*.new.test"] != 1 {
+		t.Errorf("the external file's new pattern is missing: %v", got)
+	}
+	if got["*.mid.test"] != 3 {
+		t.Errorf("a pattern written in another case isn't the same pattern: %v", got)
+	}
+}
+
+func TestNegativeHostLimitIsUsageError(t *testing.T) {
+	_, _, err := Load([]byte(baseTOML+"host_limits = { \"*.slow.test\" = -1 }\n"), "")
+	if !errors.Is(err, ErrUsage) {
+		t.Fatalf("err = %v, want a usage error", err)
+	}
+}
+
+// The embedded bunkr entry: several files at once, one from *.scdn.st.
+func TestEmbeddedBunkrLimits(t *testing.T) {
+	cfgs, _, err := Load(Embedded, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cfgs {
+		if c.Name != "bunkr" {
+			continue
+		}
+		if c.MaxConcurrent != 4 || c.MaxSegments != 1 || c.HostLimits["*.scdn.st"] != 1 {
+			t.Errorf("bunkr: max_concurrent %d, max_segments %d, host_limits %v", c.MaxConcurrent, c.MaxSegments, c.HostLimits)
+		}
+		if len(c.CanaryURLs) == 0 || len(c.Extra) == 0 {
+			t.Errorf("bunkr lost its canaries or extra settings: %d, %d", len(c.CanaryURLs), len(c.Extra))
+		}
+		return
+	}
+	t.Fatal("no bunkr entry")
 }

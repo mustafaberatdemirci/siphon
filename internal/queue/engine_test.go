@@ -48,11 +48,16 @@ type fakeSite struct {
 	// served (bunkr's and cyberfile's one connection per IP); busy answers
 	// 503 to the next that many requests (a busy server).
 	connLimit, inflight, busy int
+	// perHost counts the requests being served per host name asked for, and
+	// perHostMax the most there were at once (files named "pool-…" are
+	// asked for as "localhost", the others by the server's address).
+	perHost, perHostMax map[string]int
 }
 
 func newFakeSite(t *testing.T, names ...string) *fakeSite {
 	t.Helper()
-	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}, forbid: map[string]bool{}, ranges: map[string][]string{}}
+	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}, forbid: map[string]bool{}, ranges: map[string][]string{},
+		perHost: map[string]int{}, perHostMax: map[string]int{}}
 	for _, n := range names {
 		b := make([]byte, 96*1024)
 		_, _ = rand.Read(b)
@@ -90,6 +95,10 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	delay := f.delay
 	forbid := f.forbid[name]
 	quota := f.quota
+	host := r.Host
+	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+		host = h
+	}
 	overloaded := f.busy > 0 || f.connLimit > 0 && f.inflight >= f.connLimit
 	if f.busy > 0 {
 		f.busy--
@@ -97,7 +106,16 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	if !overloaded {
 		f.inflight++
 	}
+	f.perHost[host]++
+	if f.perHost[host] > f.perHostMax[host] {
+		f.perHostMax[host] = f.perHost[host]
+	}
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.perHost[host]--
+		f.mu.Unlock()
+	}()
 	if overloaded {
 		http.Error(w, "Service Temporarily Unavailable", http.StatusServiceUnavailable)
 		return
@@ -260,8 +278,14 @@ func (r *fakeResolver) item(name string) site.Item {
 	if dir == "" {
 		dir = "Album"
 	}
+	base := r.f.srv.URL
+	if strings.HasPrefix(name, "pool-") {
+		// The same server under another name: a pool of hosts with a limit
+		// of its own (host_limits).
+		base = strings.Replace(base, "127.0.0.1", "localhost", 1)
+	}
 	return site.Item{
-		URL:        r.f.srv.URL + "/f/" + name + "?gen=" + fmt.Sprint(gen),
+		URL:        base + "/f/" + name + "?gen=" + fmt.Sprint(gen),
 		SourcePage: "file://" + name,
 		Dir:        dir,
 		Filename:   name,

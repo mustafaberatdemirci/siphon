@@ -487,7 +487,7 @@ The **Connections per file** setting is a *request*. Each site has a *ceiling*
 | Site | Ceiling | Why |
 | --- | --- | --- |
 | pixeldrain | 1 | The free tier limits concurrent connections per IP. With a paid account and an API key you can raise it in your own `sites.toml`. |
-| bunkr | 1 | Measured (2026-10-19): the CDN allows one connection per IP, so one file at a time, too. A second connection gets `503`. |
+| bunkr | 1 | One connection per file, up to four files at once. Measured (2026-11-11): its `*.scdn.st` file servers allow one connection per IP between them (a second gets `503`), so their files download one at a time (`host_limits`); its `*.cdn.cr` servers gave five files at once. |
 | mega | 8 | Every byte range is decrypted independently. The meta-MAC is checked once over the finished file. |
 | gofile | 4 | Measured: 10.4 MB/s over one connection, 12.9 MB/s over four. |
 | mediafire | 4 | Its servers send no version header, but the SHA-256 from mediafire's API is checked over the finished file. |
@@ -612,6 +612,7 @@ The per-site connection settings:
 | `max_concurrent` | Files downloaded at once from the site (per host). |
 | `max_segments` | Connections per file: the ceiling of the **Connections per file** setting. |
 | `max_connections` | Connections to one host at once, the files' own connections included. Default: `max_concurrent` × `max_segments`. |
+| `host_limits` | Files at once from a pool of download servers, e.g. `host_limits = { "*.scdn.st" = 1 }`: the servers the pattern names share the number, and a file there gets no extra connections. The window's queue passes over a file whose pool is full and starts the next one that can run. `0` in your own file lifts an embedded limit. |
 Invalid TOML is a hard error; Siphon doesn't silently fall back to the
 embedded copy.
 
