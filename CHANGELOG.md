@@ -2,6 +2,60 @@
 
 Each version's section is also its release notes on GitHub.
 
+## Unreleased
+
+**Fixes**
+
+- **bunkr albums download up to four files at once.** The whole site was
+  held to one file at a time because some of its file servers (`*.scdn.st`)
+  allow one connection per address. Only those servers' files take turns now
+  (`host_limits` in `sites.toml`, for any site); a file whose servers are
+  busy is passed over in the queue instead of holding a slot at 0%.
+- **One slow server no longer slows a whole site.** When a server answers
+  "too many connections" (`503`/`429`), only that server's files download
+  fewer at a time; the site's other servers go on at full number. Before,
+  one slow bunkr server brought every bunkr file down to one at a time. The
+  server is also named in the log.
+- **bunkr downloads continue where they stopped.** Its `*.cdn.cr` file
+  servers answer the first request made with a new signature with the whole
+  file, whatever part was asked for; Siphon took that for a changed file and
+  started over at every dropped connection. It now asks the same link again
+  when the whole file comes back with the same ETag and size.
+- **A download that keeps getting further is not given up.** The retry
+  budget (5 attempts within 10 minutes) counted from the download's start,
+  working time included: a file that had been downloading for longer than
+  10 minutes failed at its first dropped connection, with "retry budget
+  exhausted (5 attempts)" after a single one. Attempts and time now count
+  from the last attempt that saved more of the file, and the message says
+  how many attempts were made.
+- When the network is gone while files download, the site's downloads wait
+  and go on by themselves (as they already did when links couldn't be
+  resolved) instead of failing one after the other.
+- **The window no longer grows by about 300 MB an hour while downloading**
+  (2.9 GB after ten hours). Every redraw refreshed the whole table and the
+  category tree, and Fyne kept a measuring copy of a row and of two tree
+  items each time, and loaded the fonts again for each tree item. Progress
+  is now written into the rows on screen, and the tree's counts are drawn
+  without a theme of their own.
+- Errors reach `siphon.log`. The window version has no error output, and a
+  line written there first was never written to the file: **Copy diagnostic
+  info** showed the retries but not one failure.
+- A queue file that can't be read (damaged, or written by a newer Siphon) is
+  kept as `queue.json.unreadable-<time>` and the window says so. The empty
+  queue used to be saved over it.
+- **Settings** fit a window that isn't maximized: they scroll, and each
+  hint wraps under its setting. The dialog used to grow past the window,
+  its last rows under the Close button.
+- With **Watch the clipboard** off, the clipboard is no longer read every
+  second.
+- Two Siphon windows started at the same moment could both run and drive
+  the same queue. Which one runs is now decided by a file lock
+  (`instance.lock`), which only one program can hold.
+- A pixeldrain API key is only sent to pixeldrain's first domain, whichever
+  mirror a link names.
+- Links pasted without `https://` are also recognized for bunkr, cyberdrop
+  and pixeldrain's mirrors.
+
 ## 0.1.2
 
 **Install**
