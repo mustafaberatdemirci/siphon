@@ -110,6 +110,17 @@ type queueTab struct {
 	counts     map[string]int
 	sel        *selection
 
+	// What the list and the tree were last redrawn whole for (redraw.go):
+	// the rows' ids in order, the rows on screen by their place, the tree's
+	// counts and selected node. rowsMade and treeItemsMade count the row
+	// and tree item objects made, for the test that they stop being made.
+	listIDs    []string
+	rows       map[int]*jobRow
+	treeCounts map[string]int
+	treeCat    string
+	treeDrawn  bool
+	rowsMade   int
+
 	// shown reports whether the table is on screen: the keyboard shortcuts
 	// act on it only then. nil means always.
 	shown func() bool
@@ -168,13 +179,18 @@ func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm 
 	q.sortArrows = arrows
 	q.list = widget.NewList(
 		func() int { return len(q.visible) },
-		func() fyne.CanvasObject { return newJobRow(q) },
+		func() fyne.CanvasObject {
+			q.rowsMade++
+			return newJobRow(q)
+		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			if i < 0 || i >= len(q.visible) {
 				return
 			}
 			r := q.visible[i]
-			o.(*jobRow).set(r, q.sel.has(r.Job.ID))
+			jr := o.(*jobRow)
+			q.bindRow(jr, i)
+			jr.set(r, q.sel.has(r.Job.ID))
 		},
 	)
 	table := container.NewBorder(header, nil, nil, nil, q.list)
@@ -418,9 +434,9 @@ func (q *queueTab) render() {
 	q.sel.keepOnly(q.visibleIDs)
 
 	q.counts = q.vm.CategoryCounts()
-	q.tree.Refresh()
+	q.redrawTree()
 
-	q.list.Refresh()
+	q.redrawList()
 	q.updateSelectionButtons()
 	q.status.SetText(q.vm.StatusLine())
 	enable(q.clearDone, q.counts[nodeFinished] > 0)
@@ -460,7 +476,7 @@ func (q *queueTab) render() {
 
 // renderSelection redraws after the selection alone changed.
 func (q *queueTab) renderSelection() {
-	q.list.Refresh()
+	q.redrawList()
 	q.updateSelectionButtons()
 }
 

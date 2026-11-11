@@ -13,7 +13,6 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
-	"fyne.io/fyne/v2/widget"
 
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
@@ -382,7 +381,7 @@ func TestTreeCountsAreReadable(t *testing.T) {
 	test.NewTempApp(t)
 	o := newTreeItem(false)
 	setTreeItem(o, "All downloads", 520)
-	count := o.(*fyne.Container).Objects[1].(*container.ThemeOverride).Content.(*widget.Label)
+	count := treeCount(o)
 	if count.Text != "520" {
 		t.Fatalf("count shows %q", count.Text)
 	}
@@ -390,10 +389,10 @@ func TestTreeCountsAreReadable(t *testing.T) {
 	if count.Text != "" {
 		t.Errorf("an empty category shows %q", count.Text)
 	}
-	th := countTheme{newCompactTheme()}
+	th := newCompactTheme()
 	for _, v := range []fyne.ThemeVariant{theme.VariantDark, theme.VariantLight} {
 		bg := th.Color(theme.ColorNameBackground, v)
-		fg := over(th.Color(theme.ColorNameDisabled, v), bg)
+		fg := over(countColor(th, v), bg)
 		if c := contrast(fg, bg); c < 4.5 {
 			t.Errorf("variant %d: count contrast %.1f:1, want at least 4.5:1", v, c)
 		}

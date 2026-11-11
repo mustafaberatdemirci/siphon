@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -256,6 +257,7 @@ type jobRow struct {
 	widget.BaseWidget
 	q      *queueTab
 	id     string
+	index  int // the place in the list it shows; -1 before the list gave it one
 	bg     *canvas.Rectangle
 	icon   *widget.Icon
 	name   *widget.Label
@@ -277,6 +279,7 @@ func newJobRow(q *queueTab) *jobRow {
 	}
 	r := &jobRow{
 		q:      q,
+		index:  -1,
 		bg:     canvas.NewRectangle(color.Transparent),
 		icon:   widget.NewIcon(nil),
 		name:   label(fyne.TextAlignLeading),
@@ -390,24 +393,50 @@ func statusImportance(s queue.State) widget.Importance {
 
 // ---------- Category tree ----------
 
+// treeItemsMade counts the tree items made (see redraw.go).
+var treeItemsMade int
+
+// newTreeItem is a node of the category tree: its name, and on the right
+// how many downloads it holds.
+//
+// The count is a canvas.Text with its colour and size given, not a label in
+// a theme override of its own. Fyne keys its font cache by the override a
+// text is drawn in, and every override is a new key: the fonts were loaded
+// again for each tree item made, and kept (MEASURED 2026-11-11: 19 MB of
+// font tables in 11 minutes of downloading, while the tree was refreshed
+// for each job that changed state).
 func newTreeItem(bool) fyne.CanvasObject {
+	treeItemsMade++
 	name := widget.NewLabel("")
 	name.Truncation = fyne.TextTruncateEllipsis
-	count := widget.NewLabel("")
+	count := canvas.NewText("", nil)
 	count.Alignment = fyne.TextAlignTrailing
-	count.Importance = widget.LowImportance
-	return container.NewBorder(nil, nil, nil, container.NewThemeOverride(count, countTheme{newCompactTheme()}), name)
+	count.TextSize = newCompactTheme().Size(theme.SizeNameText)
+	pad := newCompactTheme().Size(theme.SizeNameInnerPadding)
+	right := container.New(layout.NewCustomPaddedLayout(0, 0, pad, pad), container.NewCenter(count))
+	return container.NewBorder(nil, nil, nil, right, name)
+}
+
+// treeCount is a tree item's count text.
+func treeCount(o fyne.CanvasObject) *canvas.Text {
+	right := o.(*fyne.Container).Objects[1].(*fyne.Container)
+	return right.Objects[0].(*fyne.Container).Objects[0].(*canvas.Text)
 }
 
 func setTreeItem(o fyne.CanvasObject, label string, n int) {
 	c := o.(*fyne.Container)
 	name := c.Objects[0].(*widget.Label)
-	count := c.Objects[1].(*container.ThemeOverride).Content.(*widget.Label)
 	name.SetText(label)
+	count := treeCount(o)
+	text := ""
 	if n > 0 {
-		count.SetText(strconv.Itoa(n))
-	} else {
-		count.SetText("")
+		text = strconv.Itoa(n)
+	}
+	// The colour follows the light or dark variant in use now.
+	col := countColor(theme.Current(), fyne.CurrentApp().Settings().ThemeVariant())
+	if count.Text != text || count.Color != col {
+		count.Text, count.Color = text, col
+		count.Refresh()
 	}
 }
 
