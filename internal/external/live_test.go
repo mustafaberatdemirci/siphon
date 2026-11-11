@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // Against the REAL tools and the network; skipped unless SIPHON_TOOLS_DIR
@@ -47,7 +49,7 @@ func TestLiveYtDlp(t *testing.T) {
 		t.Errorf("example.com: %v, want ErrUnsupported", err)
 	}
 
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	if tools.FFmpeg == "" {
 		// Without ffmpeg a video with separate picture and sound must fail
 		// with a reason, not hand over the sound alone.
@@ -90,7 +92,7 @@ func TestLiveGalleryDL(t *testing.T) {
 	if err := tools.GalleryDLProbe(ctx, "https://example.com/"); err != ErrUnsupported {
 		t.Errorf("example.com: %v, want ErrUnsupported", err)
 	}
-	base := t.TempDir()
+	base := testutil.TempDir(t)
 	dir, size, err := tools.GalleryDLDownload(ctx, "https://imgur.com/21yMxCS", base, nil)
 	if err != nil || size == 0 || !strings.HasPrefix(dir, base) {
 		t.Fatalf("download: %q %d %v", dir, size, err)
@@ -138,7 +140,7 @@ func TestLiveInstall(t *testing.T) {
 	if tools.FFmpeg == "" {
 		t.Skip("no ffmpeg package on this system; the merge check needs it")
 	}
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	path, size, err := tools.YtDlpDownload(ctx, "https://www.youtube.com/watch?v=jNQXAC9IVRw", out, nil)
 	if err != nil {
 		t.Fatalf("download with ffmpeg: %v", err)

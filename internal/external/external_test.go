@@ -19,7 +19,7 @@ import (
 func fakeTools(t *testing.T) (Tools, func() [][]string) {
 	t.Helper()
 	exe := testutil.FakeToolPath(t)
-	log := filepath.Join(t.TempDir(), "calls.log")
+	log := filepath.Join(testutil.TempDir(t), "calls.log")
 	t.Setenv(testutil.FakeToolLogEnv, log)
 	calls := func() [][]string {
 		b, _ := os.ReadFile(log)
@@ -71,7 +71,7 @@ func TestYtDlpProbe(t *testing.T) {
 
 func TestYtDlpDownload(t *testing.T) {
 	tools, calls := fakeTools(t)
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	var reports [][2]int64
 	path, size, err := tools.YtDlpDownload(context.Background(), "https://v.test/watch?v=one", dir,
 		func(done, total int64) { reports = append(reports, [2]int64{done, total}) })
@@ -110,7 +110,7 @@ func TestYtDlpDownload(t *testing.T) {
 // error, never a success.
 func TestYtDlpDownloadReportedFileMustExist(t *testing.T) {
 	tools, _ := fakeTools(t)
-	_, _, err := tools.YtDlpDownload(context.Background(), "https://v.test/split", t.TempDir(), nil)
+	_, _, err := tools.YtDlpDownload(context.Background(), "https://v.test/split", testutil.TempDir(t), nil)
 	if err == nil || !strings.Contains(err.Error(), "isn't on disk") || !strings.Contains(err.Error(), "ffmpeg") {
 		t.Fatalf("got %v", err)
 	}
@@ -121,7 +121,7 @@ func TestYtDlpDownloadCanceled(t *testing.T) {
 	tools, _ := fakeTools(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := tools.YtDlpDownload(ctx, "https://v.test/watch?v=one", t.TempDir(), nil); !errors.Is(err, context.Canceled) {
+	if _, _, err := tools.YtDlpDownload(ctx, "https://v.test/watch?v=one", testutil.TempDir(t), nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
@@ -136,7 +136,7 @@ func TestGalleryDL(t *testing.T) {
 		t.Errorf("unknown link: %v, want ErrUnsupported", err)
 	}
 
-	base := t.TempDir()
+	base := testutil.TempDir(t)
 	var last int64
 	dir, size, err := tools.GalleryDLDownload(ctx, "https://p.test/album", base, func(done, total int64) {
 		if total != -1 {
@@ -162,13 +162,13 @@ func TestGalleryDL(t *testing.T) {
 // used to kill the tool alone and leave its child running.
 func TestCancelStopsTheToolsChildren(t *testing.T) {
 	tools, _ := fakeTools(t)
-	beat := filepath.Join(t.TempDir(), "heartbeat")
+	beat := filepath.Join(testutil.TempDir(t), "heartbeat")
 	t.Setenv(testutil.FakeToolHeartbeatEnv, beat)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := tools.YtDlpDownload(ctx, "https://v.test/spawn", t.TempDir(), nil)
+		_, _, err := tools.YtDlpDownload(ctx, "https://v.test/spawn", testutil.TempDir(t), nil)
 		done <- err
 	}()
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
@@ -197,7 +197,7 @@ func TestCancelStopsTheToolsChildren(t *testing.T) {
 // "not installed" instead of quietly using another copy.
 func TestFindConfiguredPath(t *testing.T) {
 	exe, _ := os.Executable()
-	got := Find(map[string]string{"yt_dlp": exe, "gallery_dl": filepath.Join(t.TempDir(), "missing.exe")})
+	got := Find(map[string]string{"yt_dlp": exe, "gallery_dl": filepath.Join(testutil.TempDir(t), "missing.exe")})
 	if got.YtDlp != exe || got.GalleryDL != "" {
 		t.Errorf("Find = %+v", got)
 	}
@@ -207,7 +207,7 @@ func TestFindConfiguredPath(t *testing.T) {
 // working directory, which is where the command line saves downloads by
 // default.
 func TestFindIgnoresRelativeConfiguredPath(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "tool.exe"), []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // Install writes the manifest into the profile folder of each browser that
 // has one, and makes no folder for a browser that isn't there.
 func TestInstallFiles(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.TempDir(t)
 	homeDir = func() (string, error) { return home, nil }
 	t.Cleanup(func() { homeDir = os.UserHomeDir })
 	bs := otherBrowsers()
@@ -22,7 +24,7 @@ func TestInstallFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	host := filepath.Join(t.TempDir(), "siphon")
+	host := filepath.Join(testutil.TempDir(t), "siphon")
 	if err := os.WriteFile(host, []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // waitFor polls cond for up to two seconds.
@@ -28,7 +30,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // A second launch finds the running instance, asks it to show its window and
 // is told to exit; once the first one is gone, a launch becomes the instance.
 func TestSecondLaunchShowsTheRunningInstance(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	var shown atomic.Int32
 	release, running := Claim(dir, Handlers{Show: func() { shown.Add(1) }})
 	if running {
@@ -53,7 +55,7 @@ func TestSecondLaunchShowsTheRunningInstance(t *testing.T) {
 
 // Links handed to the running instance arrive whole, in order.
 func TestAddHandsLinksToTheInstance(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	var mu sync.Mutex
 	var got []string
 	release, _ := Claim(dir, Handlers{Add: func(links []string) {
@@ -82,7 +84,7 @@ func TestAddHandsLinksToTheInstance(t *testing.T) {
 // Without the instance's key nothing is added: the key is in a file only the
 // user can read, so a program that merely found the port can't queue links.
 func TestAddNeedsTheKey(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	var added atomic.Int32
 	release, _ := Claim(dir, Handlers{Add: func([]string) { added.Add(1) }})
 	defer release()
@@ -112,7 +114,7 @@ func TestAddNeedsTheKey(t *testing.T) {
 
 // With no instance running, Add says so.
 func TestAddWithoutAnInstance(t *testing.T) {
-	if err := Add(t.TempDir(), []string{"https://x.test/a"}); !errors.Is(err, ErrNotRunning) {
+	if err := Add(testutil.TempDir(t), []string{"https://x.test/a"}); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("Add = %v, want ErrNotRunning", err)
 	}
 }
@@ -120,7 +122,7 @@ func TestAddWithoutAnInstance(t *testing.T) {
 // A port file left by a crash must not stop the app from starting: nobody
 // listening, or some other program on that port, isn't Siphon.
 func TestStaleOrForeignPortIsNotAnInstance(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	path := filepath.Join(dir, fileName)
 
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")

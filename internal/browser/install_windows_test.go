@@ -9,13 +9,15 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // Install registers the host with every browser under HKEY_CURRENT_USER (in
 // a test key here), each pointing at the manifest of its kind; Uninstall
 // takes it all away.
 func TestInstallWindows(t *testing.T) {
-	cfg := t.TempDir()
+	cfg := testutil.TempDir(t)
 	userConfigDir = func() (string, error) { return cfg, nil }
 	regBase = fmt.Sprintf(`Software\SiphonTest%d`, time.Now().UnixNano())
 	t.Cleanup(func() {
@@ -23,7 +25,7 @@ func TestInstallWindows(t *testing.T) {
 		deleteTree(registry.CURRENT_USER, regBase)
 		regBase = `Software`
 	})
-	host := filepath.Join(t.TempDir(), "siphon.exe")
+	host := filepath.Join(testutil.TempDir(t), "siphon.exe")
 	if err := os.WriteFile(host, []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func TestInstallWindows(t *testing.T) {
 }
 
 func TestInstallNeedsTheHost(t *testing.T) {
-	if _, err := Install(filepath.Join(t.TempDir(), "missing.exe")); err == nil {
+	if _, err := Install(filepath.Join(testutil.TempDir(t), "missing.exe")); err == nil {
 		t.Error("installed a host that isn't there")
 	}
 	if _, err := Install("siphon.exe"); err == nil {

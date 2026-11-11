@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 func TestRedact(t *testing.T) {
@@ -31,7 +33,7 @@ func TestRedact(t *testing.T) {
 }
 
 func TestPrintfRedactsAndKeepsOneLinePerEntry(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "siphon.log")
+	path := filepath.Join(testutil.TempDir(t), "siphon.log")
 	l, err := Open(path, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +54,7 @@ func TestPrintfRedactsAndKeepsOneLinePerEntry(t *testing.T) {
 }
 
 func TestRotatesAndTailReadsBothFiles(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "siphon.log")
+	path := filepath.Join(testutil.TempDir(t), "siphon.log")
 	l, err := Open(path, 200)
 	if err != nil {
 		t.Fatal(err)

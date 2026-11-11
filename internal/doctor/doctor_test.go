@@ -11,6 +11,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // fakeResolver is a minimal imitation satisfying the site.Resolver interface.
@@ -171,7 +172,7 @@ func TestFormatHandlesEmptyResults(t *testing.T) {
 // --- Recorder ---
 
 func TestRecorderSavesRealBytes(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	rec := &Recorder{Dir: dir}
 
 	body := []byte("<html>real body</html>")
@@ -203,7 +204,7 @@ func TestRecorderSavesRealBytes(t *testing.T) {
 // Two answers recorded under the same name within a second (mega records
 // every API answer as api.json) are both kept, in the order they came.
 func TestRecorderKeepsSameNameRecordings(t *testing.T) {
-	rec := &Recorder{Dir: t.TempDir()}
+	rec := &Recorder{Dir: testutil.TempDir(t)}
 	rec.For("mega")("api.json", []byte("first"))
 	rec.For("mega")("api.json", []byte("second"))
 	saved := rec.Saved()
@@ -218,7 +219,7 @@ func TestRecorderKeepsSameNameRecordings(t *testing.T) {
 }
 
 func TestRecorderPerSiteLabels(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	rec := &Recorder{Dir: dir}
 	rec.For("bunkr")("canary.html", []byte("a"))
 	rec.For("pixeldrain")("canary.json", []byte("b"))
@@ -237,7 +238,7 @@ func TestRecorderPerSiteLabels(t *testing.T) {
 
 // An empty body must not be recorded: a zero-byte file is noise in a diff.
 func TestRecorderSkipsEmptyBodies(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	cfg := site.SiteConfig{Record: (&Recorder{Dir: dir}).For("bunkr")}
 	cfg.Recordln("canary.html", nil)
 	cfg.Recordln("canary.html", []byte{})
@@ -255,7 +256,7 @@ func TestRecorderSkipsEmptyBodies(t *testing.T) {
 // report, recording is a helper.
 func TestRecorderCollectsErrorsWithoutPanicking(t *testing.T) {
 	// Force using an existing FILE as the folder.
-	f := filepath.Join(t.TempDir(), "file")
+	f := filepath.Join(testutil.TempDir(t), "file")
 	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,7 @@ func TestRecorderDefaultDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmp := t.TempDir()
+	tmp := testutil.TempDir(t)
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}

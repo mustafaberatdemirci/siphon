@@ -30,7 +30,7 @@ func newDirectFor(t *testing.T, h http.Handler) (Resolver, *httptest.Server) {
 // noTools points the tool paths at files that don't exist: a real yt-dlp
 // on the machine is never asked (a configured path is the only place looked).
 func noTools(t *testing.T) map[string]string {
-	missing := filepath.Join(t.TempDir(), "missing.exe")
+	missing := filepath.Join(testutil.TempDir(t), "missing.exe")
 	return map[string]string{"yt_dlp": missing, "gallery_dl": missing, "ffmpeg": missing}
 }
 
@@ -231,7 +231,7 @@ func pageServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 func withTools(t *testing.T, srv *httptest.Server) (Resolver, func() [][]string) {
 	t.Helper()
 	exe := testutil.FakeToolPath(t)
-	log := filepath.Join(t.TempDir(), "calls.log")
+	log := filepath.Join(testutil.TempDir(t), "calls.log")
 	t.Setenv(testutil.FakeToolLogEnv, log)
 	calls := func() [][]string {
 		b, _ := os.ReadFile(log)
@@ -244,7 +244,7 @@ func withTools(t *testing.T, srv *httptest.Server) (Resolver, func() [][]string)
 		}
 		return out
 	}
-	missing := filepath.Join(t.TempDir(), "missing.exe")
+	missing := filepath.Join(testutil.TempDir(t), "missing.exe")
 	r := NewDirect(SiteConfig{Name: DirectName, HTTPClient: srv.Client(),
 		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": missing}}.WithDefaults())
 	return r, calls
@@ -359,7 +359,7 @@ func TestDirectToolItemDownloads(t *testing.T) {
 	if err != nil || it.URL != srv.URL+"/watch?v=one" || hits.Load() != 0 {
 		t.Fatalf("ResolveOne: %+v %v (%d requests)", it, err, hits.Load())
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	path, size, err := r.(SelfDownloader).DownloadSelf(context.Background(), dir, it, nil)
 	if err != nil || filepath.Dir(path) != dir || size == 0 {
 		t.Fatalf("DownloadSelf: %s %d %v", path, size, err)

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 func TestKeyDoesNotDependOnURL(t *testing.T) {
@@ -49,7 +51,7 @@ func TestOpenPlacesLedgerUnderOutRoot(t *testing.T) {
 	// The ledger must live UNDER THE OUTPUT ROOT. If it were in the cwd or
 	// next to the exe, a second run with a different -out would say
 	// "everything is downloaded" and return 0 without downloading anything.
-	out := filepath.Join(t.TempDir(), "output", "sub")
+	out := filepath.Join(testutil.TempDir(t), "output", "sub")
 	l, err := Open(out)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -66,7 +68,7 @@ func TestOpenPlacesLedgerUnderOutRoot(t *testing.T) {
 }
 
 func TestAddAndLookup(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	l, err := Open(out)
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +108,7 @@ func TestAddAndLookup(t *testing.T) {
 
 // The real criterion: the ledger survives ACROSS RUNS.
 func TestLedgerSurvivesReopen(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	l, err := Open(out)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +150,7 @@ func TestLedgerSurvivesReopen(t *testing.T) {
 // ledger as corrupt and failing the run would turn a recoverable state into a
 // fatal one. But it doesn't pass silently either: it is counted.
 func TestCorruptLinesAreSkippedNotFatal(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	path := filepath.Join(out, FileName)
 	good, _ := json.Marshal(Entry{
 		SourcePage: "https://s/1", Dir: "d", Filename: "good.bin", Path: "d/good.bin",
@@ -185,7 +187,7 @@ func TestCorruptLinesAreSkippedNotFatal(t *testing.T) {
 // one corrupt line and the new entry could not be read on the next open
 // either.
 func TestAddAfterTruncatedLastLineSurvivesReopen(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	path := filepath.Join(out, FileName)
 	good, _ := json.Marshal(Entry{SourcePage: "https://s/1", Filename: "a.bin", Path: "a.bin"})
 	content := string(good) + "\n" + `{"source_page":"https://s/2","fil` // cut off by a crash
@@ -220,7 +222,7 @@ func TestAddAfterTruncatedLastLineSurvivesReopen(t *testing.T) {
 
 // Long file names and paths can exceed the default 64 KB scanner limit.
 func TestLongLinesAreRead(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	long := strings.Repeat("u", 200000)
 	e := Entry{SourcePage: "https://s/1", Dir: long, Filename: "f.bin", Path: "f.bin"}
 	data, _ := json.Marshal(e)
@@ -238,7 +240,7 @@ func TestLongLinesAreRead(t *testing.T) {
 }
 
 func TestAddRequiresFilename(t *testing.T) {
-	l, err := Open(t.TempDir())
+	l, err := Open(testutil.TempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +251,7 @@ func TestAddRequiresFilename(t *testing.T) {
 }
 
 func TestAddAfterCloseFails(t *testing.T) {
-	l, err := Open(t.TempDir())
+	l, err := Open(testutil.TempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +271,7 @@ func TestAddAfterCloseFails(t *testing.T) {
 // file keeps its folder from being deleted or moved, and the window version
 // keeps the ledger of every folder it saved to open until it quits.
 func TestLedgerDoesNotHoldTheFileOpen(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	l, err := Open(out)
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +307,7 @@ func TestNewLedgerIsPrivate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no Unix mode bits on Windows")
 	}
-	l, err := Open(t.TempDir())
+	l, err := Open(testutil.TempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +323,7 @@ func TestNewLedgerIsPrivate(t *testing.T) {
 
 // Downloads run concurrently; the ledger will be written concurrently too.
 func TestConcurrentAdd(t *testing.T) {
-	out := t.TempDir()
+	out := testutil.TempDir(t)
 	l, err := Open(out)
 	if err != nil {
 		t.Fatal(err)
@@ -372,7 +374,7 @@ func TestConcurrentAdd(t *testing.T) {
 func TestOpenFailsOnUnusableRoot(t *testing.T) {
 	// Giving an existing FILE as the output root must fail; silently
 	// continuing without a ledger would silently switch off idempotence.
-	f := filepath.Join(t.TempDir(), "file")
+	f := filepath.Join(testutil.TempDir(t), "file")
 	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}

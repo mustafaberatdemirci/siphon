@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 const baseTOML = `
@@ -34,7 +36,7 @@ func chdirTemp(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +71,7 @@ func TestWorkingDirectorySitesTomlIsIgnored(t *testing.T) {
 
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "sites.toml")
+	p := filepath.Join(testutil.TempDir(t), "sites.toml")
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatalf("could not write temp file: %v", err)
 	}
@@ -182,7 +184,7 @@ func TestInvalidTOMLIsHardFailNotFallback(t *testing.T) {
 }
 
 func TestMissingExplicitConfigIsUsageError(t *testing.T) {
-	_, _, err := Load([]byte(baseTOML), filepath.Join(t.TempDir(), "missing.toml"))
+	_, _, err := Load([]byte(baseTOML), filepath.Join(testutil.TempDir(t), "missing.toml"))
 	if err == nil {
 		t.Fatal("a file given with -c that doesn't exist must fail, not silently fall back to the embedded copy")
 	}

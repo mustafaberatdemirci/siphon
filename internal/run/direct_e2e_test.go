@@ -166,7 +166,7 @@ func TestDirectLinkEndToEnd(t *testing.T) {
 // A link to a web page is refused at resolution: nothing is written, and
 // the run reports why.
 func TestDirectLinkToWebPageSavesNothing(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // no real yt-dlp or gallery-dl may be asked
+	t.Setenv("PATH", testutil.TempDir(t)) // no real yt-dlp or gallery-dl may be asked
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, "<html>Sign in to download</html>")
@@ -191,7 +191,7 @@ func toolRunCtx(t *testing.T, outDir, link string, srv *httptest.Server) runCtx 
 	exe := testutil.FakeToolPath(t)
 	cfg := site.SiteConfig{
 		Name: site.DirectName, MaxConcurrent: 4, MaxRetries: 1, HTTPClient: srv.Client(),
-		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": filepath.Join(t.TempDir(), "none")},
+		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": filepath.Join(testutil.TempDir(t), "none")},
 	}.WithDefaults()
 	ledger, err := store.Open(outDir)
 	if err != nil {

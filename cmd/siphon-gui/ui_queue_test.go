@@ -17,6 +17,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // listResolver hands out a fixed list of files for https://list.test/…
@@ -55,7 +56,7 @@ func newTestQueue(t *testing.T, names ...string) (*queueTab, *queue.Engine, fyne
 	q, view := newQueueTab(w, a.Preferences(), eng, vm, nil)
 	w.SetContent(view)
 	w.Resize(fyne.NewSize(1000, 700))
-	if _, err := eng.Add(context.Background(), "https://list.test/album", t.TempDir()); err != nil {
+	if _, err := eng.Add(context.Background(), "https://list.test/album", testutil.TempDir(t)); err != nil {
 		t.Fatal(err)
 	}
 	vm.Replace(eng.Jobs())
@@ -283,7 +284,7 @@ func TestMainMenu(t *testing.T) {
 // that worked are queued, and the folder becomes the default.
 func TestResolveLinksKeepsTheFailedOnes(t *testing.T) {
 	q, eng, _ := newTestQueue(t, "a.bin")
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	added, errs, failed := q.resolveLinks(context.Background(), []string{"https://list.test/other", "https://unknown.test/x"}, dir)
 	if added != 1 || len(errs) != 1 || len(failed) != 1 || failed[0] != "https://unknown.test/x" {
 		t.Errorf("added %d, errs %v, failed %v", added, errs, failed)
@@ -346,7 +347,7 @@ func TestStopAddingKeepsTheRest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	urls := []string{"https://list.test/one", "https://list.test/two"}
-	added, errs, failed := q.resolveLinks(ctx, urls, t.TempDir())
+	added, errs, failed := q.resolveLinks(ctx, urls, testutil.TempDir(t))
 	if added != 0 || len(errs) != 0 || strings.Join(failed, " ") != strings.Join(urls, " ") {
 		t.Errorf("added %d, errs %v, failed %v", added, errs, failed)
 	}

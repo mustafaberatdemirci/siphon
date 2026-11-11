@@ -6,12 +6,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // --- "Open folder" target ---
 
 func TestPickOpenTargetOrder(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	album := filepath.Join(root, "Album")
 	if err := os.MkdirAll(album, 0o755); err != nil {
 		t.Fatal(err)
@@ -33,7 +35,7 @@ func TestPickOpenTargetOrder(t *testing.T) {
 
 // If the root is missing it must NOT BE CREATED SILENTLY; the reason must be given.
 func TestPickOpenTargetMissingRootExplains(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "not-yet")
+	missing := filepath.Join(testutil.TempDir(t), "not-yet")
 	target, _, reason := pickOpenTarget("", "", missing)
 	if target != "" || !strings.Contains(reason, "doesn't exist yet") {
 		t.Errorf("target=%q reason=%q", target, reason)

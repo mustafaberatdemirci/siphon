@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // orderedEngine is an engine with jobs a..e in that order, none running.
@@ -65,7 +67,7 @@ func TestArrangeKeepsTheOthersInPlace(t *testing.T) {
 func TestOrderDecidesWhatStartsNext(t *testing.T) {
 	f := newFakeSite(t, "a", "b", "c")
 	f.delay = 50 * time.Millisecond
-	state := t.TempDir() + "/queue.json"
+	state := testutil.TempDir(t) + "/queue.json"
 	h := newHarness(t, f, state, 1)
 	for _, n := range []string{"a", "b", "c"} {
 		if _, err := h.e.Add(context.Background(), "file://"+n, h.out); err != nil {

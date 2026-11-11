@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 const gofileTestUA = "test-agent/1.0"
@@ -412,7 +414,7 @@ func TestGofileWebPageMeansTheSessionExpired(t *testing.T) {
 func TestGofileGuestAccountIsKeptForADay(t *testing.T) {
 	f := newFakeGofile()
 	f.addFolder("root-uuid", "AbCd12", "AbCd12", gfFile("file-uuid-1", "setup.zip", 1, 1))
-	state := t.TempDir()
+	state := testutil.TempDir(t)
 	run := func() string {
 		t.Helper()
 		g := newGofileWith(t, f, nil)

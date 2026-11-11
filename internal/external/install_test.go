@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // releaseServer plays GitHub's (digest) or Codeberg's (SHA256SUMS) release
@@ -97,7 +99,7 @@ func resolveAndInstall(t *testing.T, rs *releaseServer, p Package, dir string) e
 func TestInstallSingleFile(t *testing.T) {
 	rs := newReleaseServer(t)
 	rs.add("yt-dlp.exe", []byte("the real yt-dlp"))
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	p := Package{Tool: "yt-dlp", Asset: "yt-dlp.exe", Files: map[string]string{"": "yt-dlp.exe"}}
 	p.API = rs.srv.URL + "/api/latest"
 	if err := p.Resolve(context.Background(), rs.srv.Client()); err != nil {
@@ -126,7 +128,7 @@ func TestInstallTakesFilesFromZip(t *testing.T) {
 		"ffmpeg-n8-win64/bin/ffplay.exe":  "ffplay",
 		"ffmpeg-n8-win64/doc/README.txt":  "docs",
 	}))
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	p := Package{Tool: "ffmpeg", Asset: "ffmpeg.zip",
 		Files: map[string]string{"bin/ffmpeg.exe": "ffmpeg.exe", "bin/ffprobe.exe": "ffprobe.exe"}}
 	if err := resolveAndInstall(t, rs, p, dir); err != nil {
@@ -146,7 +148,7 @@ func TestInstallChecksumMismatchInstallsNothing(t *testing.T) {
 	rs := newReleaseServer(t)
 	rs.assets["yt-dlp.exe"] = []byte("tampered")
 	rs.digest["yt-dlp.exe"] = "sha256:" + sum([]byte("the real yt-dlp"))
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	_ = os.WriteFile(filepath.Join(dir, "yt-dlp.exe"), []byte("previous version"), 0o755)
 
 	err := resolveAndInstall(t, rs, Package{Tool: "yt-dlp", Asset: "yt-dlp.exe", Files: map[string]string{"": "yt-dlp.exe"}}, dir)
@@ -163,7 +165,7 @@ func TestInstallChecksumMismatchInstallsNothing(t *testing.T) {
 func TestInstallReplacesExisting(t *testing.T) {
 	rs := newReleaseServer(t)
 	rs.add("yt-dlp.exe", []byte("new"))
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	_ = os.WriteFile(filepath.Join(dir, "yt-dlp.exe"), []byte("old"), 0o755)
 	if err := resolveAndInstall(t, rs, Package{Tool: "yt-dlp", Asset: "yt-dlp.exe", Files: map[string]string{"": "yt-dlp.exe"}}, dir); err != nil {
 		t.Fatal(err)
@@ -180,7 +182,7 @@ func TestResolveFromSumsFile(t *testing.T) {
 	rs.assets["gallery-dl.exe"] = []byte("gallery")
 	rs.assets["SHA256SUMS"] = []byte(sum([]byte("other")) + "  gallery-dl.bin\n" + sum([]byte("gallery")) + "  gallery-dl.exe\n")
 	p := Package{Tool: "gallery-dl", Asset: "gallery-dl.exe", Sums: "SHA256SUMS", Files: map[string]string{"": "gallery-dl.exe"}}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	if err := resolveAndInstall(t, rs, p, dir); err != nil {
 		t.Fatal(err)
 	}
@@ -235,10 +237,10 @@ func TestPackagesPerSystem(t *testing.T) {
 
 // What "Install tools" put in Siphon's tools folder is found.
 func TestFindUsesToolsDir(t *testing.T) {
-	cfg := t.TempDir()
+	cfg := testutil.TempDir(t)
 	userConfigDir = func() (string, error) { return cfg, nil }
 	t.Cleanup(func() { userConfigDir = os.UserConfigDir })
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH", testutil.TempDir(t))
 	dir, _ := ToolsDir()
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "deno.exe"), []byte("x"), 0o755)

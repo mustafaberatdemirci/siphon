@@ -7,10 +7,12 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 func TestRenameMovesTheFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
 	if err := os.WriteFile(a, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -29,7 +31,7 @@ func TestRenameMovesTheFile(t *testing.T) {
 // A missing file is no reason to wait.
 func TestRenameGivesUpAtOnceOnOtherErrors(t *testing.T) {
 	start := time.Now()
-	err := Rename(filepath.Join(t.TempDir(), "missing"), filepath.Join(t.TempDir(), "x"))
+	err := Rename(filepath.Join(testutil.TempDir(t), "missing"), filepath.Join(testutil.TempDir(t), "x"))
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("err = %v", err)
 	}
@@ -44,7 +46,7 @@ func TestRenameWaitsForAnotherProgram(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("an open file stops a rename only on Windows")
 	}
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	src, dst := filepath.Join(dir, "x.part"), filepath.Join(dir, "x.bin")
 	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
 		t.Fatal(err)

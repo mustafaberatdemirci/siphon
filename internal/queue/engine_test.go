@@ -2033,7 +2033,7 @@ func TestToolJobsSurviveRestart(t *testing.T) {
 	exe := testutil.FakeToolPath(t)
 	cfg := site.SiteConfig{
 		Name: site.DirectName, MaxConcurrent: 4, MaxRetries: 1, HTTPClient: srv.Client(),
-		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": filepath.Join(t.TempDir(), "none")},
+		Extra: map[string]string{"yt_dlp": exe, "gallery_dl": exe, "ffmpeg": filepath.Join(testutil.TempDir(t), "none")},
 	}.WithDefaults()
 	state := filepath.Join(testutil.TempDir(t), "queue.json")
 	out := testutil.TempDir(t)

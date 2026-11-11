@@ -9,6 +9,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/browser"
 	"github.com/mustafaberatdemirci/siphon/internal/instance"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 func TestBrowserHostHandle(t *testing.T) {
@@ -55,7 +56,7 @@ func TestBrowserHostHandle(t *testing.T) {
 // The links reach the running Siphon window; with none running and no window
 // program to start, the browser is told so.
 func TestForwardLinks(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	var mu sync.Mutex
 	var got []string
 	release, _ := instance.Claim(dir, instance.Handlers{Add: func(l []string) {
@@ -82,7 +83,7 @@ func TestForwardLinks(t *testing.T) {
 	release()
 
 	// The test binary has no window program next to it.
-	if err := forwardLinks(t.TempDir(), []string{"https://x.test/a"}); err == nil || !strings.Contains(err.Error(), "wasn't found") {
+	if err := forwardLinks(testutil.TempDir(t), []string{"https://x.test/a"}); err == nil || !strings.Contains(err.Error(), "wasn't found") {
 		t.Errorf("no window program: %v", err)
 	}
 }

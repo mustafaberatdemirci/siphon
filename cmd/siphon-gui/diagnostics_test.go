@@ -7,12 +7,13 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/logfile"
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // The report carries the version, the queue's numbers per site and the log's
 // end, with no link's key in it.
 func TestDiagnosticInfo(t *testing.T) {
-	l, err := logfile.Open(filepath.Join(t.TempDir(), "siphon.log"), 0)
+	l, err := logfile.Open(filepath.Join(testutil.TempDir(t), "siphon.log"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

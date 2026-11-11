@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // fakeRegistration replaces the browser registration for a test: reg is what
@@ -22,7 +24,7 @@ func fakeRegistration(t *testing.T, reg string) *[]string {
 }
 
 func TestBrowserHostFollowsAGoneCopy(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	here := filepath.Join(dir, "new", cliName())
 	there := filepath.Join(dir, "old", cliName())
 	if err := os.MkdirAll(filepath.Dir(there), 0o755); err != nil {

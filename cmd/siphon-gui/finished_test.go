@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/storage"
 
 	"github.com/mustafaberatdemirci/siphon/internal/queue"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // What finished is told once the queue has nothing left to do, counting only
@@ -57,7 +58,7 @@ func TestBatchMessage(t *testing.T) {
 }
 
 func TestLinksInFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	write := func(name, text string) string {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
@@ -90,7 +91,7 @@ func TestLinksInFile(t *testing.T) {
 // says so on the status line.
 func TestDropOpensAddDialog(t *testing.T) {
 	q, _, _ := newTestQueue(t, "a.bin")
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	list := filepath.Join(dir, "links.txt")
 	if err := os.WriteFile(list, []byte("https://list.test/other\n"), 0o600); err != nil {
 		t.Fatal(err)

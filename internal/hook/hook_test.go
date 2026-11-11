@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // "echo" exists in both cmd and sh; the output must be collected.
@@ -24,7 +26,7 @@ func TestRunCapturesOutput(t *testing.T) {
 // on sh don't mangle the line. The command writes to a file in a directory
 // whose name contains a space.
 func TestRunKeepsQuotedPathsIntact(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "dir with spaces")
+	dir := filepath.Join(testutil.TempDir(t), "dir with spaces")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
