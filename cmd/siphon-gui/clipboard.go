@@ -23,7 +23,15 @@ func (q *queueTab) clipboardLoop() {
 	t := time.NewTicker(clipboardEvery)
 	defer t.Stop()
 	for range t.C {
-		fyne.Do(func() { q.checkClipboard(fyne.CurrentApp().Clipboard().Content()) })
+		fyne.Do(func() {
+			// With the watch off the clipboard isn't even read: opening it
+			// every second for nothing gets in other programs' way.
+			if !q.prefs.BoolWithFallback(prefWatchClipboard, true) {
+				q.clipStarted = false // what is there when it is turned on isn't offered
+				return
+			}
+			q.checkClipboard(fyne.CurrentApp().Clipboard().Content())
+		})
 	}
 }
 
