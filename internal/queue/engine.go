@@ -507,6 +507,9 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 			live.FinishedAt = time.Now()
 			live.Error = ""
 			e.clearBusy(live.Site)
+			// A file came: the network is there, the outage budget is whole again.
+			delete(e.netFails, live.Site)
+			delete(e.netBackoffUntil, live.Site)
 			extra = e.releaseSite(live.Site, started)
 		case run.OutcomeSkipped:
 			live.State = StateSkipped
@@ -533,11 +536,14 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 				quotaHit = true
 				break
 			}
-			// The network was unreachable: the job doesn't fail, it stays in
-			// the queue; the site is held for a while. If the budget ran out,
-			// "failed" as before.
+			// The network was unreachable, while resolving or while
+			// downloading: the job doesn't fail, it stays in the queue; the
+			// site is held for a while. If the budget ran out, "failed" as
+			// before. A download used to fail here at once: with the links
+			// already resolved (every job added since the window opened), a
+			// few minutes without the network left the whole queue "failed".
 			var nd *netDownError
-			if errors.As(outcome.Err, &nd) {
+			if errors.As(outcome.Err, &nd) || snet.IsTransient(outcome.Err) {
 				if wait, keep, fresh := e.netHold(live.Site, time.Now()); keep {
 					live.State = StateQueued
 					live.Error = ""
