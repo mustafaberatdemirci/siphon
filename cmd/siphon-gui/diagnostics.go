@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"runtime"
 	"sort"
 	"strings"
@@ -77,6 +78,28 @@ func (q *queueTab) copyDiagnostics() {
 	showInfo(T("Copy diagnostic info"),
 		T("Copied to the clipboard: Siphon's version, your system, the number of downloads per site and the end of the log. Links' keys and tokens and your user folder are left out. Paste it into a bug report on GitHub."),
 		q.win)
+}
+
+// logOutput is where the standard log package writes: the log file, and
+// stderr for someone who started Siphon from a terminal. The file comes
+// first and stderr's errors are dropped: the window version has no stderr
+// (it is built without a console), and io.MultiWriter stops at the first
+// writer that fails. With stderr first, not one error line reached
+// siphon.log (MEASURED 2026-11-10: three weeks of log, 45 failed downloads,
+// no "ERROR" in it), so Copy diagnostic info had the retries but never the
+// failures.
+func logOutput(l *logfile.File, stderr io.Writer) io.Writer {
+	return io.MultiWriter(logWriter{l}, forgiving{stderr})
+}
+
+// forgiving is a writer whose failures don't count.
+type forgiving struct{ w io.Writer }
+
+func (f forgiving) Write(p []byte) (int, error) {
+	if f.w != nil {
+		_, _ = f.w.Write(p)
+	}
+	return len(p), nil
 }
 
 // logWriter lets the standard log package write to the log file, one entry

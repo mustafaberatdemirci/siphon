@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -94,7 +93,7 @@ func main() {
 			appLog = l
 			defer l.Close()
 			log.SetFlags(0)
-			log.SetOutput(io.MultiWriter(os.Stderr, logWriter{l}))
+			log.SetOutput(logOutput(l, os.Stderr))
 		} else {
 			log.Printf("could not open the log file: %v", err)
 		}
