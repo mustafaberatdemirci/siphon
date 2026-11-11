@@ -1,5 +1,5 @@
 // Siphon downloads file-host links (mega, gofile, mediafire, pixeldrain,
-// bunkr, cyberdrop) and plain file links in bulk.
+// bunkr, cyberdrop, cyberfile) and plain file links in bulk.
 //
 // This file is only the command-line interface: flags, reading input, output
 // format. The whole download pipeline lives in internal/run, and the window
