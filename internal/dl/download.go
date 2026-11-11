@@ -306,6 +306,37 @@ func Retryable(err error) error {
 	return &retryableErr{err: err}
 }
 
+// reachedErr carries how many bytes of the file were on disk when an attempt
+// failed, if that is more than when it started. The caller keeps the highest
+// mark it has seen and lets an attempt that passed it retry without spending
+// its budget (snet.Progressed): a long download must not be given up at its
+// first dropped connection because it had been running for a while.
+type reachedErr struct {
+	err     error
+	reached int64
+}
+
+func (e *reachedErr) Error() string { return e.err.Error() }
+func (e *reachedErr) Unwrap() error { return e.err }
+
+// withReached marks err with the bytes on disk now, if the attempt added any.
+func withReached(err error, from, to int64) error {
+	if err == nil || to <= from {
+		return err
+	}
+	return &reachedErr{err: err, reached: to}
+}
+
+// Reached returns the bytes of the file on disk when the attempt behind err
+// failed; false if the attempt added none.
+func Reached(err error) (int64, bool) {
+	var r *reachedErr
+	if errors.As(err, &r) {
+		return r.reached, true
+	}
+	return 0, false
+}
+
 // ErrSHA256Mismatch is returned when downloaded content doesn't match the
 // hash given by the site.
 //
@@ -430,6 +461,7 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 
 	item := it
 	tried := false
+	begin := st.Offset // what the .part held when this attempt started
 	var last site.DecodedStream
 	for {
 		done, newState, ds, aerr := d.attempt(ctx, part, statePath, item, st, hasher)
@@ -441,8 +473,8 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 			if !done {
 				// The server closed early unexpectedly; partial progress is
 				// saved, a higher layer will retry.
-				return Result{}, Retryable(fmt.Errorf("%w: connection closed early, %d bytes saved",
-					ErrIncomplete, st.Offset))
+				return Result{}, withReached(Retryable(fmt.Errorf("%w: connection closed early, %d bytes saved",
+					ErrIncomplete, st.Offset)), begin, st.Offset)
 			}
 			break
 		}
@@ -472,15 +504,15 @@ func (d *Downloader) Download(ctx context.Context, outRoot string, it site.Item)
 			}
 			continue
 		}
-		return Result{}, aerr
+		return Result{}, withReached(aerr, begin, newState.Offset)
 	}
 
 	// If the expected size is known, an incomplete file doesn't count as a
 	// success. Without Content-Length the resolver-reported size kicks in as
 	// a fallback; otherwise a truncated body would count as "complete".
 	if total := st.expectedTotal(); total >= 0 && st.Offset != total {
-		return Result{}, Retryable(fmt.Errorf("%w: %d/%d bytes (%s)",
-			ErrIncomplete, st.Offset, total, filepath.Base(final)))
+		return Result{}, withReached(Retryable(fmt.Errorf("%w: %d/%d bytes (%s)",
+			ErrIncomplete, st.Offset, total, filepath.Base(final))), begin, st.Offset)
 	}
 
 	// The decoder's own integrity check (mega: meta-MAC). Treated like

@@ -513,6 +513,12 @@ Even within the ceiling, a file gets fewer connections in these cases:
 - The server pushes back with `503`/`429`. Parallelism then drops by one per
   complaint.
 
+A download that breaks is retried (`max_retries` times, within
+`max_elapsed`), and both count failing, not working: an attempt that saved
+more of the file than any before it starts the count over. A large file
+over a connection that drops now and then keeps going for as long as it
+keeps getting further.
+
 When a file's download still gets `503`/`429` after its retries, the window
 version doesn't count it as failed:
 

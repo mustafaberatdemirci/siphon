@@ -226,6 +226,10 @@ func (d *Downloader) segmented(ctx context.Context, final, part, statePath strin
 
 	item := it
 	reresolved := false
+	begin := segmentsDone(st.Segments) // 0 unless resuming
+	if !resuming {
+		begin = 0
+	}
 	for {
 		res, err := d.segmentedOnce(ctx, final, part, statePath, item, want, &st, resuming)
 		var expired *urlExpiredError
@@ -246,8 +250,21 @@ func (d *Downloader) segmented(ctx context.Context, final, part, statePath strin
 			resuming = len(st.Segments) > 0
 			continue
 		}
+		if err != nil && !errors.Is(err, errSourceChanged) && !errors.Is(err, errNoRangeSupport) {
+			// The chunks' counters are updated in place as they are written.
+			err = withReached(err, begin, segmentsDone(st.Segments))
+		}
 		return res, err
 	}
+}
+
+// segmentsDone is how many bytes of a segmented download are on disk.
+func segmentsDone(segs []Segment) int64 {
+	var n int64
+	for _, s := range segs {
+		n += s.Done
+	}
+	return n
 }
 
 // chunkPool hands the chunks of one download out to its connections. Its

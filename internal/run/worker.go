@@ -164,12 +164,21 @@ func (w *Worker) DownloadItem(ctx context.Context, outDir string, ledger *store.
 	}
 
 	var res dl.Result
+	// best is the most of the file any attempt has had on disk. An attempt
+	// that failed beyond it doesn't spend the retry budget: a file that
+	// keeps coming is not given up because its connection drops now and
+	// then. An attempt that started over and ended below the mark does.
+	best := int64(-1)
 	derr := w.Policy.Do(ctx, func(int) error {
 		var e error
 		if w.SelfDownloads(it) {
 			res, e = w.downloadSelf(ctx, outDir, it)
 		} else {
 			res, e = w.Down.Download(ctx, outDir, it)
+		}
+		if reached, ok := dl.Reached(e); ok && reached > best {
+			best = reached
+			return snet.Progressed(e)
 		}
 		return e
 	})

@@ -226,12 +226,42 @@ var ErrExhausted = errors.New("retry budget exhausted")
 type retryableError interface{ Retryable() bool }
 type captchaError interface{ CaptchaRequired() bool }
 
+// progressedError marks a failed attempt that still got further than any
+// attempt before it (a download that saved more of the file). Such an
+// attempt doesn't spend the budget: see Policy.
+type progressedError interface{ Progressed() bool }
+
+type progressed struct{ err error }
+
+func (e *progressed) Error() string    { return e.err.Error() }
+func (e *progressed) Unwrap() error    { return e.err }
+func (e *progressed) Progressed() bool { return true }
+
+// Progressed marks err as the error of an attempt that got further than the
+// ones before. The caller decides what "further" is; it must be a mark that
+// can only rise (the most bytes of the file ever saved), or a download that
+// keeps starting over would be retried forever.
+func Progressed(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &progressed{err: err}
+}
+
 // Policy is the per-item retry budget.
 //
 // There are two separate upper bounds and both are needed: MaxAttempts guards
 // against fast, repeating errors, MaxElapsed against errors where each attempt
 // takes a long time. With only one of them, a slow error would burn hours in
 // 5 attempts.
+//
+// Both bound FAILING, not working. An attempt that got further than every
+// one before it (Progressed) starts the budget over: the attempts and the
+// time are counted from there. Before, the time ran from the first attempt's
+// start, so a download that had been coming in for longer than MaxElapsed
+// was given up at its first dropped connection, without one retry and with
+// "5 attempts" in the message (MEASURED 2026-11-10: a 1.1 GB file dropped at
+// 96% after 45 minutes; 45 such endings in one week's log).
 type Policy struct {
 	MaxAttempts int
 	MaxElapsed  time.Duration
@@ -255,17 +285,22 @@ func (p Policy) Do(ctx context.Context, op func(attempt int) error) error {
 	if attempts < 1 {
 		attempts = 1
 	}
-	deadline := time.Time{}
-	if p.MaxElapsed > 0 {
-		deadline = time.Now().Add(p.MaxElapsed)
+	budget := func() time.Time {
+		if p.MaxElapsed > 0 {
+			return time.Now().Add(p.MaxElapsed)
+		}
+		return time.Time{}
 	}
+	deadline := budget()
 
 	var last error
-	for attempt := 0; attempt < attempts; attempt++ {
+	made := 0 // attempts in all; failed counts those since the last progress
+	for failed := 0; failed < attempts; failed++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := op(attempt)
+		err := op(made)
+		made++
 		if err == nil {
 			return nil
 		}
@@ -286,18 +321,29 @@ func (p Policy) Do(ctx context.Context, op func(attempt int) error) error {
 			return err // permanent
 		}
 
-		if attempt == attempts-1 {
+		var pg progressedError
+		if errors.As(err, &pg) && pg.Progressed() {
+			// It got further than before: the budget starts over, and this
+			// attempt is the one before the first.
+			failed, deadline = -1, budget()
+		}
+
+		if failed == attempts-1 {
 			break
 		}
-		d := p.Backoff.Delay(attempt)
+		d := p.Backoff.Delay(failed)
 		if !deadline.IsZero() && time.Now().Add(d).After(deadline) {
-			p.logf("budget exhausted (%s), not waiting", p.MaxElapsed)
+			p.logf("budget exhausted (%s without progress), not waiting", p.MaxElapsed)
 			break
 		}
-		p.logf("attempt %d/%d failed (%v), retrying in %s", attempt+1, attempts, err, d.Round(time.Millisecond))
+		if failed < 0 {
+			p.logf("attempt %d failed after getting further (%v), retrying in %s", made, err, d.Round(time.Millisecond))
+		} else {
+			p.logf("attempt %d/%d failed (%v), retrying in %s", failed+1, attempts, err, d.Round(time.Millisecond))
+		}
 		if serr := Sleep(ctx, d); serr != nil {
 			return serr
 		}
 	}
-	return fmt.Errorf("%w (%d attempts): %w", ErrExhausted, attempts, last)
+	return fmt.Errorf("%w (%d attempts): %w", ErrExhausted, made, last)
 }
