@@ -175,6 +175,18 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 #
 # MEASUREMENT 2026-09-11 (before): 4 connections to one file -> one got 503,
 # 3 were clean; the total speed was the same over 1 and over 3 connections.
+#
+# MEASUREMENT 2026-11-11, resuming (Range and If-Range with the ETag the
+# file was saved under) on c5bu-b.cdn.cr and pc9.scdn.st:
+#   *.cdn.cr, first request with a NEW signature -> 200, the whole file
+#   *.cdn.cr, the same signed URL asked again    -> 206, the range
+#   *.cdn.cr, a new connection, same signature   -> 206
+#   *.scdn.st, first request, new signature      -> 206
+# The ETags are strong ("<md5>-<parts>") and the same on every answer. A
+# signature is taken for every attempt, so on *.cdn.cr every resume was
+# answered with the whole file and started over. The downloader now asks
+# the same URL again when the whole file comes back with the saved ETag
+# and length (internal/dl, sameVersionAnswer).
 max_concurrent = 1
 max_segments = 1
 max_connections = 1

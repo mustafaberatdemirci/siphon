@@ -621,6 +621,40 @@ func (d *Downloader) prepare(part, statePath string, it site.Item) (State, hash.
 	return st, h, nil
 }
 
+// rangeReasks is how often a range request answered with the whole file of
+// the same version is asked again before the file is started over, and
+// rangeReaskWait the pause before each: a server that allows one connection
+// per address needs a moment to see the abandoned answer's connection close.
+const rangeReasks = 2
+
+var rangeReaskWait = time.Second
+
+// sameVersionAnswer reports whether a 200 that answered a range request is
+// provably the version the .part holds: the validator the server gave before
+// (a strong ETag or Last-Modified) and the same length.
+func sameVersionAnswer(st State, resp *http.Response, it site.Item) bool {
+	if st.ifRange() == "" || st.TotalSize < 0 || resp.ContentLength != st.TotalSize {
+		return false
+	}
+	v, vt := pickValidator(resp, it)
+	return vt == st.ValidatorType && v == st.Validator
+}
+
+// sleepCtx waits d, or less if ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // urlExpiredError separates 403/410 from other errors.
 type urlExpiredError struct{ status int }
 
@@ -656,34 +690,56 @@ func (d *Downloader) attempt(
 		reqURL = d.RangeURL(target, st.Offset, total)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return false, st, nil, err
-	}
-	if d.UserAgent != "" {
-		req.Header.Set("User-Agent", d.UserAgent)
-	}
-	// Item.Headers derive from the policy (e.g. bunkr's mandatory item page
-	// Referer) and may override User-Agent.
-	for k, v := range it.Headers {
-		req.Header.Set(k, v)
-	}
-
 	// NO separate Accept-Ranges probe: a wasted round trip and not a
 	// guarantee. The only correct signal is the status code of the real request.
-	if !viaURL && st.resumable() {
-		req.Header.Set("Range", "bytes="+strconv.FormatInt(st.Offset, 10)+"-")
-		if v := st.ifRange(); v != "" {
-			req.Header.Set("If-Range", v)
+	ranged := !viaURL && st.resumable()
+	var resp *http.Response
+	for ask := 0; ; ask++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return false, st, nil, err
 		}
-	}
+		if d.UserAgent != "" {
+			req.Header.Set("User-Agent", d.UserAgent)
+		}
+		// Item.Headers derive from the policy (e.g. bunkr's mandatory item page
+		// Referer) and may override User-Agent.
+		for k, v := range it.Headers {
+			req.Header.Set(k, v)
+		}
+		if ranged {
+			req.Header.Set("Range", "bytes="+strconv.FormatInt(st.Offset, 10)+"-")
+			if v := st.ifRange(); v != "" {
+				req.Header.Set("If-Range", v)
+			}
+		}
 
-	resp, err := d.client().Do(req)
-	if err != nil {
-		// A transport error is treated as transient: a dropped connection, a
-		// DNS delay, a TLS handshake timeout. Permanent ones are reported by
-		// the HTTP status code.
-		return false, st, nil, Retryable(err)
+		resp, err = d.client().Do(req)
+		if err != nil {
+			// A transport error is treated as transient: a dropped connection, a
+			// DNS delay, a TLS handshake timeout. Permanent ones are reported by
+			// the HTTP status code.
+			return false, st, nil, Retryable(err)
+		}
+		// The server sent the whole file where a range was asked for, yet it
+		// is the same version: it only ignored the range this time. Asking
+		// the same URL again is worth more than throwing the .part away.
+		//
+		// MEASURED 2026-11-11 on bunkr's *.cdn.cr file servers: the first
+		// request made with a new signature gets 200 and the whole file,
+		// whatever its Range and If-Range; the same signed URL asked again
+		// gets 206. A signature is taken for every attempt, so every resume
+		// there started the file over (25 times in three weeks of one log).
+		if ranged && resp.StatusCode == http.StatusOK && ask < rangeReasks && sameVersionAnswer(st, resp, it) {
+			resp.Body.Close()
+			d.logf("server sent the whole file instead of bytes %d-, same version: asking again (%d/%d)",
+				st.Offset, ask+1, rangeReasks)
+			if serr := sleepCtx(ctx, rangeReaskWait); serr != nil {
+				return false, st, nil, serr
+			}
+			continue
+		}
+		break
 	}
 	defer resp.Body.Close()
 
