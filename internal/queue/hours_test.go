@@ -2,6 +2,8 @@ package queue
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -22,6 +24,18 @@ func TestOffHoursHoldsAndReleases(t *testing.T) {
 	defer h.stop()
 	a := jobByName(h.e, "a.bin").ID
 	h.waitState(a, StateRunning, 5*time.Second)
+	// Running is said before the first byte comes. Stopped before any, a
+	// download rightly starts from the beginning again; wait until its
+	// first bytes and their state are on disk.
+	state := filepath.Join(h.out, "Album", "a.bin.part.state")
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(state); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a.bin's first bytes never reached the disk")
+		}
+	}
 
 	h.e.SetOffHours(true)
 	close(hold)
