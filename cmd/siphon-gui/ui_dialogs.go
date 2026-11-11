@@ -306,7 +306,7 @@ func (q *queueTab) addLinks(text, dir string) {
 			}
 		}
 		q.vm.Notify(msg)
-		fyne.Do(func() {
+		q.do(func() {
 			q.doneAdding()
 			// Links that couldn't be added wait in the Add dialog; the user
 			// fixes and retries them without copying.

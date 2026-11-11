@@ -79,7 +79,7 @@ func (q *queueTab) hoursLoop() {
 	t := time.NewTicker(hoursEvery)
 	defer t.Stop()
 	for now := range t.C {
-		fyne.Do(func() { q.applyHours(now) })
+		q.do(func() { q.applyHours(now) })
 	}
 }
 

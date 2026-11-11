@@ -49,7 +49,7 @@ func (q *queueTab) updateLoop() {
 			r, err := latestRelease(ctx)
 			cancel()
 			if err == nil && update.Newer(version, r.Version) {
-				fyne.Do(func() { q.tellUpdate(r) })
+				q.do(func() { q.tellUpdate(r) })
 			}
 		}
 		time.Sleep(updateEvery)
@@ -77,7 +77,7 @@ func (q *queueTab) checkForUpdates() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		r, err := latestRelease(ctx)
 		cancel()
-		fyne.Do(func() { q.showUpdateResult(r, err) })
+		q.do(func() { q.showUpdateResult(r, err) })
 	}()
 }
 

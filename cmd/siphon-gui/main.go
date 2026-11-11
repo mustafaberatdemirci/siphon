@@ -71,7 +71,7 @@ func main() {
 		},
 		Add: func(links []string) {
 			fyne.Do(func() {
-				if q != nil {
+				if q != nil && !q.closing.Load() {
 					q.receiveLinks(links)
 				}
 			})
@@ -170,9 +170,19 @@ func main() {
 		vm.Notify(T("Closing, saving unfinished jobs..."))
 		go func() {
 			shutdown()
+			if q != nil {
+				q.close() // before Fyne stops: what it runs then runs anywhere
+			}
 			fyne.Do(a.Quit)
 		}()
 	}
+	// However the app ends (Windows logging off ends Fyne's loop without
+	// quit), the window's loops stop drawing.
+	a.Lifecycle().SetOnStopped(func() {
+		if q != nil {
+			q.close()
+		}
+	})
 	// Closing the window hides it in the notification area; downloads go on.
 	tr := setupTray(a, w, a.Preferences(), quit)
 
@@ -226,6 +236,7 @@ func main() {
 		go fyne.Do(func() { q.receiveLinks(startLinks) })
 	}
 	w.ShowAndRun()
+	q.close()
 	shutdown()
 	if restartAfter {
 		// The next Siphon claims the instance; this one must have let go.

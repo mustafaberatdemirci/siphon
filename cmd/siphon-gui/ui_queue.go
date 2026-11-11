@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -135,6 +136,10 @@ type queueTab struct {
 	// onQuota is told, on the UI thread, whether downloads wait for quota
 	// (the notification-area icon changes). May be nil.
 	onQuota func(waiting bool)
+
+	// closing is set once the app is quitting (closing.go): the background
+	// loops stop drawing.
+	closing atomic.Bool
 }
 
 func newQueueTab(win fyne.Window, prefs fyne.Preferences, eng *queue.Engine, vm *viewModel, onQuota func(bool)) (*queueTab, fyne.CanvasObject) {
@@ -419,7 +424,7 @@ func (q *queueTab) refreshLoop() {
 		if !q.vm.TakeDirty() {
 			continue
 		}
-		fyne.Do(q.render)
+		q.do(q.render)
 	}
 }
 
