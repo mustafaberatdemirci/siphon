@@ -126,9 +126,7 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 	notifyDone.SetChecked(prefs.BoolWithFallback(prefNotifyDone, true))
 
 	item := func(label string, obj fyne.CanvasObject, hint string) *widget.FormItem {
-		it := widget.NewFormItem(label, obj)
-		it.HintText = hint
-		return it
+		return widget.NewFormItem(label, container.New(hintLayout{}, obj, settingHint(hint)))
 	}
 	return widget.NewForm(
 		item(T("Language"), languageSel, T("Shown from the next start; Siphon offers to restart now.")),
@@ -202,10 +200,64 @@ func showInfo(title, message string, win fyne.Window) {
 	d.Show()
 }
 
+// settingHint is the line under a setting that says what it does. A
+// form's own hint text is one line that never wraps: the longest of them
+// made the dialog 900 pixels wide (more in Turkish and German), wider than
+// a window that isn't maximized.
+func settingHint(text string) fyne.CanvasObject {
+	hint := widget.NewRichText(&widget.TextSegment{Text: text, Style: widget.RichTextStyle{
+		ColorName: theme.ColorNamePlaceHolder,
+		SizeName:  theme.SizeNameCaptionText,
+	}})
+	hint.Wrapping = fyne.TextWrapWord
+	return hint
+}
+
+// hintLayout puts a setting's hint right under it. In a VBox the box's
+// spacing and the hint's own padding left it nearer the next setting than
+// its own.
+type hintLayout struct{}
+
+// hintPull is how far the hint is moved up, into its own top padding.
+func hintPull() float32 { return theme.InnerPadding() }
+
+func (hintLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	top := objs[0].MinSize().Height
+	objs[0].Move(fyne.NewPos(0, 0))
+	objs[0].Resize(fyne.NewSize(size.Width, top))
+	y := top - hintPull()
+	objs[1].Move(fyne.NewPos(0, y))
+	objs[1].Resize(fyne.NewSize(size.Width, size.Height-y))
+}
+
+func (hintLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	a, b := objs[0].MinSize(), objs[1].MinSize()
+	return fyne.NewSize(max(a.Width, b.Width), a.Height+b.Height-hintPull())
+}
+
+// Settings dialog size: as wide as reads well, as tall as the settings need,
+// and never larger than the window (with a margin), the rest scrolled.
+const (
+	settingsWidth  = 720
+	settingsHeight = 760
+	dialogMargin   = 48
+)
+
+// settingsSize is the Settings dialog's size in a window of size win.
+func settingsSize(win fyne.Size) fyne.Size {
+	return fyne.NewSize(
+		min(settingsWidth, win.Width-dialogMargin),
+		min(settingsHeight, win.Height-dialogMargin))
+}
+
 func (q *queueTab) showSettings() {
 	q.folder.SetText(q.defaultDir()) // the Add dialog may have changed it
-	d := dialog.NewCustom(T("Settings"), T("Close"), q.settings, q.win)
-	d.Resize(fyne.NewSize(680, 0))
+	// Scrolled: in a window that isn't maximized the settings don't fit,
+	// and the dialog used to grow past the window, its last rows under
+	// the Close button.
+	scroll := container.NewVScroll(q.settings)
+	d := dialog.NewCustom(T("Settings"), T("Close"), scroll, q.win)
+	d.Resize(settingsSize(q.win.Canvas().Size()))
 	d.Show()
 }
 

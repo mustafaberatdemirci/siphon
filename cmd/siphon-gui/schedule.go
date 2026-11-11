@@ -105,5 +105,10 @@ func (q *queueTab) hoursSettings() fyne.CanvasObject {
 		q.applyHours(time.Now())
 	})
 	on.SetChecked(q.prefs.Bool(prefHoursOn))
-	return container.NewHBox(on, from, widget.NewLabel("–"), to)
+	// A fixed width for each time: in a row an entry gets only its smallest
+	// size, and with its validation mark "02:00" showed as "02:".
+	clock := func(e *widget.Entry) fyne.CanvasObject {
+		return container.NewGridWrap(fyne.NewSize(110, e.MinSize().Height), e)
+	}
+	return container.NewHBox(on, clock(from), widget.NewLabel("–"), clock(to))
 }
