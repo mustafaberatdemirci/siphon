@@ -10,8 +10,14 @@ import (
 
 // linkPattern finds web links in free text: with a scheme, with a tool prefix
 // ("yt-dlp:https://…"), or a bare host of a file site people paste without
-// one ("mega.nz/folder/…").
-var linkPattern = regexp.MustCompile(`(?i)(?:(?:yt-dlp:|gallery-dl:)?https?://|\b(?:www\.)?(?:mega\.nz|mega\.co\.nz|gofile\.io|mediafire\.com|pixeldrain\.com|cyberfile\.me)/)[^\s<>"'` + "`" + `]+`)
+// one ("mega.nz/folder/…"). The bare hosts are the sites' usual domains (a
+// link with its scheme needs no list: sites.toml decides whether a site
+// takes it); bunkr changes its ending often, so any ending counts.
+var linkPattern = regexp.MustCompile(`(?i)(?:(?:yt-dlp:|gallery-dl:)?https?://|\b(?:www\.)?(?:` + bareHosts + `)/)[^\s<>"'` + "`" + `]+`)
+
+const bareHosts = `mega\.nz|mega\.co\.nz|gofile\.io|mediafire\.com|cyberfile\.me` +
+	`|pixeldrain\.(?:com|net|nl|dev|biz|tech)|pixeldra\.in` +
+	`|bunkrr?\.[a-z]{2,6}|cyberdrop\.(?:cr|me|to)`
 
 // ExtractLinks returns the links in text, each once, in order. Punctuation
 // that ends a sentence or closes brackets around a link isn't part of it.

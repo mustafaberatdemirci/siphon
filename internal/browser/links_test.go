@@ -28,6 +28,25 @@ ftp://not.this/x javascript:alert(1)`
 	}
 }
 
+// A link pasted without its scheme is taken for every site's usual domains,
+// not for any word with a dot and a slash in it.
+func TestExtractLinksBareHosts(t *testing.T) {
+	text := `bunkr.cr/a/Q1w2 and bunkrr.su/f/x1, cyberdrop.cr/a/8uE0wQiK pixeldra.in/u/abc pixeldrain.net/l/def
+www.mediafire.com/file/abc/x.zip/file
+and/or readme.md/x example.com/file.zip`
+	want := []string{
+		"https://bunkr.cr/a/Q1w2",
+		"https://bunkrr.su/f/x1",
+		"https://cyberdrop.cr/a/8uE0wQiK",
+		"https://pixeldra.in/u/abc",
+		"https://pixeldrain.net/l/def",
+		"https://www.mediafire.com/file/abc/x.zip/file",
+	}
+	if got := ExtractLinks(text); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("ExtractLinks =\n %q\nwant\n %q", got, want)
+	}
+}
+
 func TestIsHostCall(t *testing.T) {
 	for _, c := range []struct {
 		args []string
