@@ -14,6 +14,7 @@ package queue
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,10 +31,29 @@ const (
 )
 
 // overloaded, under the lock: live, a job of its site, ended with "too many
-// connections". It reports whether the job goes back into the queue, and a
+// connections". slot is the file slot it held ("site|host", see takeSlot;
+// "" if none). It reports whether the job goes back into the queue, and a
 // notice for the user ("" when there is nothing new to say).
-func (e *Engine) overloaded(live *Job, now time.Time) (keep bool, notice string) {
+//
+// If other jobs were downloading from the same server, that server allows
+// fewer: only it gets a lower number, and the site's other servers go on.
+// MEASURED 2026-11-11: one slow bunkr server answering 503 brought the
+// whole site down to one file at a time while others gave 11-13 MB/s each.
+// A job that was alone on its server falls back to the site: the limit may
+// span servers (several of bunkr's share one address).
+func (e *Engine) overloaded(live *Job, slot string, now time.Time) (keep bool, notice string) {
 	site := live.Site
+	if slot != "" {
+		if others := e.slots[slot]; others > 0 {
+			if c, ok := e.hostCap[slot]; !ok || others < c {
+				e.hostCap[slot] = others
+				e.hostCapAt[slot] = now
+				return true, fmt.Sprintf("%s: %s allows fewer connections; downloading %d at a time from it.",
+					site, slotHost(slot), others)
+			}
+			return true, ""
+		}
+	}
 	others := 0
 	for _, o := range e.jobs {
 		if o != live && o.Site == site && o.State == StateRunning {
@@ -68,7 +88,19 @@ func (e *Engine) overloaded(live *Job, now time.Time) (keep bool, notice string)
 // siteLimit, under the lock: how many of the site's jobs may run at once
 // now. A lowered limit rises by one every capRaiseAfter, up to configured.
 func (e *Engine) siteLimit(site string, configured int, now time.Time) int {
-	c, lowered := e.siteCap[site]
+	return e.loweredLimit(e.siteCap, e.siteCapAt, site, configured, now)
+}
+
+// hostLimit, under the lock: how many files may download at once from a
+// file slot (a server, or a pool of them), with what its 503s taught.
+func (e *Engine) hostLimit(slot string, configured int, now time.Time) int {
+	return e.loweredLimit(e.hostCap, e.hostCapAt, slot, configured, now)
+}
+
+// loweredLimit is a limit lowered by a server's refusals: it rises by one
+// every capRaiseAfter, until it is the configured one again.
+func (e *Engine) loweredLimit(caps map[string]int, at map[string]time.Time, key string, configured int, now time.Time) int {
+	c, lowered := caps[key]
 	if !lowered {
 		return configured
 	}
@@ -76,16 +108,24 @@ func (e *Engine) siteLimit(site string, configured int, now time.Time) int {
 	if top <= 0 { // no limit of its own: the queue's is the most that runs
 		top = e.opt.MaxActive
 	}
-	if now.Sub(e.siteCapAt[site]) >= capRaiseAfter {
+	if now.Sub(at[key]) >= capRaiseAfter {
 		c++
 		if c >= top {
-			delete(e.siteCap, site)
-			delete(e.siteCapAt, site)
+			delete(caps, key)
+			delete(at, key)
 			return configured
 		}
-		e.siteCap[site], e.siteCapAt[site] = c, now
+		caps[key], at[key] = c, now
 	}
 	return c
+}
+
+// slotHost is the server (or pool pattern) part of a file slot's key.
+func slotHost(slot string) string {
+	if _, host, ok := strings.Cut(slot, "|"); ok {
+		return host
+	}
+	return slot
 }
 
 // busyHeld, under the lock: are the site's jobs waiting for its server?

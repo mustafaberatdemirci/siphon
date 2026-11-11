@@ -852,7 +852,7 @@ func (d *Downloader) attempt(
 		// downloads of the site); other 5xx are server side, transient. The
 		// rest of 4xx is our fault; retrying brings the same answer.
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
-			return false, st, nil, &overloadedError{status: resp.StatusCode}
+			return false, st, nil, overloaded(resp)
 		}
 		err := fmt.Errorf("%s: HTTP %s", it.URL, resp.Status)
 		if resp.StatusCode >= 500 {

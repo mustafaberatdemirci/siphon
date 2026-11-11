@@ -207,8 +207,8 @@ max_connections = 4
 
 # Files at once per pool of file servers: the pattern's hosts share the
 # number. A file server that turns out to have a limit and isn't listed here
-# still isn't hammered: its 503s make the queue download fewer of the site's
-# files at once (see "Connections per file" in the README).
+# still isn't hammered: its 503s make the queue download fewer files from
+# it at once (see "Connections per file" in the README).
 host_limits = { "*.scdn.st" = 1 }
 
 # Canary is the site root. If you add an ALBUM URL, doctor's Parse layer is

@@ -52,12 +52,15 @@ type fakeSite struct {
 	// perHostMax the most there were at once (files named "pool-…" are
 	// asked for as "localhost", the others by the server's address).
 	perHost, perHostMax map[string]int
+	// hostConnLimit answers 503 to a request for a host already serving that
+	// many (one slow server of a site; the others unlimited).
+	hostConnLimit map[string]int
 }
 
 func newFakeSite(t *testing.T, names ...string) *fakeSite {
 	t.Helper()
 	f := &fakeSite{t: t, files: map[string][]byte{}, hold: map[string]chan struct{}{}, hits: map[string]int{}, forbid: map[string]bool{}, ranges: map[string][]string{},
-		perHost: map[string]int{}, perHostMax: map[string]int{}}
+		perHost: map[string]int{}, perHostMax: map[string]int{}, hostConnLimit: map[string]int{}}
 	for _, n := range names {
 		b := make([]byte, 96*1024)
 		_, _ = rand.Read(b)
@@ -99,7 +102,8 @@ func (f *fakeSite) serve(w http.ResponseWriter, r *http.Request) {
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
 		host = h
 	}
-	overloaded := f.busy > 0 || f.connLimit > 0 && f.inflight >= f.connLimit
+	overloaded := f.busy > 0 || f.connLimit > 0 && f.inflight >= f.connLimit ||
+		f.hostConnLimit[host] > 0 && f.perHost[host] >= f.hostConnLimit[host]
 	if f.busy > 0 {
 		f.busy--
 	}

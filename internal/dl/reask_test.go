@@ -188,3 +188,15 @@ func TestReachedOnlyWhenBytesWereAdded(t *testing.T) {
 	}
 }
 
+// "HTTP 503" didn't say which of a site's servers wanted fewer connections.
+func TestTooManyConnectionsNamesTheServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	d := &Downloader{Client: srv.Client()}
+	_, err := d.Download(context.Background(), tempDir(t), testItem(srv.URL+"/data.bin", "data.bin"))
+	if !IsOverloaded(err) || !strings.Contains(err.Error(), "HTTP 503 from 127.0.0.1") {
+		t.Fatalf("err = %v, want a 503 naming the server", err)
+	}
+}

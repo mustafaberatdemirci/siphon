@@ -524,10 +524,13 @@ one after the other.
 When a file's download still gets `503`/`429` after its retries, the window
 version doesn't count it as failed:
 
-- If other files of the same site were downloading, the server allows fewer
-  at once. The queue downloads that many of the site's files from then on
-  and puts the file back in line. Every 15 minutes it tries one more, up to
-  the site's `max_concurrent`, since sites loosen their limits too.
+- If other files from the same server were downloading, that server allows
+  fewer at once. The queue downloads that many files from it from then on
+  and puts the file back in line; the site's other servers are not held to
+  it. Every 15 minutes it tries one more, up to the site's limit, since
+  servers loosen their limits too. (When the file was the only one from its
+  server but others of the site were downloading, the site as a whole
+  downloads fewer: some sites' servers share one limit.)
 - If it was the only one, the server is busy. The site's downloads wait 30
   seconds, then 1, 2, 4 and 5 minutes; a file fails only when the server
   still refuses after that. **Resume** or **Retry failed** tries again at

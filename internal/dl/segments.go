@@ -806,10 +806,28 @@ func (d *Downloader) runChunk(ctx context.Context, p *chunkPool, i int, target s
 type retryableError interface{ Retryable() bool }
 
 // overloadedError covers the cases where the server says "too many
-// connections": 503 and 429.
-type overloadedError struct{ status int }
+// connections": 503 and 429. It names the server: one site's file servers
+// may have limits of their own (bunkr's do), and "HTTP 503" alone didn't
+// tell which one to give a limit in sites.toml (host_limits).
+type overloadedError struct {
+	status int
+	host   string
+}
 
-func (e *overloadedError) Error() string   { return fmt.Sprintf("HTTP %d", e.status) }
+func overloaded(resp *http.Response) *overloadedError {
+	e := &overloadedError{status: resp.StatusCode}
+	if resp.Request != nil && resp.Request.URL != nil {
+		e.host = resp.Request.URL.Hostname()
+	}
+	return e
+}
+
+func (e *overloadedError) Error() string {
+	if e.host == "" {
+		return fmt.Sprintf("HTTP %d", e.status)
+	}
+	return fmt.Sprintf("HTTP %d from %s", e.status, e.host)
+}
 func (e *overloadedError) Retryable() bool { return true }
 func isOverloaded(err error) bool          { var o *overloadedError; return errors.As(err, &o) }
 func firstLineOf(err error) string         { return firstLine(err.Error()) }
@@ -953,7 +971,7 @@ func (d *Downloader) classifyStatus(resp *http.Response, body []byte) error {
 	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusGone:
 		return &urlExpiredError{status: resp.StatusCode}
 	case resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests:
-		return &overloadedError{status: resp.StatusCode}
+		return overloaded(resp)
 	case resp.StatusCode >= 500:
 		return Retryable(fmt.Errorf("HTTP %s", resp.Status))
 	default:

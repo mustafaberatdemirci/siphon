@@ -137,6 +137,10 @@ type Engine struct {
 	busyFails map[string]int
 	siteCap   map[string]int
 	siteCapAt map[string]time.Time
+	// hostCap/hostCapAt: the same, per file slot ("site|host"), for a
+	// server that allows fewer than the others (busy.go).
+	hostCap   map[string]int
+	hostCapAt map[string]time.Time
 	// netChecks: host -> the last network check (netblock.go).
 	netChecks map[string]netCheck
 	// File slots (a host's, or a pool of hosts' with a limit of its own,
@@ -204,6 +208,8 @@ func New(opt Options) (*Engine, error) {
 		busyFails: map[string]int{},
 		siteCap:   map[string]int{},
 		siteCapAt: map[string]time.Time{},
+		hostCap:   map[string]int{},
+		hostCapAt: map[string]time.Time{},
 		netChecks: map[string]netCheck{},
 		slots:     map[string]int{},
 		jobSlot:   map[string]string{},
@@ -495,6 +501,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	// another one, waiting for this run to end (see dispatch).
 	still = still && live == owner
 	delete(e.active, j.ID)
+	slot := e.jobSlot[j.ID]
 	e.freeSlot(j.ID)
 	wantedPause := e.pauseWant[j.ID]
 	delete(e.pauseWant, j.ID)
@@ -579,7 +586,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 			// The server said "too many connections" through all the
 			// retries: run fewer of the site's jobs at once, or wait for it.
 			if dl.IsOverloaded(outcome.Err) {
-				if keep, msg := e.overloaded(live, time.Now()); keep {
+				if keep, msg := e.overloaded(live, slot, time.Now()); keep {
 					live.State = StateQueued
 					live.Error = ""
 					busyNotice = msg
@@ -738,7 +745,7 @@ func (e *Engine) takeSlot(w *run.Worker, j *Job, it site.Item) bool {
 	}
 	key := w.SlotKey(it.URL)
 	slot := j.Site + "|" + key
-	if e.slots[slot] >= w.SlotLimit(key) {
+	if e.slots[slot] >= e.hostLimit(slot, w.SlotLimit(key), time.Now()) {
 		return false
 	}
 	e.slots[slot]++
