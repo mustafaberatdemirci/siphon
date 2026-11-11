@@ -275,8 +275,14 @@ func (e *Engine) enterQuotaWait(j *Job, wait time.Duration, msg string) []Job {
 	now := time.Now()
 	until := now.Add(wait)
 	e.holdSince[j.Site] = now
-	if !e.probing[j.Site] {
-		e.nextProbe[j.Site] = now.Add(e.opt.QuotaProbeEvery)
+	// The next probe in an interval, but never later than one already due
+	// sooner: when the quota command finishes it pulls the probe forward,
+	// and another job of the site that got its 509 after that used to push
+	// it back to a whole interval away.
+	if at := now.Add(e.opt.QuotaProbeEvery); !e.probing[j.Site] {
+		if due, ok := e.nextProbe[j.Site]; !ok || due.After(at) {
+			e.nextProbe[j.Site] = at
+		}
 	}
 	var snaps []Job
 	for _, o := range e.jobs {
