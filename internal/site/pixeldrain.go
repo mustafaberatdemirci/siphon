@@ -169,8 +169,14 @@ func (p *pixeldrain) parse(raw string) (ref, error) {
 // fetchHost picks the host requests go to. If the input URL comes from a dead
 // domain (LegacyDomains) no request is sent to that host; the first entry of
 // the active list is used.
+//
+// With an API key every request goes to the first domain, whichever mirror
+// the link names: the key is an account's, and it travels in the request.
+// A link decides where a request goes, and anyone can write a link; were one
+// of the mirror domains ever in other hands, a link to it would hand the
+// key over. The mirrors serve the same files under the same ids.
 func (p *pixeldrain) fetchHost(r ref) (string, error) {
-	if MatchHost(r.host, p.cfg.Domains) {
+	if p.apiKey == "" && MatchHost(r.host, p.cfg.Domains) {
 		return r.host, nil
 	}
 	if len(p.cfg.Domains) == 0 {

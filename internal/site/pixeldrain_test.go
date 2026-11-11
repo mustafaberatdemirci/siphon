@@ -137,6 +137,29 @@ func TestFetchHostSkipsLegacyDomain(t *testing.T) {
 	}
 }
 
+// With an API key the requests go to the first domain whichever mirror the
+// link names: a link must not decide where an account's key is sent.
+func TestAPIKeyOnlyGoesToTheFirstDomain(t *testing.T) {
+	p := &pixeldrain{cfg: testCfg(), apiKey: "secret-key"}
+	for _, link := range []string{"https://pixeldra.in/u/xyz789", "https://pixeldrain.tech/l/abc", "https://pixeldrain.com/u/xyz789"} {
+		r, err := p.parse(link)
+		if err != nil {
+			t.Fatalf("parse(%s): %v", link, err)
+		}
+		host, err := p.fetchHost(r)
+		if err != nil || host != "pixeldrain.com" {
+			t.Errorf("with a key, %s is fetched from %q (%v), want pixeldrain.com", link, host, err)
+		}
+	}
+	// Without a key the mirror the link names is used, as before: it may be
+	// the one that isn't blocked on the user's network.
+	anon := &pixeldrain{cfg: testCfg()}
+	r, _ := anon.parse("https://pixeldra.in/u/xyz789")
+	if host, _ := anon.fetchHost(r); host != "pixeldra.in" {
+		t.Errorf("without a key, the link's mirror isn't used: %q", host)
+	}
+}
+
 // rewriteTransport redirects every request to the test server.
 // This is the test injection mechanism the design names.
 type rewriteTransport struct {
