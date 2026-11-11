@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +30,14 @@ func sleepComputer() error {
 // shutdownComputer shuts Windows down the usual way: programs are asked to
 // close (Siphon saves its queue then).
 func shutdownComputer() error {
-	exe := filepath.Join(os.Getenv("SystemRoot"), "System32", "shutdown.exe")
+	// By its full path, like explorer.exe (open_windows.go): without
+	// SystemRoot the path would be relative, and a shutdown.exe under the
+	// working directory would run.
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		return errors.New("SystemRoot is not set: shutdown.exe can't be found")
+	}
+	exe := filepath.Join(root, "System32", "shutdown.exe")
 	cmd := exec.Command(exe, "/s", "/t", "0")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Run()
