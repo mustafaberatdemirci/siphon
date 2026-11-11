@@ -144,6 +144,12 @@ type Engine struct {
 
 	saveMu    sync.Mutex
 	saveTimer *time.Timer
+	// flushMu lets one save run at a time: the timer's and shutdown's wrote
+	// the same temp file and could cross.
+	flushMu sync.Mutex
+	// unreadable is where a queue file that couldn't be read was kept; "" if
+	// it was read (or there was none).
+	unreadable string
 }
 
 // New loads the config, the resolvers and, if present, the queue file.
@@ -231,9 +237,16 @@ func New(opt Options) (*Engine, error) {
 	if opt.StatePath != "" {
 		jobs, err := load(opt.StatePath)
 		if err != nil {
-			// A corrupt queue file must not keep the app from opening; start
-			// empty, but say why.
-			opt.Events.Errorf("%v — the queue starts empty", err)
+			// A queue file that can't be read (corrupt, or written by a newer
+			// Siphon) must not keep the app from opening: start empty, but
+			// say why, and keep the file. The first save used to write the
+			// empty queue over it, and the list was gone for good.
+			e.unreadable = setAside(opt.StatePath)
+			if e.unreadable != "" {
+				opt.Events.Errorf("%v — the queue starts empty; the file was kept as %s", err, e.unreadable)
+			} else {
+				opt.Events.Errorf("%v — the queue starts empty", err)
+			}
 		}
 		for _, j := range jobs {
 			e.jobs = append(e.jobs, j)
@@ -769,6 +782,8 @@ func (e *Engine) flush() {
 	if e.opt.StatePath == "" {
 		return
 	}
+	e.flushMu.Lock()
+	defer e.flushMu.Unlock()
 	e.mu.Lock()
 	jobs := make([]*Job, len(e.jobs))
 	for i, j := range e.jobs {

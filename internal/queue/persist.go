@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 )
@@ -45,6 +46,22 @@ func load(path string) ([]*Job, error) {
 	}
 	return sf.Jobs, nil
 }
+
+// setAside renames a queue file that couldn't be read to
+// "<name>.unreadable-<time>" next to it and returns the new path; "" if it
+// couldn't be moved (it then stays where it is until the next save).
+func setAside(path string) string {
+	kept := path + ".unreadable-" + time.Now().Format("20060102-150405")
+	if err := fsx.Rename(path, kept); err != nil {
+		return ""
+	}
+	return kept
+}
+
+// UnreadableStateFile is where the queue file was kept when it couldn't be
+// read at start (the queue then started empty); "" otherwise. The window
+// tells the user: the log alone is not where anyone looks for a lost list.
+func (e *Engine) UnreadableStateFile() string { return e.unreadable }
 
 // save writes the queue ATOMICALLY: temp file + rename. A half-written queue
 // file would lose the whole list on the next launch.

@@ -619,7 +619,7 @@ embedded copy.
 | --- | --- | --- |
 | `<name>.part`, `<name>.part.state` | Next to the file being downloaded | Partial data and resume state; removed when the file completes. |
 | `done.jsonl` | Output root | Ledger of finished downloads (used to skip them next time). Like `queue.json` it holds the source links, a mega link's key included; a new one is readable by your user only. |
-| `queue.json` | `%AppData%\Siphon\` (the user config folder) | The GUI's queue. It holds the source links, and a mega link includes its key. |
+| `queue.json` | `%AppData%\Siphon\` (the user config folder) | The GUI's queue. It holds the source links, and a mega link includes its key. One that can't be read (damaged, or written by a newer Siphon) is kept as `queue.json.unreadable-<time>` and the queue starts empty. |
 | `siphon.log`, `siphon.log.1` | `%AppData%\Siphon\` | The window version's log: what each download did, its retries and errors. About 1 MB at most, the older half in `siphon.log.1`. Links' keys, query values (tokens, signed links) and your home folder are taken out before a line is written. |
 | `instance.port` | `%AppData%\Siphon\` | While the window version runs: how a second launch and the browser extension reach it, with a key only your user can read. Removed on exit. |
 | `browser\` | `%AppData%\Siphon\` | Windows only: the browser integration's registration files (**Settings → Browser integration**). |

@@ -241,4 +241,6 @@ var turkish = map[string]string{
 	"When the downloads finish: %s.":                        "İndirmeler bitince: %s.",
 	"Canceled; when the downloads finish, nothing is done.": "İptal edildi; indirmeler bitince hiçbir şey yapılmayacak.",
 	"%s: it didn't work (%v)":                               "%s: olmadı (%v)",
+	"The queue could not be read":                           "Kuyruk okunamadı",
+	"The saved queue could not be read (it is damaged, or was written by a newer Siphon), so the list starts empty. The file was kept as:\n%s": "Kayıtlı kuyruk okunamadı (dosya bozuk ya da daha yeni bir Siphon tarafından yazılmış); liste bu yüzden boş başlıyor. Dosya şu adla saklandı:\n%s",
 }

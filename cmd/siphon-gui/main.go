@@ -138,6 +138,7 @@ func main() {
 		return
 	}
 	vm.Replace(eng.Jobs())
+	unreadableQueue := eng.UnreadableStateFile()
 	// Outside the download hours nothing may start, not even before the
 	// window is built.
 	eng.SetOffHours(hoursHold(a.Preferences(), time.Now()) != "")
@@ -213,6 +214,12 @@ func main() {
 	if statePath == "" {
 		showInfo(T("Persistence off"),
 			T("No folder was found for the queue file; the list is limited to this session."), w)
+	}
+	if unreadableQueue != "" {
+		// Not only in the log: an empty list with no word why looks like
+		// Siphon lost it.
+		showInfo(T("The queue could not be read"),
+			Tf("The saved queue could not be read (it is damaged, or was written by a newer Siphon), so the list starts empty. The file was kept as:\n%s", unreadableQueue), w)
 	}
 	if len(startLinks) > 0 {
 		// Started with links (by the browser, or "siphon-gui <link>"): the

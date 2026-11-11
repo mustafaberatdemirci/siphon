@@ -241,4 +241,6 @@ var german = map[string]string{
 	"When the downloads finish: %s.":                        "Wenn die Downloads fertig sind: %s.",
 	"Canceled; when the downloads finish, nothing is done.": "Abgebrochen; wenn die Downloads fertig sind, geschieht nichts.",
 	"%s: it didn't work (%v)":                               "%s: hat nicht geklappt (%v)",
+	"The queue could not be read":                           "Die Warteschlange konnte nicht gelesen werden",
+	"The saved queue could not be read (it is damaged, or was written by a newer Siphon), so the list starts empty. The file was kept as:\n%s": "Die gespeicherte Warteschlange konnte nicht gelesen werden (sie ist beschädigt oder stammt von einem neueren Siphon); die Liste beginnt deshalb leer. Die Datei wurde aufbewahrt als:\n%s",
 }
