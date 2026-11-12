@@ -141,6 +141,10 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 			T("A site may allow fewer: bunkr, cyberfile and pixeldrain 1. Each row shows what it really gets.")),
 		item(T("VPN switch command"), container.NewBorder(nil, nil, nil, test, q.quotaCmd),
 			T("For mega's quota, optional: runs when it runs out. Empty: you get a notification and switch the VPN yourself.")),
+		item(T("DNS"), q.dnsSetting(),
+			T("Who answers the sites' names. A public resolver, asked over HTTPS, gets around a provider sending a site to its block page; a network that cuts the connections themselves needs the proxy below or a VPN. Takes effect after a restart.")),
+		item(T("Proxy"), q.proxySetting(),
+			T("Only the sites ticked go through it: http://, https://, socks5:// or socks5h:// with host and port, e.g. a VPN app's SOCKS5 port. Takes effect after a restart.")),
 		item(T("Notify when downloads finish"), notifyDone,
 			T("A system notification once nothing is left to download: how many files came, and how many failed.")),
 		item(T("Watch the clipboard"), watch,
@@ -175,13 +179,20 @@ func (q *queueTab) pickFolder(entry *widget.Entry) {
 // askRestart offers to restart Siphon so a new language shows. Unfinished
 // downloads are saved on the way out and continue after.
 func (q *queueTab) askRestart() {
+	q.askRestartFor(T("Language"), T("The new language shows the next time Siphon starts."),
+		T("Siphon shows the new language after a restart. Unfinished downloads are saved and continue."))
+}
+
+// askRestartFor offers a restart for a setting that takes effect at start:
+// later is said when Siphon can't restart itself, now when it can.
+func (q *queueTab) askRestartFor(title, later, now string) {
 	if q.restart == nil {
-		showInfo(T("Language"), T("The new language shows the next time Siphon starts."), q.win)
+		showInfo(title, later, q.win)
 		return
 	}
-	l := widget.NewLabel(T("Siphon shows the new language after a restart. Unfinished downloads are saved and continue."))
+	l := widget.NewLabel(now)
 	l.Wrapping = fyne.TextWrapWord
-	d := dialog.NewCustomConfirm(T("Language"), T("Restart now"), T("Later"), l, func(now bool) {
+	d := dialog.NewCustomConfirm(title, T("Restart now"), T("Later"), l, func(now bool) {
 		if now {
 			q.restart()
 		}
@@ -258,6 +269,15 @@ func (q *queueTab) showSettings() {
 	scroll := container.NewVScroll(q.settings)
 	d := dialog.NewCustom(T("Settings"), T("Close"), scroll, q.win)
 	d.Resize(settingsSize(q.win.Canvas().Size()))
+	// DNS and Proxy take effect at start: the restart is offered once, as
+	// the dialog closes, not at every key pressed in the proxy's box.
+	before := networkSnapshot(q.prefs)
+	d.SetOnClosed(func() {
+		if networkSnapshot(q.prefs) != before {
+			q.askRestartFor(T("DNS and proxy"), T("The new DNS and proxy are used the next time Siphon starts."),
+				T("Siphon uses the new DNS and proxy after a restart. Unfinished downloads are saved and continue."))
+		}
+	})
 	d.Show()
 }
 

@@ -102,7 +102,7 @@ func main() {
 
 	vm := newViewModel()
 
-	eng, err := queue.New(queue.Options{
+	opts := queue.Options{
 		StatePath: statePath,
 		// Read here, not in the tab: the engine starts dispatching before the tab
 		// is built, and would start the default number of jobs first.
@@ -129,7 +129,19 @@ func main() {
 			a.SendNotification(fyne.NewNotification(Tf("Siphon — %s quota exceeded", siteName), msg))
 			fyne.Do(func() { requestAttention(w) })
 		},
-	})
+		// Settings > DNS and Proxy.
+		Network: networkFromPrefs(a.Preferences()),
+	}
+	eng, err := queue.New(opts)
+	if err != nil && (opts.Network.DNS != "" || opts.Network.Proxy != "") {
+		// A DNS or proxy setting the engine can't use must not keep the
+		// window from opening, where it can be changed.
+		log.Printf("ERROR the DNS or proxy setting can't be used, starting without it: %v", err)
+		opts.Network = run.Network{}
+		if eng, err = queue.New(opts); err == nil {
+			vm.Notify(T("The DNS or proxy setting can't be used; Siphon started without it. Check it in Settings."))
+		}
+	}
 	if err != nil {
 		// The config couldn't be loaded: open the window but say why.
 		w.SetContent(container.NewCenter(widget.NewLabel(T("Could not start:") + "\n" + err.Error())))

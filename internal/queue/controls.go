@@ -270,6 +270,16 @@ func (e *Engine) SegmentCeilings() []SiteCeiling {
 	return out
 }
 
+// Sites are the names of the sites the engine knows, sorted.
+func (e *Engine) Sites() []string {
+	out := make([]string, 0, len(e.workers))
+	for name := range e.workers {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // SiteCeiling is one site's connections-per-file ceiling.
 type SiteCeiling struct {
 	Site string

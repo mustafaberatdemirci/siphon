@@ -47,7 +47,10 @@ func (d *doctorTab) run() {
 
 	go func() {
 		var out strings.Builder
-		cfgs, resolvers, err := run.Setup(run.Events{}, "", nil, nil, nil)
+		cfgs, resolvers, err := run.SetupWith(run.SetupOptions{
+			// The sites as the downloads reach them: Settings' DNS and proxy.
+			Network: networkFromPrefs(fyne.CurrentApp().Preferences()),
+		})
 		if err != nil {
 			fyne.Do(func() {
 				d.out.SetText(T("Configuration error:") + "\n" + err.Error())
@@ -60,7 +63,7 @@ func (d *doctorTab) run() {
 			if _, fallback := r.(site.Fallback); fallback {
 				continue // plain file links: no site to diagnose
 			}
-			named = append(named, doctor.Named{Name: cfgs[i].Name, Resolver: r, Host: doctor.HostOf(cfgs[i])})
+			named = append(named, doctor.NamedFor(cfgs[i], r))
 		}
 		reports := doctor.Run(context.Background(), named)
 		worst := doctor.Format(&out, reports)

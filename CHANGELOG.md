@@ -4,6 +4,22 @@ Each version's section is also its release notes on GitHub.
 
 ## Unreleased
 
+**Blocked sites**
+
+- **Siphon's own DNS.** Settings → DNS (or `-dns`, or `dns_resolver` per
+  site in `sites.toml`) has Siphon ask Cloudflare, Google or Quad9 for the
+  sites' addresses over HTTPS, at their IP addresses: a provider sending a
+  site to its block page no longer stops it. `siphon doctor` checks the
+  sites the same way. The setting was in `sites.toml` before, and did
+  nothing.
+- **A proxy for the sites that need one.** Settings → Proxy (or `-proxy`
+  and `-proxy-sites`, or `proxy` per site in `sites.toml`): `http://`,
+  `https://`, `socks5://` or `socks5h://`, for the sites ticked only; the
+  others connect directly. A network that cuts connections naming a site
+  (which no DNS gets around) is got around this way, e.g. through a VPN
+  app's SOCKS5 port.
+- When a site is blocked, the message says which of the two helps.
+
 **Fixes**
 
 - **bunkr albums download up to four files at once.** The whole site was

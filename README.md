@@ -329,6 +329,8 @@ restart, which Siphon offers to do on the spot):
 | Download hours | **Only between** two times, e.g. 02:00–08:00 for a night tariff (23:00–07:00 goes past midnight). Outside them nothing starts, and running downloads stop and go on by themselves when the hours come; the status line says when. |
 | Connections per file | How many connections a single file may use; also applies to downloads already running. See below. |
 | VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
+| DNS | Who answers the sites' names: the system's DNS (the default), or Cloudflare, Google or Quad9 asked over HTTPS at their IP addresses. Gets around a provider sending a site to its block page. See [Diagnosing a site](#diagnosing-a-site-siphon-doctor). |
+| Proxy | A proxy (`http://`, `https://`, `socks5://` or `socks5h://` with host and port, e.g. a VPN app's SOCKS5 port) and the sites that go through it; the others connect directly. Gets around a network that cuts connections naming a site. |
 | Notify when downloads finish | A system notification once nothing is left to download: how many files came, and how many failed (on by default). |
 | Watch the clipboard | Links of supported sites you copy anywhere open the Add dialog (on by default). See [Browser integration](#browser-integration). |
 | Browser integration | Lets the Siphon extension hand links and downloads to Siphon; **Install** and **Remove**. See [Browser integration](#browser-integration). |
