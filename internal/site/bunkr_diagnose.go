@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 )
@@ -36,17 +35,11 @@ func (b *bunkr) diagnoseOne(ctx context.Context, canary string) []LayerResult {
 	}
 	host := normalizeHost(u.Host)
 
-	addrs, dnsErr := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if dnsErr != nil {
-		return append(out, LayerResult{Layer: LayerDNS, Status: StatusFail,
-			Detail: "did not resolve", Evidence: host + ": " + dnsErr.Error()})
+	dns, ok := dnsLayer(ctx, b.cfg, host)
+	out = append(out, dns)
+	if !ok {
+		return out
 	}
-	ips := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		ips = append(ips, a.IP.String())
-	}
-	out = append(out, LayerResult{Layer: LayerDNS, Status: StatusOK,
-		Detail: fmt.Sprintf("%d addresses", len(ips)), Evidence: strings.Join(ips, ", ")})
 
 	body, err := b.get(ctx, canary, "")
 	// The response is recorded in every case: the broken page's body is the

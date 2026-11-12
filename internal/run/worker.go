@@ -34,7 +34,13 @@ type Worker struct {
 }
 
 // NewWorker builds a worker, wiring the resolver's optional interfaces into the downloader.
+//
+// The downloads go through the site's own client when it has one (its DNS
+// and proxy, see SetupWith), client otherwise.
 func NewWorker(r site.Resolver, cfg site.SiteConfig, client *http.Client, ev Events) *Worker {
+	if cfg.HTTPClient != nil {
+		client = cfg.HTTPClient
+	}
 	down := &dl.Downloader{
 		Client:      client,
 		Logf:        ev.Debugf,

@@ -15,8 +15,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/mustafaberatdemirci/siphon/internal/doh"
 )
 
 // NewClient builds the client for transfer and API requests.
@@ -26,10 +29,31 @@ import (
 // kept at the connection and response-header level; a hung server is caught,
 // a slow but working transfer is not cut.
 func NewClient() *http.Client {
+	c, _ := NewClientFor("", nil)
+	return c
+}
+
+// NewClientFor is NewClient for a site with a route of its own: its
+// requests go through proxy ("" for the environment's, as NewClient), and
+// their names are resolved by resolver (nil for the system's DNS).
+func NewClientFor(proxy string, resolver *doh.Resolver) (*http.Client, error) {
+	proxyFunc := http.ProxyFromEnvironment
+	if proxy != "" {
+		u, err := ParseProxy(proxy)
+		if err != nil {
+			return nil, err
+		}
+		proxyFunc = http.ProxyURL(u)
+	}
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	dial := dialer.DialContext
+	if resolver != nil {
+		dial = doh.Dialer{Resolver: resolver, Dialer: dialer}.DialContext
+	}
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			Proxy:                 proxyFunc,
+			DialContext:           dial,
 			TLSHandshakeTimeout:   15 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
@@ -42,7 +66,25 @@ func NewClient() *http.Client {
 			MaxIdleConnsPerHost: 32,
 			IdleConnTimeout:     90 * time.Second,
 		},
+	}, nil
+}
+
+// ParseProxy reads a proxy setting: http://, https://, socks5:// or
+// socks5h:// with a host and a port, a user and password allowed.
+func ParseProxy(s string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("proxy %q: %w", s, err)
 	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("proxy %q: give http://, https://, socks5:// or socks5h:// with a host and port", s)
+	}
+	if u.Hostname() == "" || u.Port() == "" {
+		return nil, fmt.Errorf("proxy %q: give a host and a port, like socks5://127.0.0.1:1080", s)
+	}
+	return u, nil
 }
 
 // IsTransient reports whether the error is of the "the network can't be

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -912,17 +911,11 @@ func (m *mega) diagnoseOne(ctx context.Context, canary string) []LayerResult {
 			Detail: "could not parse the canary URL", Evidence: canary})
 	}
 	host := normalizeHost(u.Host)
-	addrs, dnsErr := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if dnsErr != nil {
-		return append(out, LayerResult{Layer: LayerDNS, Status: StatusFail,
-			Detail: "did not resolve", Evidence: host + ": " + dnsErr.Error()})
+	dns, ok := dnsLayer(ctx, m.cfg, host)
+	out = append(out, dns)
+	if !ok {
+		return out
 	}
-	ips := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		ips = append(ips, a.IP.String())
-	}
-	out = append(out, LayerResult{Layer: LayerDNS, Status: StatusOK,
-		Detail: fmt.Sprintf("%d addresses", len(ips)), Evidence: strings.Join(ips, ", ")})
 
 	probe := &mega{cfg: m.cfg, api: canary, nodeKeys: map[string][]byte{}}
 	_, perr := probe.callOnce(ctx, "", []byte(`[{"a":"g","p":"AAAAAAAA"}]`))

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	"github.com/mustafaberatdemirci/siphon/internal/doh"
 	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
@@ -55,6 +57,9 @@ type Options struct {
 	// whether the user's network blocks its site (netcheck.Check), once per
 	// host; a blocked one is said so after the error.
 	CheckNetwork func(ctx context.Context, host string) netcheck.Finding
+	// Network is the DNS and proxy the sites use unless sites.toml gives
+	// one its own (-dns, -proxy).
+	Network Network
 }
 
 // MaxQuotaRounds is the per-URL upper bound of the quota command + probe +
@@ -188,7 +193,55 @@ func Setup(
 	canaries []string,
 	client *http.Client,
 ) ([]site.SiteConfig, []site.Resolver, error) {
-	cfgs, src, err := config.Load(config.Embedded, cfgPath)
+	return SetupWith(SetupOptions{Events: ev, ConfigPath: cfgPath, Record: record, Canaries: canaries, Client: client})
+}
+
+// Network is how the sites' requests leave, unless sites.toml gives a site
+// its own: the DNS that answers their names and the proxy that carries
+// them. The window's Settings and the command line's flags set it.
+type Network struct {
+	// DNS is a doh.Endpoint setting: "" or "system", "cloudflare",
+	// "google", "quad9", or an https:// DoH address.
+	DNS string
+	// Proxy is a proxy for the sites in ProxySites ("" for none).
+	Proxy string
+	// ProxySites are the names of the sites the proxy is for; empty means
+	// every site.
+	ProxySites []string
+}
+
+func (n Network) proxyFor(siteName string) string {
+	if n.Proxy == "" {
+		return ""
+	}
+	if len(n.ProxySites) == 0 {
+		return n.Proxy
+	}
+	for _, s := range n.ProxySites {
+		if strings.EqualFold(s, siteName) {
+			return n.Proxy
+		}
+	}
+	return ""
+}
+
+// SetupOptions are Setup's inputs, with the network the sites use.
+type SetupOptions struct {
+	Events     Events
+	ConfigPath string
+	Record     func(siteName string) func(string, []byte)
+	Canaries   []string
+	// Client is for the sites with no route of their own; nil makes one.
+	Client  *http.Client
+	Network Network
+}
+
+// SetupWith is Setup with the network the sites' requests use. A site with
+// a DNS or a proxy of its own (in sites.toml, else Network) gets a client of
+// its own; sites with the same route share one.
+func SetupWith(o SetupOptions) ([]site.SiteConfig, []site.Resolver, error) {
+	ev, client := o.Events, o.Client
+	cfgs, src, err := config.Load(config.Embedded, o.ConfigPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -198,6 +251,16 @@ func Setup(
 	if ev.ConfigLoaded != nil {
 		ev.ConfigLoaded(src.String(), len(cfgs))
 	}
+	defaultDNS, err := doh.Endpoint(o.Network.DNS)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrUsage, err)
+	}
+	if o.Network.Proxy != "" {
+		if _, err := snet.ParseProxy(o.Network.Proxy); err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrUsage, err)
+		}
+	}
+	routes := newRoutes()
 
 	reg := site.NewRegistry()
 	for name, factory := range map[string]site.Factory{
@@ -218,17 +281,30 @@ func Setup(
 	state := StateDir()
 	for i := range cfgs {
 		cfgs[i].Logf = ev.Debugf
+		if cfgs[i].DNSResolver == "" {
+			cfgs[i].DNSResolver = defaultDNS
+		}
+		if cfgs[i].Proxy == "" {
+			cfgs[i].Proxy = o.Network.proxyFor(cfgs[i].Name)
+		}
 		if cfgs[i].HTTPClient == nil {
-			cfgs[i].HTTPClient = client
+			c, lookup, err := routes.client(cfgs[i].Proxy, cfgs[i].DNSResolver, client)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%w: %s: %v", ErrUsage, cfgs[i].Name, err)
+			}
+			cfgs[i].HTTPClient, cfgs[i].LookupHost = c, lookup
+		}
+		if cfgs[i].Proxy != "" || cfgs[i].DNSResolver != "" {
+			ev.debugf("%s: requests through %s", cfgs[i].Name, routeLabel(cfgs[i]))
 		}
 		if cfgs[i].StateDir == "" {
 			cfgs[i].StateDir = state
 		}
-		if record != nil {
-			cfgs[i].Record = record(cfgs[i].Name)
+		if o.Record != nil {
+			cfgs[i].Record = o.Record(cfgs[i].Name)
 		}
-		if len(canaries) > 0 {
-			cfgs[i].CanaryURLs = canaries
+		if len(o.Canaries) > 0 {
+			cfgs[i].CanaryURLs = o.Canaries
 		}
 	}
 	resolvers, err := reg.Build(cfgs)
@@ -260,6 +336,59 @@ func Setup(
 	return cfgs, resolvers, nil
 }
 
+// routes makes one client per route (proxy and DNS) and one DoH resolver
+// per DNS server, shared by the sites that have them in common.
+type routes struct {
+	clients   map[[2]string]*http.Client
+	resolvers map[string]*doh.Resolver
+}
+
+func newRoutes() *routes {
+	return &routes{clients: map[[2]string]*http.Client{}, resolvers: map[string]*doh.Resolver{}}
+}
+
+// client is the client for a route, and the name lookup that goes with it
+// (nil for the system's DNS); shared is the client for the empty route.
+func (r *routes) client(proxy, dns string, shared *http.Client) (*http.Client, func(context.Context, string) ([]string, error), error) {
+	var res *doh.Resolver
+	if dns != "" {
+		if res = r.resolvers[dns]; res == nil {
+			res = doh.New(dns, nil)
+			r.resolvers[dns] = res
+		}
+	}
+	var lookup func(context.Context, string) ([]string, error)
+	if res != nil {
+		lookup = res.LookupHost
+	}
+	if proxy == "" && dns == "" {
+		return shared, nil, nil
+	}
+	key := [2]string{proxy, dns}
+	if c := r.clients[key]; c != nil {
+		return c, lookup, nil
+	}
+	c, err := snet.NewClientFor(proxy, res)
+	if err != nil {
+		return nil, nil, err
+	}
+	r.clients[key] = c
+	return c, lookup, nil
+}
+
+// routeLabel says how a site's requests leave, for the log; a proxy's user
+// and password are left out.
+func routeLabel(c site.SiteConfig) string {
+	var parts []string
+	if c.Proxy != "" {
+		parts = append(parts, "proxy "+site.ProxyLabel(c.Proxy))
+	}
+	if c.DNSResolver != "" {
+		parts = append(parts, "DNS "+c.DNSResolver)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Run resolves and downloads the given URLs.
 //
 // The returned error is ONLY a usage/configuration error (exit 3).
@@ -282,7 +411,7 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 
 	// The resolvers and the downloader share the same client (and connection pool).
 	httpClient := snet.NewClient()
-	cfgs, resolvers, err := Setup(ev, opt.ConfigPath, nil, nil, httpClient)
+	cfgs, resolvers, err := SetupWith(SetupOptions{Events: ev, ConfigPath: opt.ConfigPath, Client: httpClient, Network: opt.Network})
 	if err != nil {
 		return sum, err
 	}

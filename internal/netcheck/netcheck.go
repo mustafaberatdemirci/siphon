@@ -18,7 +18,8 @@
 //     the same address answers a handshake under another name, means
 //     something on the way reads the name and drops the connection.
 //
-// The first is solved by another DNS server; the second only by a VPN (or a
+// The first is solved by another DNS server (Siphon's own DNS setting); the
+// second only by a VPN or a proxy (or a
 // network that doesn't filter).
 package netcheck
 
@@ -70,11 +71,11 @@ func (f Finding) Blocked() bool { return f.DNSBlocked || f.NameFiltered }
 func (f Finding) Summary() string {
 	switch {
 	case f.DNSBlocked && f.NameFiltered:
-		return fmt.Sprintf("your network blocks %s: its DNS gives a wrong address, and connections naming the site are cut; a VPN gets around it, another DNS server alone doesn't", f.Host)
+		return fmt.Sprintf("your network blocks %s: its DNS gives a wrong address, and connections naming the site are cut; a VPN or a proxy (Settings > Proxy, -proxy) gets around it, another DNS server alone doesn't", f.Host)
 	case f.NameFiltered:
-		return fmt.Sprintf("your network blocks %s: connections naming the site are cut, while the same server answers under another name; a VPN gets around it", f.Host)
+		return fmt.Sprintf("your network blocks %s: connections naming the site are cut, while the same server answers under another name; a VPN or a proxy (Settings > Proxy, -proxy) gets around it", f.Host)
 	case f.DNSBlocked:
-		return fmt.Sprintf("your network's DNS blocks %s: it gives an address that doesn't serve the site; another DNS server or a VPN gets around it", f.Host)
+		return fmt.Sprintf("your network's DNS blocks %s: it gives an address that doesn't serve the site; Siphon's own DNS (Settings > DNS, -dns) or a VPN gets around it", f.Host)
 	case f.Unreachable:
 		return fmt.Sprintf("%s doesn't answer at %s (the server is down, or your network blocks its address)", f.Host, f.Address)
 	case f.Reached:

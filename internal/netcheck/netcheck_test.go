@@ -88,7 +88,7 @@ func TestSummarySaysWhatHelps(t *testing.T) {
 	if !strings.Contains(both, "VPN") || !strings.Contains(both, "another DNS server alone doesn't") {
 		t.Errorf("both blocks: %q", both)
 	}
-	if s := (Finding{Host: "h", DNSBlocked: true}).Summary(); !strings.Contains(s, "another DNS server") {
+	if s := (Finding{Host: "h", DNSBlocked: true}).Summary(); !strings.Contains(s, "Settings > DNS") {
 		t.Errorf("DNS block: %q", s)
 	}
 	if !(Finding{NameFiltered: true}).Blocked() || (Finding{Unreachable: true}).Blocked() {

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/mustafaberatdemirci/siphon/internal/doh"
+	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
 )
 
@@ -53,6 +55,7 @@ type rawSite struct {
 	MaxSegments    int    `toml:"max_segments"`
 	MaxConnections int    `toml:"max_connections"`
 	DNSResolver    string `toml:"dns_resolver"`
+	Proxy          string `toml:"proxy"`
 
 	// HostLimits: files at once per pool of download hosts (a host pattern
 	// and a number). Overwritten per pattern, like Extra; 0 removes one.
@@ -226,6 +229,9 @@ func mergeSite(b, e rawSite) rawSite {
 	if e.DNSResolver != "" {
 		b.DNSResolver = e.DNSResolver
 	}
+	if e.Proxy != "" {
+		b.Proxy = e.Proxy
+	}
 	if e.MaxConcurrent != 0 {
 		b.MaxConcurrent = e.MaxConcurrent
 	}
@@ -344,6 +350,18 @@ func build(f file) ([]site.SiteConfig, error) {
 			}
 		}
 
+		// The site's route: checked here, so a typo is a configuration
+		// error at start, not a failed download later.
+		dns, err := doh.Endpoint(r.DNSResolver)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: dns_resolver: %v", ErrUsage, r.Name, err)
+		}
+		if r.Proxy != "" {
+			if _, err := snet.ParseProxy(r.Proxy); err != nil {
+				return nil, fmt.Errorf("%w: %s: %v", ErrUsage, r.Name, err)
+			}
+		}
+
 		base, err := dur(r.Name, "base_delay", r.BaseDelay)
 		if err != nil {
 			return nil, err
@@ -371,7 +389,8 @@ func build(f file) ([]site.SiteConfig, error) {
 			MaxSegments:    r.MaxSegments,
 			MaxConnections: r.MaxConnections,
 			HostLimits:     hostLimits,
-			DNSResolver:    r.DNSResolver,
+			DNSResolver:    dns,
+			Proxy:          strings.TrimSpace(r.Proxy),
 			MaxRetries:     r.MaxRetries,
 			BaseDelay:      base,
 			MaxDelay:       maxD,

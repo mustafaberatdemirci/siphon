@@ -31,6 +31,15 @@ type Named struct {
 	// Host is the site's host to check the network against when no failing
 	// layer names one (see HostOf); "" skips that check.
 	Host string
+	// OwnDNS: the site resolves names over DNS-over-HTTPS or through a
+	// proxy, not the system's DNS. The network check's finding about the
+	// system's DNS then doesn't make the site's DNS line wrong.
+	OwnDNS bool
+}
+
+// NamedFor is the Named of a site from its config.
+func NamedFor(cfg site.SiteConfig, r site.Resolver) Named {
+	return Named{Name: cfg.Name, Resolver: r, Host: HostOf(cfg), OwnDNS: cfg.DNSResolver != "" || cfg.Proxy != ""}
 }
 
 // HostOf is the host a site is diagnosed on: its first canary's, or its
@@ -93,7 +102,7 @@ func Run(ctx context.Context, sites []Named) []Report {
 	for _, s := range sites {
 		res, err := s.Resolver.Diagnose(ctx)
 		if host, ok := networkFailure(res, s.Host); ok {
-			res = withNetwork(res, checkNetwork(ctx, host))
+			res = withNetwork(res, checkNetwork(ctx, host), s.OwnDNS)
 		}
 		out = append(out, Report{Site: s.Name, Results: res, Err: err})
 	}
@@ -138,7 +147,11 @@ func hostIn(evidence string) string {
 // diagnosis wrote as OK only because its failure came later: the DNS line
 // when the address is a block page, the TLS line when the handshake is what
 // gets no answer, and the Challenge line then (it couldn't be reached).
-func withNetwork(res []site.LayerResult, f netcheck.Finding) []site.LayerResult {
+//
+// ownDNS: the site doesn't use the system's DNS, so a block there leaves its
+// DNS line as it is. A TLS line is only corrected when no other says the
+// handshake failed (the site's own diagnosis may have said so already).
+func withNetwork(res []site.LayerResult, f netcheck.Finding, ownDNS bool) []site.LayerResult {
 	status := site.StatusWarn
 	switch {
 	case f.Blocked():
@@ -146,12 +159,20 @@ func withNetwork(res []site.LayerResult, f netcheck.Finding) []site.LayerResult 
 	case f.Reached:
 		status = site.StatusOK
 	}
+	tlsFailed := false
+	for _, r := range res {
+		if r.Layer == site.LayerTLS && r.Status == site.StatusFail {
+			tlsFailed = true
+		}
+	}
 	out := make([]site.LayerResult, 0, len(res)+1)
 	for _, r := range res {
 		if r.Status == site.StatusOK {
 			switch {
-			case f.DNSBlocked && r.Layer == site.LayerDNS:
+			case f.DNSBlocked && r.Layer == site.LayerDNS && !ownDNS:
 				r.Status, r.Detail = site.StatusFail, "the address isn't the site's (see Network)"
+			case f.NameFiltered && r.Layer == site.LayerTLS && tlsFailed:
+				continue // the site's own TLS line says it
 			case f.NameFiltered && r.Layer == site.LayerTLS:
 				r = site.LayerResult{Layer: site.LayerTLS, Status: site.StatusFail,
 					Detail: "a handshake naming the site gets no answer (see Network)"}

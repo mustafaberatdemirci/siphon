@@ -106,6 +106,7 @@ func runCLI() int {
 	flag.BoolVar(&resolveOnly, "resolve-only", false, "print the resolved URLs, don't download")
 	flag.StringVar(&onQuota, "on-quota", "", "command to run when a site's quota runs out (e.g. a script that switches VPN); continues when the allowance opens up")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
+	network := networkFlags(flag.CommandLine)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: siphon [flags] [url ...]\n")
 		fmt.Fprintf(os.Stderr, "       siphon doctor [flags] [site ...]\n")
@@ -143,6 +144,7 @@ func runCLI() int {
 		OnQuota:     onQuota,
 		// "timeout" alone sends the user looking for the fault in Siphon.
 		CheckNetwork: netcheck.Check,
+		Network:      network(),
 	}, log.events())
 	if err != nil {
 		log.errorf("%v", err)
@@ -180,6 +182,7 @@ func runDoctor(args []string) int {
 	// replace), but there has to be a way to ask "is this album broken".
 	var canaries stringList
 	fs.Var(&canaries, "canary", "replace the canary URL (repeatable)")
+	network := networkFlags(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: siphon doctor [flags] [site ...]\n\n")
 		fs.PrintDefaults()
@@ -201,7 +204,9 @@ func runDoctor(args []string) int {
 		recFn = rec.For
 	}
 
-	cfgs, resolvers, err := run.Setup(log.events(), cfgPath, recFn, canaries, nil)
+	cfgs, resolvers, err := run.SetupWith(run.SetupOptions{
+		Events: log.events(), ConfigPath: cfgPath, Record: recFn, Canaries: canaries, Network: network(),
+	})
 	if err != nil {
 		log.errorf("%v", err)
 		return run.ExitUsage
@@ -221,7 +226,7 @@ func runDoctor(args []string) int {
 		if len(want) > 0 && !want[strings.ToLower(name)] {
 			continue
 		}
-		sites = append(sites, doctor.Named{Name: name, Resolver: r, Host: doctor.HostOf(cfgs[i])})
+		sites = append(sites, doctor.NamedFor(cfgs[i], r))
 	}
 	if len(sites) == 0 {
 		log.errorf("no site to diagnose (known: %s)", strings.Join(siteNames(cfgs), ", "))
@@ -268,6 +273,24 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 		}
 		rest = append(rest, fs.Arg(0))
 		args = fs.Args()[1:]
+	}
+}
+
+// networkFlags adds -dns, -proxy and -proxy-sites to fs; the returned
+// function reads them once fs is parsed. sites.toml's dns_resolver and
+// proxy still win for their site.
+func networkFlags(fs *flag.FlagSet) func() run.Network {
+	dns := fs.String("dns", "", "resolve names over DNS-over-HTTPS: cloudflare, google, quad9 or an https:// address (default: the system's DNS)")
+	proxy := fs.String("proxy", "", "send requests through this proxy: http://, https://, socks5:// or socks5h://host:port")
+	sites := fs.String("proxy-sites", "", "comma-separated sites the -proxy is for, e.g. bunkr,cyberfile (default: every site)")
+	return func() run.Network {
+		n := run.Network{DNS: *dns, Proxy: *proxy}
+		for _, s := range strings.Split(*sites, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				n.ProxySites = append(n.ProxySites, s)
+			}
+		}
+		return n
 	}
 }
 

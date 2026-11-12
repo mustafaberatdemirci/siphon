@@ -73,6 +73,10 @@ type Options struct {
 	// host after a network error (netcheck.Check; netblock.go). Optional.
 	CheckNetwork func(ctx context.Context, host string) netcheck.Finding
 
+	// Network is the DNS and proxy the sites use unless sites.toml gives
+	// one its own (the window's Settings).
+	Network run.Network
+
 	// For tests: if given, the config isn't loaded and these are used.
 	Resolvers []site.Resolver
 	Configs   []site.SiteConfig
@@ -230,7 +234,7 @@ func New(opt Options) (*Engine, error) {
 	if len(opt.Resolvers) > 0 {
 		e.cfgs, e.resolvers = opt.Configs, opt.Resolvers
 	} else {
-		cfgs, resolvers, err := run.Setup(opt.Events, opt.ConfigPath, nil, nil, e.client)
+		cfgs, resolvers, err := run.SetupWith(run.SetupOptions{Events: opt.Events, ConfigPath: opt.ConfigPath, Client: e.client, Network: opt.Network})
 		if err != nil {
 			return nil, err
 		}

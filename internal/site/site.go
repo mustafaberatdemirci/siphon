@@ -262,11 +262,21 @@ type SiteConfig struct {
 	// finds one that works.
 	CanaryURLs []string
 
-	// DNSResolver empty means the system resolver; otherwise a DoH address.
-	// It does NOT defeat SNI-based blocking, it only defeats DNS hijacking.
-	// Its real value is diagnostic: if the system DNS and DoH disagree, that
-	// alone is proof of ISP interference.
+	// DNSResolver empty means the system resolver; otherwise a DoH address
+	// (internal/doh). It does NOT defeat SNI-based blocking, it only defeats
+	// DNS hijacking: a provider answering a site's name with its block page.
 	DNSResolver string
+
+	// Proxy is the proxy the site's requests go through ("" for none):
+	// http://, https://, socks5:// or socks5h:// with host and port, and a
+	// user and password if the proxy wants them. It is the way around a
+	// network that cuts connections naming the site, for that site only.
+	Proxy string
+
+	// LookupHost resolves a name the way the site's requests do (its DoH
+	// resolver); nil is the system's DNS. doctor's DNS line uses it, so that
+	// it doesn't call a site broken that Siphon reaches through DoH.
+	LookupHost func(ctx context.Context, host string) ([]string, error)
 
 	// Retry policy lives in config because Premise 2 promises it.
 	MaxRetries int

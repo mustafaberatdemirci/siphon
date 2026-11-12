@@ -410,6 +410,9 @@ siphon --resolve-only https://pixeldrain.com/l/abc123   # print file URLs, downl
 | `-v` / `-q` | More detail / only errors. |
 | `-resolve-only` | Print the resolved download URLs and exit; the disk is not touched. |
 | `-on-quota "<command>"` | Run this command when a site's quota runs out, then continue (at most 5 rounds). |
+| `-dns <resolver>` | Resolve names over DNS-over-HTTPS: `cloudflare`, `google`, `quad9` or an `https://` address. |
+| `-proxy <url>` | Send requests through this proxy (`http://`, `https://`, `socks5://`, `socks5h://`). |
+| `-proxy-sites <list>` | Comma-separated sites the `-proxy` is for, e.g. `bunkr,cyberfile` (default: every site). |
 
 Exit codes:
 
@@ -452,18 +455,19 @@ network blocks the site, and how:
 - **DNS:** your DNS server's answer is compared with a public resolver's
   (1.1.1.1, asked over HTTPS). It counts as blocked when your DNS gives no
   address, or one that doesn't serve the site (a provider's block page).
-  Another DNS server, or a VPN, gets around this.
+  Siphon's own DNS (**Settings → DNS**, `-dns`), another DNS server, or a
+  VPN gets around this.
 - **The site's name:** a connection naming the site gets no answer, while the
   same server answers at once under another name. Something on the way
-  reads the name and drops the connection. Only a VPN, or another network,
-  gets around this.
+  reads the name and drops the connection. A VPN, a proxy for that site
+  (**Settings → Proxy**, `-proxy`), or another network gets around this.
 
 ```
 cyberfile
   DNS        FAIL  the address isn't the site's (see Network)
   TLS        FAIL  a handshake naming the site gets no answer (see Network)
   Fetch      FAIL  failed
-  Network    FAIL  your network blocks cyberfile.me: its DNS gives a wrong address, and connections naming the site are cut; a VPN gets around it, another DNS server alone doesn't
+  Network    FAIL  your network blocks cyberfile.me: its DNS gives a wrong address, and connections naming the site are cut; a VPN or a proxy (Settings > Proxy, -proxy) gets around it, another DNS server alone doesn't
                      system DNS: 195.175.254.2; public DNS (1.1.1.1): 91.149.226.12
 ```
 
@@ -478,6 +482,7 @@ say it in the error or the status line instead of a bare "timeout".
 | `-canary <url>` | Check this URL instead of the configured canaries (repeatable). |
 | `-record` | Save the raw responses to disk, e.g. to compare them after a site changes. |
 | `-record-dir <dir>` | Where to save them (default `recordings`). |
+| `-dns`, `-proxy`, `-proxy-sites` | As for downloads: the sites are checked the way they are reached. |
 
 ## Connections per file
 
@@ -615,6 +620,8 @@ The per-site connection settings:
 | `max_concurrent` | Files downloaded at once from the site (per host). |
 | `max_segments` | Connections per file: the ceiling of the **Connections per file** setting. |
 | `max_connections` | Connections to one host at once, the files' own connections included. Default: `max_concurrent` × `max_segments`. |
+| `dns_resolver` | The site's DNS over HTTPS: `cloudflare`, `google`, `quad9` or an `https://` address; empty is the system's (or the window's and command line's setting). |
+| `proxy` | The site's proxy: `http://`, `https://`, `socks5://` or `socks5h://` with host and port, a user and password allowed. It wins over the window's and command line's proxy for this site. |
 | `host_limits` | Files at once from a pool of download servers, e.g. `host_limits = { "*.scdn.st" = 1 }`: the servers the pattern names share the number, and a file there gets no extra connections. The window's queue passes over a file whose pool is full and starts the next one that can run. `0` in your own file lifts an embedded limit. |
 Invalid TOML is a hard error; Siphon doesn't silently fall back to the
 embedded copy.

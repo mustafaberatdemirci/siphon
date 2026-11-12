@@ -356,6 +356,37 @@ func TestRunChecksTheNetworkAfterAFailure(t *testing.T) {
 	}
 }
 
+// A site that resolves names over DNS-over-HTTPS keeps its DNS line when
+// the system's DNS is the one blocked, and a TLS failure the site reported
+// itself isn't said twice.
+func TestNetworkLineRespectsTheSitesOwnDNS(t *testing.T) {
+	old := checkNetwork
+	checkNetwork = func(_ context.Context, host string) netcheck.Finding {
+		return netcheck.Finding{Host: host, DNSBlocked: true, NameFiltered: true,
+			SystemIPs: []string{"195.175.254.2"}, PublicIPs: []string{"188.114.97.0"}, Public: "1.1.1.1"}
+	}
+	t.Cleanup(func() { checkNetwork = old })
+
+	r := &fakeResolver{results: []site.LayerResult{
+		ok(site.LayerDNS, "2 addresses (DNS-over-HTTPS)"), ok(site.LayerTLS, "handshake OK"),
+		{Layer: site.LayerTLS, Status: site.StatusFail, Detail: "connection timeout (may be an SNI filter)",
+			Evidence: `Get "https://bunkr.cr/": net/http: TLS handshake timeout`},
+	}}
+	reports := Run(context.Background(), []Named{{Name: "bunkr", Resolver: r, Host: "bunkr.cr", OwnDNS: true}})
+	var b bytes.Buffer
+	Format(&b, reports)
+	out := b.String()
+	if !strings.Contains(out, "DNS        OK    2 addresses (DNS-over-HTTPS)") {
+		t.Errorf("the site's own DNS line was overwritten:\n%s", out)
+	}
+	if n := strings.Count(out, "TLS        FAIL"); n != 1 {
+		t.Errorf("%d TLS failure lines, want 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, "Network    FAIL") {
+		t.Errorf("the network line is missing:\n%s", out)
+	}
+}
+
 func TestHostIn(t *testing.T) {
 	for in, want := range map[string]string{
 		`Fetch: Get "https://www.mediafire.com/api/1.4/x.php?a=b": net/http: TLS handshake timeout`: "www.mediafire.com",

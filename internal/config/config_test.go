@@ -380,3 +380,34 @@ func TestEmbeddedBunkrLimits(t *testing.T) {
 	}
 	t.Fatal("no bunkr entry")
 }
+
+// A site's DNS and proxy: a known resolver's name becomes its address, an
+// external file sets or changes them, and a value Siphon couldn't use is a
+// configuration error at start, not a failed download later.
+func TestDNSAndProxySettings(t *testing.T) {
+	cfgs, _, err := Load([]byte(baseTOML+"dns_resolver = \"quad9\"\nproxy = \"socks5://127.0.0.1:1080\"\n"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := cfgs[0]; c.DNSResolver != "https://9.9.9.9/dns-query" || c.Proxy != "socks5://127.0.0.1:1080" {
+		t.Errorf("dns %q, proxy %q", c.DNSResolver, c.Proxy)
+	}
+
+	ext := filepath.Join(testutil.TempDir(t), "sites.toml")
+	if err := os.WriteFile(ext, []byte("[[site]]\nname = \"pixeldrain\"\nproxy = \"http://10.0.0.2:3128\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgs, _, err = Load([]byte(baseTOML+"dns_resolver = \"quad9\"\nproxy = \"socks5://127.0.0.1:1080\"\n"), ext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := cfgs[0]; c.Proxy != "http://10.0.0.2:3128" || c.DNSResolver != "https://9.9.9.9/dns-query" {
+		t.Errorf("after the external file: dns %q, proxy %q", c.DNSResolver, c.Proxy)
+	}
+
+	for _, bad := range []string{"dns_resolver = \"8.8.8.8\"\n", "proxy = \"127.0.0.1:1080\"\n", "proxy = \"socks4://127.0.0.1:1080\"\n"} {
+		if _, _, err := Load([]byte(baseTOML+bad), ""); !errors.Is(err, ErrUsage) {
+			t.Errorf("%q: err = %v, want a usage error", bad, err)
+		}
+	}
+}

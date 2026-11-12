@@ -124,7 +124,7 @@ func diagnoseCanaries(ctx context.Context, cfg SiteConfig, check func(ctx contex
 	}
 	var last []LayerResult
 	for _, canary := range cfg.CanaryURLs {
-		last = diagnoseCanary(ctx, canary, check)
+		last = diagnoseCanary(ctx, cfg, canary, check)
 		if !hasFail(last) {
 			return last, nil
 		}
@@ -132,21 +132,16 @@ func diagnoseCanaries(ctx context.Context, cfg SiteConfig, check func(ctx contex
 	return last, nil
 }
 
-func diagnoseCanary(ctx context.Context, canary string, check func(ctx context.Context, canary string) ([]LayerResult, error)) []LayerResult {
+func diagnoseCanary(ctx context.Context, cfg SiteConfig, canary string, check func(ctx context.Context, canary string) ([]LayerResult, error)) []LayerResult {
 	u, err := url.Parse(canary)
 	if err != nil || u.Host == "" {
 		return []LayerResult{{Layer: LayerDNS, Status: StatusFail, Detail: "could not parse the canary URL", Evidence: canary}}
 	}
-	host := normalizeHost(u.Host)
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return []LayerResult{{Layer: LayerDNS, Status: StatusFail, Detail: "did not resolve", Evidence: host + ": " + err.Error()}}
+	dns, ok := dnsLayer(ctx, cfg, normalizeHost(u.Host))
+	if !ok {
+		return []LayerResult{dns}
 	}
-	ips := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		ips = append(ips, a.IP.String())
-	}
-	out := []LayerResult{{Layer: LayerDNS, Status: StatusOK, Detail: fmt.Sprintf("%d addresses", len(ips)), Evidence: strings.Join(ips, ", ")}}
+	out := []LayerResult{dns}
 
 	passed, err := check(ctx, canary)
 	layer, ok := LayerOf(err)
@@ -164,6 +159,47 @@ func diagnoseCanary(ctx context.Context, canary string, check func(ctx context.C
 		out = append(out, LayerResult{Layer: layer, Status: StatusFail, Detail: "failed", Evidence: err.Error()})
 	}
 	return out
+}
+
+// dnsLayer is doctor's DNS line for host, resolved the way the site's
+// requests resolve it: by its proxy, by its DNS-over-HTTPS resolver, or by
+// the system's DNS. ok is false when it didn't resolve.
+func dnsLayer(ctx context.Context, cfg SiteConfig, host string) (LayerResult, bool) {
+	if cfg.Proxy != "" {
+		return LayerResult{Layer: LayerDNS, Status: StatusOK, Detail: "resolved by the proxy", Evidence: ProxyLabel(cfg.Proxy)}, true
+	}
+	lookup, via := systemLookup, ""
+	if cfg.LookupHost != nil {
+		lookup, via = cfg.LookupHost, " (DNS-over-HTTPS)"
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil {
+		return LayerResult{Layer: LayerDNS, Status: StatusFail, Detail: "did not resolve" + via, Evidence: host + ": " + err.Error()}, false
+	}
+	return LayerResult{Layer: LayerDNS, Status: StatusOK, Detail: fmt.Sprintf("%d addresses%s", len(ips), via), Evidence: strings.Join(ips, ", ")}, true
+}
+
+// systemLookup is the system's DNS.
+func systemLookup(ctx context.Context, host string) ([]string, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		ips = append(ips, a.IP.String())
+	}
+	return ips, nil
+}
+
+// ProxyLabel is a proxy setting fit to show: its scheme, host and port,
+// without a user and password.
+func ProxyLabel(proxy string) string {
+	u, err := url.Parse(proxy)
+	if err != nil || u.Host == "" {
+		return "a proxy"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // cdnResult is doctor's CDN line for a download host: a signal, not a gate.
