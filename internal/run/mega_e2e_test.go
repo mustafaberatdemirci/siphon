@@ -23,6 +23,7 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	"github.com/mustafaberatdemirci/siphon/internal/megacrypto"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
 )
 
@@ -391,7 +392,7 @@ func TestMegaEndToEndSegmentedDetectsCorruption(t *testing.T) {
 	if outc.Kind != OutcomeFailed || !errors.Is(outc.Err, dl.ErrIntegrity) {
 		t.Fatalf("outcome %v (%v), want a failed integrity check", outc.Kind, outc.Err)
 	}
-	if entries, _ := os.ReadDir(out); len(entries) != 0 {
+	if entries := testutil.OwnEntries(t, out); len(entries) != 0 {
 		names := []string{}
 		for _, en := range entries {
 			names = append(names, en.Name())
