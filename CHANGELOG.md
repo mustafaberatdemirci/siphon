@@ -2,7 +2,7 @@
 
 Each version's section is also its release notes on GitHub.
 
-## Unreleased
+## 0.1.3
 
 **Blocked sites**
 
