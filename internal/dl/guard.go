@@ -27,7 +27,8 @@ const configName = "sites.toml"
 
 // toolNames are the external tools Siphon looks up (external.Find), plus
 // ffprobe, which "Install tools" puts next to ffmpeg.
-var toolNames = map[string]bool{"yt-dlp": true, "gallery-dl": true, "ffmpeg": true, "ffprobe": true, "deno": true}
+var toolNames = map[string]bool{"yt-dlp": true, "gallery-dl": true, "ffmpeg": true, "ffprobe": true, "deno": true,
+	"7z": true, "7za": true, "7zr": true}
 
 // protectedDirs returns the executable's folder (where sites.toml is read)
 // and the folders tools are looked up in. A variable so tests can point it
@@ -49,6 +50,10 @@ var protectedDirs = func() (exeDir string, toolDirs []string) {
 	}
 	return exeDir, toolDirs
 }
+
+// CheckProtected is checkProtected for what else puts files in a download
+// folder: an archive unpacked there.
+func CheckProtected(final string) error { return checkProtected(final) }
 
 // checkProtected returns ErrProtectedName if saving to final would put a
 // file Siphon reads or runs where it looks for it.

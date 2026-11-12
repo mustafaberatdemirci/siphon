@@ -1,7 +1,9 @@
 package external
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -52,4 +54,15 @@ func startTree(cmd *exec.Cmd) (release func(), err error) {
 		windows.CloseHandle(h)
 	}
 	return func() { windows.CloseHandle(job) }, nil
+}
+
+// installed7z are where 7-Zip's own installer puts it.
+func installed7z() []string {
+	var out []string
+	for _, env := range []string{"ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"} {
+		if dir := os.Getenv(env); filepath.IsAbs(dir) {
+			out = append(out, filepath.Join(dir, "7-Zip", "7z.exe"))
+		}
+	}
+	return out
 }

@@ -566,5 +566,6 @@ max_elapsed = "10m"
 #   gallery_dl = 'C:\Tools\gallery-dl.exe'
 #   ffmpeg = 'C:\Tools\ffmpeg.exe'
 #   deno = 'C:\Tools\deno.exe'
+#   sevenzip = 'C:\Program Files\7-Zip\7z.exe'   # to unpack 7z, rar and archives in parts
 #
 # "siphon doctor" (or the Diagnose tab) shows which ones were found.

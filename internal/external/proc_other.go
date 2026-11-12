@@ -22,3 +22,7 @@ func startTree(cmd *exec.Cmd) (release func(), err error) {
 	}
 	return func() {}, cmd.Start()
 }
+
+// installed7z: elsewhere 7-Zip (p7zip, 7zz) comes from the package manager,
+// onto PATH.
+func installed7z() []string { return nil }

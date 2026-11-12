@@ -32,6 +32,8 @@ type Tools struct {
 	FFmpeg    string
 	// Deno is the JavaScript runtime yt-dlp wants for YouTube.
 	Deno string
+	// SevenZip unpacks 7z, rar and archives in parts (internal/extract).
+	SevenZip string
 }
 
 // ErrUnsupported says the tool doesn't recognize the link.
@@ -55,7 +57,28 @@ func Find(configured map[string]string) Tools {
 		GalleryDL: lookup(configured["gallery_dl"], "gallery-dl"),
 		FFmpeg:    lookup(configured["ffmpeg"], "ffmpeg"),
 		Deno:      lookup(configured["deno"], "deno"),
+		SevenZip:  lookup7z(configured["sevenzip"]),
 	}
+}
+
+// lookup7z finds 7-Zip: the configured path, else 7z or 7za like the other
+// tools, else (Windows) its own installer's folder in Program Files, a
+// fixed, absolute place no download goes to.
+func lookup7z(configured string) string {
+	if configured != "" {
+		return lookup(configured, "7z")
+	}
+	for _, name := range []string{"7z", "7za"} {
+		if p := lookup("", name); p != "" {
+			return p
+		}
+	}
+	for _, p := range installed7z() {
+		if isFile(p) {
+			return p
+		}
+	}
+	return ""
 }
 
 func lookup(configured, name string) string {
@@ -203,6 +226,7 @@ func (t Tools) Lines() []string {
 		row("gallery-dl", t.GalleryDL, "image and gallery pages of other sites can't be downloaded"),
 		row("ffmpeg", t.FFmpeg, "videos whose picture and sound come separately can't be merged"),
 		row("deno", t.Deno, "yt-dlp may miss some YouTube formats"),
+		row("7-Zip", t.SevenZip, "7z, rar and archives in parts aren't unpacked (zip and tar are)"),
 	}
 }
 
@@ -218,6 +242,8 @@ func (t Tools) Path(tool string) string {
 		return t.FFmpeg
 	case "deno":
 		return t.Deno
+	case "7-Zip":
+		return t.SevenZip
 	}
 	return ""
 }
