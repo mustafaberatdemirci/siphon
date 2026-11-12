@@ -20,6 +20,11 @@ Each version's section is also its release notes on GitHub.
   app's SOCKS5 port.
 - When a site is blocked, the message says which of the two helps.
 
+**Languages**
+
+- The window speaks **Spanish, French, Portuguese and Russian** too, besides
+  English, Turkish and German. **Automatic** picks them up from the system.
+
 **Archives**
 
 - **Finished archives can be unpacked.** Settings → Archives (or

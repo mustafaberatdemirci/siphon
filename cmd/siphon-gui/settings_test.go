@@ -11,7 +11,7 @@ import (
 // and the last ones lay under the Close button. The settings now wrap to
 // the dialog's width and scroll, and the dialog stays inside the window.
 func TestSettingsFitAWindowThatIsNotMaximized(t *testing.T) {
-	for _, lang := range []language{langEnglish, langTurkish, langGerman} {
+	for _, lang := range spokenLanguages() {
 		old := current
 		current = lang
 		q, _, _ := newTestQueue(t, "a.bin")

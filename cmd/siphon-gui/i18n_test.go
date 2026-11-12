@@ -99,7 +99,7 @@ func verbs(s string) string {
 	return strings.Join(v, "")
 }
 
-// Every text the window asks for has a Turkish and a German translation,
+// Every text the window asks for has a translation in every catalog,
 // with the same formatting verbs, and no translation is left over.
 func TestCatalogsAreComplete(t *testing.T) {
 	used := usedTexts(t)
@@ -152,7 +152,8 @@ func TestResolveLanguage(t *testing.T) {
 	}{
 		{langAuto, langTurkish, langTurkish},
 		{langAuto, langGerman, langGerman},
-		{langAuto, "fr", langEnglish},
+		{langAuto, "it", langEnglish},
+		{langAuto, langRussian, langRussian},
 		{langAuto, "", langEnglish},
 		{langGerman, langTurkish, langGerman},
 		{langEnglish, langTurkish, langEnglish},
@@ -188,7 +189,9 @@ func TestBaseLanguage(t *testing.T) {
 	for loc, want := range map[string]language{
 		"tr-TR": langTurkish,
 		"de-AT": langGerman,
-		"fr-FR": langEnglish,
+		"pt-BR": langPortuguese,
+		"pt-PT": langPortuguese,
+		"it-IT": langEnglish,
 	} {
 		if got := resolveLanguage(langAuto, baseLanguage(loc)); got != want {
 			t.Errorf("Automatic on a %s system = %q, want %q", loc, got, want)
@@ -205,5 +208,23 @@ func TestTFallsBackToEnglish(t *testing.T) {
 	current = langEnglish
 	if got := Tf("%d files added to the queue.", 3); got != "3 files added to the queue." {
 		t.Errorf("Tf = %q", got)
+	}
+}
+
+// spokenLanguages are English and every language with a catalog.
+func spokenLanguages() []language {
+	out := []language{langEnglish}
+	for _, c := range languageChoices() {
+		if catalogs[c.code] != nil {
+			out = append(out, c.code)
+		}
+	}
+	return out
+}
+
+// Every catalog can be chosen in Settings, and every choice has a catalog.
+func TestEveryCatalogIsAChoice(t *testing.T) {
+	if got := len(spokenLanguages()); got != len(catalogs)+1 {
+		t.Errorf("%d languages to choose from, %d catalogs", got-1, len(catalogs))
 	}
 }

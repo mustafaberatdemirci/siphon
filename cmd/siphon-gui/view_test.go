@@ -316,7 +316,7 @@ func TestColumnWidths(t *testing.T) {
 	}
 	// A fixed column is never narrower than its title, in any language.
 	defer func(l language) { current = l }(current)
-	for _, l := range []language{langEnglish, langTurkish, langGerman} {
+	for _, l := range spokenLanguages() {
 		current = l
 		for i, c := range columns {
 			if c.width == 0 {

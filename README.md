@@ -337,7 +337,7 @@ restart, which Siphon offers to do on the spot):
 
 | Setting | What it does |
 | --- | --- |
-| Language | English, Türkçe (Turkish) or Deutsch (German). **Automatic** (the default) follows the system's language when Siphon speaks it, English otherwise. |
+| Language | English, Türkçe (Turkish), Deutsch (German), Español (Spanish), Français (French), Português (Portuguese) or Русский (Russian). **Automatic** (the default) follows the system's language when Siphon speaks it, English otherwise. |
 | Download folder | Where new links are saved; the Add dialog can change it for a batch, and remembers it. |
 | Speed limit | Total limit in MB/s across all downloads (empty or 0 = unlimited). |
 | Downloads at once | How many files download at the same time (default 4). |

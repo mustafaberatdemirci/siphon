@@ -20,10 +20,14 @@ import (
 type language string
 
 const (
-	langAuto    language = "" // the system's, if Siphon speaks it
-	langEnglish language = "en"
-	langTurkish language = "tr"
-	langGerman  language = "de"
+	langAuto       language = "" // the system's, if Siphon speaks it
+	langEnglish    language = "en"
+	langTurkish    language = "tr"
+	langGerman     language = "de"
+	langSpanish    language = "es"
+	langFrench     language = "fr"
+	langPortuguese language = "pt"
+	langRussian    language = "ru"
 )
 
 // prefLanguage is the preference holding the chosen language.
@@ -42,12 +46,20 @@ func languageChoices() []languageChoice {
 		{langEnglish, "English"},
 		{langTurkish, "Türkçe"},
 		{langGerman, "Deutsch"},
+		{langSpanish, "Español"},
+		{langFrench, "Français"},
+		{langPortuguese, "Português"},
+		{langRussian, "Русский"},
 	}
 }
 
 var catalogs = map[language]map[string]string{
-	langTurkish: turkish,
-	langGerman:  german,
+	langTurkish:    turkish,
+	langGerman:     german,
+	langSpanish:    spanish,
+	langFrench:     french,
+	langPortuguese: portuguese,
+	langRussian:    russian,
 }
 
 // current is the language the window speaks. It is set once at start,

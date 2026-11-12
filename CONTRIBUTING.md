@@ -10,8 +10,9 @@ Thanks for helping. A few things make a change easy to take in:
   against the real sites are opt-in (`SIPHON_LIVE=1`) and use public,
   neutral links only; please keep it that way.
 - **English** in code, comments, commit messages and the window's source
-  texts. Texts shown in the window go through `T(...)` / `Tf(...)` and need a
-  Turkish and a German entry; a test lists what is missing. New languages
+  texts. Texts shown in the window go through `T(...)` / `Tf(...)` and need an
+  entry in every catalog (`cmd/siphon-gui/translations_*.go`); a test lists
+  what is missing (`SIPHON_I18N_MISSING=1`). New languages
   are welcome: see *Translations* in the README.
 - **A new site** is a resolver in `internal/site`, an entry in
   `internal/config/sites.toml` (with what was measured, and when), offline
