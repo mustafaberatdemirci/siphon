@@ -23,8 +23,8 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	"github.com/mustafaberatdemirci/siphon/internal/megacrypto"
 	"github.com/mustafaberatdemirci/siphon/internal/site"
-	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 	"github.com/mustafaberatdemirci/siphon/internal/store"
+	"github.com/mustafaberatdemirci/siphon/internal/testutil"
 )
 
 // End to end: the real mega resolver + the real downloader + the real
