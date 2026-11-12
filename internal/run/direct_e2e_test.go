@@ -254,3 +254,33 @@ func TestGalleryPageThroughGalleryDL(t *testing.T) {
 		t.Errorf("the second run didn't skip the gallery: %+v", again)
 	}
 }
+
+// A server that answers every Range request with the whole file (Dropbox's
+// folder zips, built on the fly): a large file comes over one connection,
+// whole and right, instead of being split.
+func TestServerIgnoringRangesComesWhole(t *testing.T) {
+	body := make([]byte, 9<<20)
+	_, _ = rand.Read(body)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="Folder.zip"`)
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	out := tempDir(t)
+	res := runOne(context.Background(), directRunCtx(t, out, srv.URL+"/zip_download_get/abc", srv.Client()))
+	if res.resolveErr != nil || res.done != 1 {
+		t.Fatalf("run: %+v", res)
+	}
+	got, err := os.ReadFile(filepath.Join(out, "Folder.zip"))
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the file is wrong (%v)", err)
+	}
+	// The name probe, the download's own range probe, and one whole GET.
+	if n := requests.Load(); n > 3 {
+		t.Errorf("%d requests for a server without ranges, want at most 3", n)
+	}
+}

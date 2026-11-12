@@ -291,7 +291,7 @@ func (q *queueTab) showAddDialog(extra string) {
 	entry.Wrapping = fyne.TextWrapOff
 	entry.SetMinRowsVisible(8)
 	entry.SetPlaceHolder(T("One link per line: mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile,\n" +
-		"any direct file link, and video or gallery pages if yt-dlp / gallery-dl is installed"))
+		"Google Drive, Dropbox, any direct file link, and video or gallery pages if yt-dlp / gallery-dl is installed"))
 	entry.SetText(strings.TrimSpace(strings.Join([]string{q.pending, strings.TrimSpace(extra)}, "\n")))
 	folder := widget.NewEntry()
 	folder.SetText(q.defaultDir())
@@ -508,7 +508,7 @@ func (q *queueTab) tryQuotaCommand() {
 // showAbout names the program, its version and where it lives.
 func (q *queueTab) showAbout() {
 	title := widget.NewLabelWithStyle("Siphon "+version, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	desc := widget.NewLabel(T("A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile and direct links."))
+	desc := widget.NewLabel(T("A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile, Google Drive, Dropbox and direct links."))
 	desc.Wrapping = fyne.TextWrapWord
 	content := container.NewVBox(title, desc)
 	if u, err := url.Parse("https://github.com/mustafaberatdemirci/siphon"); err == nil {

@@ -33,6 +33,7 @@ ftp://not.this/x javascript:alert(1)`
 func TestExtractLinksBareHosts(t *testing.T) {
 	text := `bunkr.cr/a/Q1w2 and bunkrr.su/f/x1, cyberdrop.cr/a/8uE0wQiK pixeldra.in/u/abc pixeldrain.net/l/def
 www.mediafire.com/file/abc/x.zip/file
+drive.google.com/drive/folders/1KpLl_1tcK0eeehzN980zbG-3M2nhbVks and www.dropbox.com/scl/fi/abc/v.mp4?rlkey=x&dl=0
 and/or readme.md/x example.com/file.zip`
 	want := []string{
 		"https://bunkr.cr/a/Q1w2",
@@ -41,6 +42,8 @@ and/or readme.md/x example.com/file.zip`
 		"https://pixeldra.in/u/abc",
 		"https://pixeldrain.net/l/def",
 		"https://www.mediafire.com/file/abc/x.zip/file",
+		"https://drive.google.com/drive/folders/1KpLl_1tcK0eeehzN980zbG-3M2nhbVks",
+		"https://www.dropbox.com/scl/fi/abc/v.mp4?rlkey=x&dl=0",
 	}
 	if got := ExtractLinks(text); strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("ExtractLinks =\n %q\nwant\n %q", got, want)

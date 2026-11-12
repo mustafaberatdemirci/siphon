@@ -292,15 +292,21 @@ func (d *direct) ResolveOne(ctx context.Context, u string) (Item, error) {
 // the silent failure this tool is built to avoid. A page sent as an
 // attachment is a file, though.
 func (d *direct) probeFile(ctx context.Context, u string) (Item, error) {
+	return probeFile(ctx, d.client(), d.cfg.UserAgent, u)
+}
+
+// probeFile is direct's probe for any resolver whose links lead straight
+// to a file once rewritten (Google Drive, Dropbox).
+func probeFile(ctx context.Context, client *http.Client, userAgent, u string) (Item, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return Item{}, Errorf(LayerFetch, u, "invalid link: %w", err)
 	}
-	if d.cfg.UserAgent != "" {
-		req.Header.Set("User-Agent", d.cfg.UserAgent)
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
 	}
 	req.Header.Set("Range", "bytes=0-0")
-	resp, err := d.client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		// Wrapped, not flattened: the queue tells "the network is down" from
 		// a real answer by the error's type.

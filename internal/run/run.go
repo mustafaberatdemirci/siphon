@@ -278,6 +278,8 @@ func SetupWith(o SetupOptions) ([]site.SiteConfig, []site.Resolver, error) {
 		site.GofileName:     site.NewGofile,
 		site.CyberdropName:  site.NewCyberdrop,
 		site.CyberfileName:  site.NewCyberfile,
+		site.GdriveName:     site.NewGdrive,
+		site.DropboxName:    site.NewDropbox,
 		site.DirectName:     site.NewDirect,
 	} {
 		if rerr := reg.Register(name, factory); rerr != nil {

@@ -17,7 +17,7 @@ repo=https://github.com/mustafaberatdemirci/siphon
 cat <<EOF
 {
     "version": "$ver",
-    "description": "Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile and direct links, with a persistent queue.",
+    "description": "Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile, Google Drive, Dropbox and direct links, with a persistent queue.",
     "homepage": "$repo",
     "license": "MIT",
     "architecture": {

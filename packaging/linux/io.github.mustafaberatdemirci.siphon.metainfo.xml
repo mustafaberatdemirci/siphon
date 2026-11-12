@@ -12,7 +12,7 @@
   <description>
     <p>
       A downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop,
-      cyberfile and direct links, with a persistent queue: pause, resume, several
+      cyberfile, Google Drive, Dropbox and direct links, with a persistent queue: pause, resume, several
       downloads at once, and a command line tool for scripts.
     </p>
     <p>

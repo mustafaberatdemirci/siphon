@@ -91,8 +91,13 @@ func (q *queueTab) dnsSetting() fyne.CanvasObject {
 
 // siteLabel is how a site is named in the window.
 func siteLabel(name string) string {
-	if name == site.DirectName {
+	switch name {
+	case site.DirectName:
 		return T("Direct links")
+	case site.GdriveName:
+		return "Google Drive"
+	case site.DropboxName:
+		return "Dropbox"
 	}
 	return name
 }

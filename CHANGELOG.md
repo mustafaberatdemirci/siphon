@@ -20,6 +20,15 @@ Each version's section is also its release notes on GitHub.
   app's SOCKS5 port.
 - When a site is blocked, the message says which of the two helps.
 
+**New sites**
+
+- **Google Drive**: shared files and folders (with subfolders), and Google
+  Docs, Sheets and Slides exported as `.docx`, `.xlsx` and `.pptx`. Large
+  files skip the virus-scan stop, and download over several connections
+  (a 476 MB file: about 4 MB/s over one, three times that over four).
+- **Dropbox**: shared files, and shared folders as one zip.
+- `siphon doctor gdrive dropbox` checks both.
+
 **Languages**
 
 - The window speaks **Spanish, French, Portuguese and Russian** too, besides

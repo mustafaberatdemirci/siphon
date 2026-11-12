@@ -518,6 +518,67 @@ details_endpoint = "https://cyberfile.me/account/ajax/file_details"
 list_endpoint = "https://cyberfile.me/account/ajax/load_files"
 
 [[site]]
+name = "gdrive"
+
+# Measured 2026-11-12, for files and folders shared with "anyone with the
+# link"; no account. A file comes from drive.usercontent.google.com with
+# confirm=t, which skips the "can't scan for viruses" page of large files.
+# Folders are listed from their embedded view (subfolders too); Google Docs,
+# Sheets and Slides are exported as docx, xlsx and pptx.
+domains = ["drive.google.com", "drive.usercontent.google.com", "docs.google.com"]
+legacy_domains = []
+match_patterns = []
+
+# Exported documents come from *.googleusercontent.com.
+cdn_patterns = ["drive.usercontent.google.com", "*.googleusercontent.com"]
+
+referer_policy = "none"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+max_concurrent = 4
+
+# The file server takes Range requests and sends Last-Modified, which
+# If-Range honours: several connections and resuming are safe. About 4 MB/s
+# came over one connection. Exported documents come in one piece.
+max_segments = 4
+
+# gdown's own test folder (two small pictures, a text file, two subfolders).
+canary_urls = ["https://drive.google.com/drive/folders/1KpLl_1tcK0eeehzN980zbG-3M2nhbVks"]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+[[site]]
+name = "dropbox"
+
+# Measured 2026-11-12. A shared file link with dl=1 leads to a download
+# server that names the file, takes Range requests and sends an ETag. A
+# shared folder link with dl=1 gives the whole folder as one zip, built on
+# the fly: it comes over one connection and can't be resumed.
+domains = ["www.dropbox.com", "dropbox.com"]
+legacy_domains = []
+match_patterns = []
+
+# The download servers. A link to one is taken as it is.
+cdn_patterns = ["*.dl.dropboxusercontent.com", "dl.dropboxusercontent.com"]
+
+referer_policy = "none"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+
+max_concurrent = 4
+max_segments = 4
+
+# yt-dlp's own test video (1.6 MB).
+canary_urls = ["https://www.dropbox.com/s/nelirfsxnmcfbfh/youtube-dl%20test%20video%20%27%C3%A4%22BaW_jenozKc.mp4?dl=0"]
+
+max_retries = 5
+base_delay = "2s"
+max_delay = "60s"
+max_elapsed = "10m"
+
+[[site]]
 name = "direct"
 
 # PLAIN FILE LINKS: any http(s) link that none of the sites above recognizes,

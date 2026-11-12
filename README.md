@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **A fast, single-file downloader for mega.nz, gofile, mediafire, pixeldrain,
-bunkr, cyberdrop, cyberfile and direct links.** No Java, no Python, nothing to install:
+bunkr, cyberdrop, cyberfile, Google Drive, Dropbox and direct links.** No Java, no Python, nothing to install:
 download one file and run it.
 With yt-dlp or gallery-dl installed, it also queues video and gallery pages
 from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl).
@@ -150,6 +150,8 @@ To build it yourself instead, see [Building](#building).
 | bunkr | `bunkr.*/a/<id>` (album), `bunkr.*/f/<id>`, `/v/`, `/i/` (single file), across the known bunkr domains |
 | cyberdrop | `cyberdrop.cr/a/<id>` (album), `cyberdrop.cr/f/<id>` (file), the old `.me` / `.to` domains, and download server links |
 | cyberfile | `cyberfile.me/<code>` (file), `cyberfile.me/folder/<hash>` (folder, with subfolders), and download server links |
+| Google Drive | `drive.google.com/file/d/<id>`, `open?id=`, `uc?id=` (file), `drive.google.com/drive/folders/<id>` (folder, with subfolders), and `docs.google.com/document`, `/spreadsheets`, `/presentation` links (exported as `.docx`, `.xlsx`, `.pptx`) |
+| Dropbox | `dropbox.com/scl/fi/…` and `/s/…` (file), `dropbox.com/scl/fo/…` and `/sh/…` (folder, as one zip), and download server links |
 | Any direct file link | `https://example.com/files/setup.zip`, or a link that redirects to a file |
 
 Subfolders become folders on disk, under a folder named after the album or
@@ -161,6 +163,15 @@ A few site notes:
   and reuses it for a day (gofile limits how often those can be made); to
   use your own account, put its token in `sites.toml` (see
   [Configuration](#configuration)).
+- **Google Drive** works for files and folders shared with "anyone with the
+  link"; no account is used. Large files come without the "can't scan for
+  viruses" stop. A file Google won't hand out (no longer shared, or
+  downloaded too often that day) is said so instead of saving Google's
+  page. A folder's files are listed without sizes; each shows its size
+  when it starts.
+- **Dropbox** gives a shared folder as one zip it builds on the fly: it
+  downloads over one connection and starts over if interrupted. Turn on
+  **Settings → Archives** (or `-extract`) to have it unpacked when done.
 - **cyberdrop** files download over one connection and start over if
   interrupted: its servers name no file version and it gives no hash, so
   pieces fetched at different times couldn't be proven to match.
@@ -237,7 +248,7 @@ where each one fits.
 | --- | --- | --- | --- | --- | --- |
 | What you install | one file | an installer; a Java program | Python, then the package | Python and the package, or one exe | MEGA's own client |
 | Interface | window and command line | window | terminal | command line | command line |
-| Sites | mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile; more through yt-dlp and gallery-dl | hundreds of file hosts | most of these, and many more | thousands of sites, gofile, bunkr, cyberdrop and pixeldrain among them; not mega or mediafire | mega |
+| Sites | mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile, Google Drive, Dropbox; more through yt-dlp and gallery-dl | hundreds of file hosts | most of these, and many more | thousands of sites, gofile, bunkr, cyberdrop and pixeldrain among them; not mega or mediafire | mega |
 
 - Need the most hosts, captcha solving or router reconnects: **JDownloader 2**.
 - At home with Python and want one tool for many hosts: **cyberdrop-dl**.

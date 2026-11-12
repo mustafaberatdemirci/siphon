@@ -20,7 +20,7 @@ homepage: https://github.com/mustafaberatdemirci/siphon
 license: MIT
 description: |-
   Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop,
-  cyberfile and direct links.
+  cyberfile, Google Drive, Dropbox and direct links.
   A window with a persistent download queue (siphon-gui) and a command line
   tool (siphon) that share one download pipeline. With yt-dlp or gallery-dl
   installed, it also queues video and gallery pages from thousands more sites.

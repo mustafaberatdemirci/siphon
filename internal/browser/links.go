@@ -17,7 +17,8 @@ var linkPattern = regexp.MustCompile(`(?i)(?:(?:yt-dlp:|gallery-dl:)?https?://|\
 
 const bareHosts = `mega\.nz|mega\.co\.nz|gofile\.io|mediafire\.com|cyberfile\.me` +
 	`|pixeldrain\.(?:com|net|nl|dev|biz|tech)|pixeldra\.in` +
-	`|bunkrr?\.[a-z]{2,6}|cyberdrop\.(?:cr|me|to)`
+	`|bunkrr?\.[a-z]{2,6}|cyberdrop\.(?:cr|me|to)` +
+	`|drive\.google\.com|docs\.google\.com|dropbox\.com`
 
 // ExtractLinks returns the links in text, each once, in order. Punctuation
 // that ends a sentence or closes brackets around a link isn't part of it.

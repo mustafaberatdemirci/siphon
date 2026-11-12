@@ -63,7 +63,7 @@ PackageUrl: $repo
 License: MIT
 LicenseUrl: $repo/blob/main/LICENSE
 Copyright: Copyright (c) 2026 Mustafa Berat Demirci
-ShortDescription: Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile and direct links.
+ShortDescription: Downloader for mega.nz, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile, Google Drive, Dropbox and direct links.
 Description: |-
   A single-file downloader with a persistent queue in a window (siphon-gui)
   and a command line tool (siphon). mega downloads over 8 connections and
