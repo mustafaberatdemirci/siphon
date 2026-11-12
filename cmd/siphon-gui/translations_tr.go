@@ -253,4 +253,8 @@ var turkish = map[string]string{
 	"The new DNS and proxy are used the next time Siphon starts.":                                     "Yeni DNS ve proxy, Siphon'un bir sonraki açılışında kullanılır.",
 	"Siphon uses the new DNS and proxy after a restart. Unfinished downloads are saved and continue.": "Siphon yeni DNS ve proxy'yi yeniden başladıktan sonra kullanır. Bitmemiş indirmeler kaydedilir ve devam eder.",
 	"The DNS or proxy setting can't be used; Siphon started without it. Check it in Settings.":        "DNS ya da proxy ayarı kullanılamıyor; Siphon onsuz başladı. Ayarlar'dan kontrol edin.",
+	"Archives":                           "Arşivler",
+	"Unpack finished archives":           "Biten arşivleri aç",
+	"Delete the archive after unpacking": "Açtıktan sonra arşivi sil",
+	"A finished zip or tar is unpacked next to itself; 7z, rar and archives in parts need 7-Zip installed, and are unpacked once every part is done. A deleted archive is downloaded again if its link is added again.": "Biten bir zip ya da tar kendi yanına açılır; 7z, rar ve parçalı arşivler için 7-Zip kurulu olmalıdır ve tüm parçalar bitince açılırlar. Silinen bir arşiv, linki yeniden eklenirse yeniden indirilir.",
 }

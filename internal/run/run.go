@@ -27,6 +27,8 @@ import (
 	"github.com/mustafaberatdemirci/siphon/internal/config"
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
 	"github.com/mustafaberatdemirci/siphon/internal/doh"
+	"github.com/mustafaberatdemirci/siphon/internal/external"
+	"github.com/mustafaberatdemirci/siphon/internal/extract"
 	"github.com/mustafaberatdemirci/siphon/internal/hook"
 	snet "github.com/mustafaberatdemirci/siphon/internal/net"
 	"github.com/mustafaberatdemirci/siphon/internal/netcheck"
@@ -60,6 +62,11 @@ type Options struct {
 	// Network is the DNS and proxy the sites use unless sites.toml gives
 	// one its own (-dns, -proxy).
 	Network Network
+	// Unpack unpacks the archives downloaded for a link once its downloads
+	// are over (-extract); UnpackDelete deletes each archive unpacked
+	// (-extract-delete). Nothing is unpacked from a link that was stopped.
+	Unpack       bool
+	UnpackDelete bool
 }
 
 // MaxQuotaRounds is the per-URL upper bound of the quota command + probe +
@@ -415,6 +422,10 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 	if err != nil {
 		return sum, err
 	}
+	var sevenZip string
+	if opt.Unpack && !opt.ResolveOnly {
+		sevenZip = sevenZipFor(cfgs)
+	}
 
 	// The ledger is opened UNDER THE OUTPUT ROOT, not in the cwd or next to
 	// the exe: otherwise a second run with a different output folder would say
@@ -459,6 +470,7 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 			opt:      opt,
 			ev:       ev,
 			inFlight: inFlight,
+			sevenZip: sevenZip,
 		}
 
 		res := runURL(ctx, rc, &sum)
@@ -492,9 +504,18 @@ func Run(ctx context.Context, opt Options, ev Events) (Summary, error) {
 // drives the quota loop: the command, the probe, the same URL again (the
 // ledger skips what was downloaded). The result of the last round is returned.
 func runURL(ctx context.Context, rc runCtx, sum *Summary) oneResult {
-	var res oneResult
+	var (
+		res   oneResult
+		paths []string // downloaded in every round, for unpacking
+	)
+	defer func() {
+		if rc.opt.Unpack && !res.halted {
+			unpackAll(ctx, paths, rc)
+		}
+	}()
 	for round := 0; ; round++ {
 		res = runOne(ctx, rc)
+		paths = append(paths, res.paths...)
 		sum.Items += res.count
 		sum.Done += res.done
 		sum.Failed += res.failed
@@ -546,6 +567,7 @@ type runCtx struct {
 	opt      Options
 	ev       Events
 	inFlight int
+	sevenZip string // 7-Zip's program when unpacking, or ""
 }
 
 type oneResult struct {
@@ -558,6 +580,7 @@ type oneResult struct {
 	halted     bool
 	quota      bool // the reason for halted is the quota (for the OnQuota loop)
 	resolveErr error
+	paths      []string // the files downloaded, when unpacking
 }
 
 // runOne resolves a single URL and downloads its items.
@@ -586,7 +609,16 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 		degrade  atomic.Int64 // item downloaded but its ledger entry couldn't be written
 		stopped  atomic.Bool
 		quotaHit atomic.Bool
+		finished = make(chan string, 1) // paths of the files downloaded, for unpacking
+		paths    []string
 	)
+	collected := make(chan struct{})
+	go func() {
+		for p := range finished {
+			paths = append(paths, p)
+		}
+		close(collected)
+	}()
 
 	// Resolve gets the group context too: when a quota or captcha stops the
 	// album, resolution must stop as well. On bunkr every item is a separate
@@ -610,6 +642,9 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 			switch o.Kind {
 			case OutcomeDone:
 				done.Add(1)
+				if opt.Unpack {
+					finished <- o.Result.Path
+				}
 				if o.Degraded {
 					degrade.Add(1)
 				}
@@ -641,6 +676,8 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 
 	// Resolve returned but downloads may still be running; wait in every case.
 	gerr := g.Wait()
+	close(finished)
+	<-collected
 
 	out.count = count
 	out.done = int(done.Load())
@@ -668,7 +705,48 @@ func runOne(ctx context.Context, rc runCtx) oneResult {
 			out.resolveErr = rerr
 		}
 	}
+	out.paths = paths
 	return out
+}
+
+// unpackAll unpacks the archives among the files a link downloaded.
+func unpackAll(ctx context.Context, paths []string, rc runCtx) {
+	for _, a := range extract.Archives(paths) {
+		if ctx.Err() != nil {
+			return
+		}
+		name := filepath.Base(a.First)
+		dest, err := extract.Extract(ctx, a.First, extract.Options{SevenZip: rc.sevenZip, Source: rc.url})
+		switch {
+		case errors.Is(err, context.Canceled):
+			return
+		case errors.Is(err, extract.ErrNeeds7Zip):
+			rc.ev.errorf("%s wasn't unpacked: 7z, rar and archives in parts need 7-Zip installed", name)
+			continue
+		case err != nil:
+			rc.ev.errorf("could not unpack %s: %v", name, err)
+			continue
+		}
+		rc.ev.infof("unpacked %s into %s", name, dest)
+		if rc.opt.UnpackDelete {
+			for _, p := range a.Parts {
+				if err := os.Remove(p); err != nil {
+					rc.ev.errorf("could not delete %s after unpacking it: %v", p, err)
+				}
+			}
+		}
+	}
+}
+
+// sevenZipFor is 7-Zip's program as the tools are found: the "direct"
+// entry of sites.toml may name it.
+func sevenZipFor(cfgs []site.SiteConfig) string {
+	for _, c := range cfgs {
+		if c.Name == site.DirectName {
+			return external.Find(c.Extra).SevenZip
+		}
+	}
+	return external.Find(nil).SevenZip
 }
 
 // Pick returns the first resolver that recognizes the URL and its config

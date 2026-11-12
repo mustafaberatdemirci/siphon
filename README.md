@@ -121,6 +121,19 @@ To build it yourself instead, see [Building](#building).
   finished file as coming from the internet, so Windows warns before
   starting a downloaded program and Office opens a downloaded document in
   Protected View. The mark names the page without its `#key` or `?query`.
+- **Archives unpacked when they finish (optional).** With **Settings →
+  Archives** (or `-extract`), a finished zip or tar (plain, `.tar.gz`,
+  `.tar.bz2`) is unpacked next to itself: one folder inside goes there as
+  it is, several things go into a folder named after the archive, and a name
+  already in use gets " (2)". 7z, rar, `.tar.xz` and archives in parts
+  (`name.part1.rar`, `name.7z.001`, `name.r00`…) need
+  [7-Zip](https://www.7-zip.org/) installed, and are unpacked once every
+  part in the queue has finished. Nothing inside may land outside that
+  folder, links are skipped, names are made safe as downloads' are, the
+  files keep the "downloaded" mark, and unpacking stops when an archive
+  grows past 200 times its size. A password-protected archive is left as it
+  is, and said so. Deleting the archive afterwards is a separate choice;
+  a deleted archive is downloaded again if its link is added again.
 - **Site definitions in a TOML file.** The site definitions are embedded in
   the binary, and a `sites.toml` next to the exe can override them. When a
   site adds a domain or moves an endpoint, you edit a file instead of
@@ -196,7 +209,9 @@ yt-dlp first, then gallery-dl.
   ones Siphon doesn't offer (ffmpeg, and gallery-dl on macOS).
 - Siphon doesn't bundle them. Tools you install yourself work too: on your
   PATH, or at absolute paths set in `sites.toml` (the `direct` entry).
-  `siphon tools` (or **Diagnose** in the window) lists which ones were found.
+  `siphon tools` (or **Diagnose** in the window) lists which ones were found,
+  7-Zip among them (for unpacking archives; found on PATH or where its
+  installer puts it, or named `sevenzip` in the `direct` entry).
   Siphon doesn't look for them in its own folder, and it refuses to save a
   download named like one of these tools (or `sites.toml`) in a folder where
   it would look for them, so a downloaded file is never started as a tool.
@@ -331,6 +346,7 @@ restart, which Siphon offers to do on the spot):
 | VPN switch command | Optional, only for mega's quota; see [Quota handling](#quota-handling-mega). |
 | DNS | Who answers the sites' names: the system's DNS (the default), or Cloudflare, Google or Quad9 asked over HTTPS at their IP addresses. Gets around a provider sending a site to its block page. See [Diagnosing a site](#diagnosing-a-site-siphon-doctor). |
 | Proxy | A proxy (`http://`, `https://`, `socks5://` or `socks5h://` with host and port, e.g. a VPN app's SOCKS5 port) and the sites that go through it; the others connect directly. Gets around a network that cuts connections naming a site. |
+| Archives | **Unpack finished archives** (off by default) and **Delete the archive after unpacking**. See [Features](#features). |
 | Notify when downloads finish | A system notification once nothing is left to download: how many files came, and how many failed (on by default). |
 | Watch the clipboard | Links of supported sites you copy anywhere open the Add dialog (on by default). See [Browser integration](#browser-integration). |
 | Browser integration | Lets the Siphon extension hand links and downloads to Siphon; **Install** and **Remove**. See [Browser integration](#browser-integration). |
@@ -415,6 +431,8 @@ siphon --resolve-only https://pixeldrain.com/l/abc123   # print file URLs, downl
 | `-dns <resolver>` | Resolve names over DNS-over-HTTPS: `cloudflare`, `google`, `quad9` or an `https://` address. |
 | `-proxy <url>` | Send requests through this proxy (`http://`, `https://`, `socks5://`, `socks5h://`). |
 | `-proxy-sites <list>` | Comma-separated sites the `-proxy` is for, e.g. `bunkr,cyberfile` (default: every site). |
+| `-extract` | Unpack the archives a link downloaded once its downloads are over (zip and tar always; 7z, rar and parts with 7-Zip). Not after a link that was stopped. |
+| `-extract-delete` | Like `-extract`, and delete each archive once unpacked. |
 
 Exit codes:
 

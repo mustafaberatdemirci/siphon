@@ -153,6 +153,7 @@ func main() {
 	// Outside the download hours nothing may start, not even before the
 	// window is built.
 	eng.SetOffHours(hoursHold(a.Preferences(), time.Now()) != "")
+	eng.SetUnpack(a.Preferences().Bool(prefUnpack), a.Preferences().Bool(prefUnpackDelete))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	engineDone := make(chan struct{})

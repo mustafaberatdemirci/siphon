@@ -145,6 +145,8 @@ func (q *queueTab) buildSettings() fyne.CanvasObject {
 			T("Who answers the sites' names. A public resolver, asked over HTTPS, gets around a provider sending a site to its block page; a network that cuts the connections themselves needs the proxy below or a VPN. Takes effect after a restart.")),
 		item(T("Proxy"), q.proxySetting(),
 			T("Only the sites ticked go through it: http://, https://, socks5:// or socks5h:// with host and port, e.g. a VPN app's SOCKS5 port. Takes effect after a restart.")),
+		item(T("Archives"), q.unpackSetting(),
+			T("A finished zip or tar is unpacked next to itself; 7z, rar and archives in parts need 7-Zip installed, and are unpacked once every part is done. A deleted archive is downloaded again if its link is added again.")),
 		item(T("Notify when downloads finish"), notifyDone,
 			T("A system notification once nothing is left to download: how many files came, and how many failed.")),
 		item(T("Watch the clipboard"), watch,

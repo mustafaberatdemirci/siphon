@@ -253,4 +253,8 @@ var german = map[string]string{
 	"The new DNS and proxy are used the next time Siphon starts.":                                     "DNS und Proxy gelten beim nächsten Start von Siphon.",
 	"Siphon uses the new DNS and proxy after a restart. Unfinished downloads are saved and continue.": "Siphon verwendet DNS und Proxy nach einem Neustart. Unfertige Downloads werden gespeichert und laufen weiter.",
 	"The DNS or proxy setting can't be used; Siphon started without it. Check it in Settings.":        "Die DNS- oder Proxy-Einstellung ist nicht verwendbar; Siphon ist ohne sie gestartet. Prüfen Sie sie in den Einstellungen.",
+	"Archives":                           "Archive",
+	"Unpack finished archives":           "Fertige Archive entpacken",
+	"Delete the archive after unpacking": "Archiv nach dem Entpacken löschen",
+	"A finished zip or tar is unpacked next to itself; 7z, rar and archives in parts need 7-Zip installed, and are unpacked once every part is done. A deleted archive is downloaded again if its link is added again.": "Ein fertiges Zip oder Tar wird neben sich entpackt; 7z, RAR und mehrteilige Archive brauchen ein installiertes 7-Zip und werden entpackt, sobald jeder Teil fertig ist. Ein gelöschtes Archiv wird erneut heruntergeladen, wenn sein Link erneut hinzugefügt wird.",
 }

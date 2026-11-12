@@ -20,6 +20,17 @@ Each version's section is also its release notes on GitHub.
   app's SOCKS5 port.
 - When a site is blocked, the message says which of the two helps.
 
+**Archives**
+
+- **Finished archives can be unpacked.** Settings → Archives (or
+  `-extract`): a finished zip or tar is unpacked next to itself, into a
+  folder named after it when it holds more than one thing. 7z, rar and
+  archives in parts are unpacked with 7-Zip when it is installed, once
+  every part has finished. Off by default; deleting the archive afterwards
+  is a separate choice (`-extract-delete`). What is inside can't land
+  outside the folder, and an archive that unpacks to far more than its size
+  is stopped.
+
 **Fixes**
 
 - **bunkr albums download up to four files at once.** The whole site was

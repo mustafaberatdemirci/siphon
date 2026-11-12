@@ -97,6 +97,8 @@ func runCLI() int {
 		resolveOnly bool
 		onQuota     string
 		showVersion bool
+		unpack      bool
+		unpackDel   bool
 	)
 	flag.StringVar(&inputPath, "i", "", "URL list file (one URL per line, # for comments)")
 	flag.StringVar(&outDir, "out", ".", "output root")
@@ -105,6 +107,8 @@ func runCLI() int {
 	flag.BoolVar(&quiet, "q", false, "only print errors")
 	flag.BoolVar(&resolveOnly, "resolve-only", false, "print the resolved URLs, don't download")
 	flag.StringVar(&onQuota, "on-quota", "", "command to run when a site's quota runs out (e.g. a script that switches VPN); continues when the allowance opens up")
+	flag.BoolVar(&unpack, "extract", false, "unpack the archives downloaded (zip and tar always; 7z, rar and parts with 7-Zip)")
+	flag.BoolVar(&unpackDel, "extract-delete", false, "with -extract: delete each archive once unpacked")
 	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	network := networkFlags(flag.CommandLine)
 	flag.Usage = func() {
@@ -145,6 +149,8 @@ func runCLI() int {
 		// "timeout" alone sends the user looking for the fault in Siphon.
 		CheckNetwork: netcheck.Check,
 		Network:      network(),
+		Unpack:       unpack || unpackDel,
+		UnpackDelete: unpackDel,
 	}, log.events())
 	if err != nil {
 		log.errorf("%v", err)

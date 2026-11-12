@@ -147,6 +147,10 @@ type Engine struct {
 	hostCapAt map[string]time.Time
 	// netChecks: host -> the last network check (netblock.go).
 	netChecks map[string]netCheck
+	// Unpacking finished archives (unpack.go): on, delete the archive
+	// after, and the archives (their first part's path) already done.
+	unpackOn, unpackDelete bool
+	unpacked               map[string]bool
 	// File slots (a host's, or a pool of hosts' with a limit of its own,
 	// host_limits): slots counts the running jobs per site and slot key,
 	// jobSlot which one a running job holds. The worker's own limiter counts
@@ -215,6 +219,7 @@ func New(opt Options) (*Engine, error) {
 		hostCap:   map[string]int{},
 		hostCapAt: map[string]time.Time{},
 		netChecks: map[string]netCheck{},
+		unpacked:  map[string]bool{},
 		slots:     map[string]int{},
 		jobSlot:   map[string]string{},
 	}
@@ -517,6 +522,9 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	var netWait time.Duration
 	netNotice := false
 	var busyNotice string
+	var unpackFirst string // an archive to unpack now that this job is done
+	var unpackParts []string
+	unpackDelete := e.unpackDelete
 	var netCause error // a failure that may be the network blocking the site
 	if still {
 		live.Path, live.Filename, live.Name = j.Path, j.Filename, j.Name
@@ -540,6 +548,9 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 			delete(e.netFails, live.Site)
 			delete(e.netBackoffUntil, live.Site)
 			extra = e.releaseSite(live.Site, started)
+			if first, parts, ok := e.unpackJob(live); ok {
+				unpackFirst, unpackParts = first, parts
+			}
 		case run.OutcomeSkipped:
 			live.State = StateSkipped
 			live.Done = outcome.Entry.Size
@@ -625,6 +636,9 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 		if x.ID != snap.ID {
 			e.changed(x)
 		}
+	}
+	if unpackFirst != "" {
+		go e.unpack(unpackFirst, unpackParts, snap.SourcePage, unpackDelete)
 	}
 	if outcome.Kind == run.OutcomeDone && len(extra) > 0 {
 		// A job that started after the quota ran out downloaded: the quota opened
