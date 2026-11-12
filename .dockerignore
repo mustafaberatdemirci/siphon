@@ -1,0 +1,10 @@
+.git
+.github
+dist
+build
+docs
+bucket
+packaging
+**/*.exe
+**/*.part
+**/*.part.state

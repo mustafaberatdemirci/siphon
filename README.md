@@ -26,7 +26,9 @@ from [thousands more sites](#thousands-more-sites-through-yt-dlp-and-gallery-dl)
 It comes as two programs that share one download pipeline:
 
 - **`siphon-gui`**: a window with a persistent download queue (IDM-style).
-- **`siphon`**: a command-line tool for scripts and batch runs.
+- **`siphon`**: a command-line tool for scripts and batch runs, and
+  `siphon serve`: the queue in a browser, for a server or a container (see
+  [Server mode](#server-mode-the-queue-in-a-browser)).
 
 ## Install
 
@@ -515,6 +517,55 @@ say it in the error or the status line instead of a bare "timeout".
 | `-record-dir <dir>` | Where to save them (default `recordings`). |
 | `-dns`, `-proxy`, `-proxy-sites` | As for downloads: the sites are checked the way they are reached. |
 
+## Server mode: the queue in a browser
+
+`siphon serve` runs the window's download queue without a window, for a
+home server, a NAS or a container, and serves a page to drive it from any
+browser: add links (into a subfolder if you like), pause, resume, remove,
+retry, the number of downloads at once and the speed limit.
+
+```sh
+siphon serve -out D:\Downloads                 # http://localhost:8080, this machine only
+siphon serve -addr :8080 -out /srv/downloads   # reachable from the network
+```
+
+It prints the address to open, with the token in it:
+`http://localhost:8080/#token=…`. The page and its API need that token;
+it is made the first time and kept as `token` in the data folder (or set
+it with `-token` or `SIPHON_TOKEN`). The page keeps it in the browser, and
+the part after `#` never reaches a server or a log.
+
+| Flag | Meaning |
+| --- | --- |
+| `-addr <host:port>` | Where to listen (default `127.0.0.1:8080`, this machine only; `:8080` for every network). |
+| `-out <dir>` | Download folder. Links go here or into a folder inside it, never elsewhere. |
+| `-data <dir>` | The queue and the token (default: Siphon's settings folder, `server`). One `siphon serve` per data folder. |
+| `-token <t>` | The token, instead of the saved one. |
+| `-max-active <n>` | Downloads at once (default 4). |
+| `-extract`, `-extract-delete` | Unpack finished archives, and delete them after. |
+| `-c`, `-dns`, `-proxy`, `-proxy-sites`, `-v` | As for downloads. |
+
+The queue is its own, separate from the window's, and unfinished downloads
+go on after a restart. The page speaks plain HTTP: to reach it from outside
+your home network, put it behind a reverse proxy with HTTPS (or a VPN)
+rather than opening the port.
+
+### Docker
+
+```sh
+docker build -t siphon .
+docker run -d --name siphon -p 8080:8080 \
+  -v ./downloads:/downloads -v ./siphon-data:/data siphon
+docker logs siphon        # the address with the token
+```
+
+Released versions are also published as
+`ghcr.io/mustafaberatdemirci/siphon` (amd64 and arm64). `/downloads` is
+where files go and `/data` keeps the queue and the token. The container runs
+as user 1000: the two folders must be writable by it (`chown 1000 …`, or
+`--user` with your own id). 7-Zip is included for `-extract`; yt-dlp and
+gallery-dl are not.
+
 ## Connections per file
 
 The **Connections per file** setting is a *request*. Each site has a *ceiling*
@@ -669,6 +720,7 @@ embedded copy.
 | `instance.lock` | `%AppData%\Siphon\` | An empty file the running window version holds a lock on, so that only one runs at a time. It stays; the lock goes with the program. |
 | `browser\` | `%AppData%\Siphon\` | Windows only: the browser integration's registration files (**Settings → Browser integration**). |
 | `tools\` | `%AppData%\Siphon\` | The tools installed with **Install tools** (yt-dlp, ffmpeg, gallery-dl, deno). Delete the folder to remove them. |
+| `server\` | `%AppData%\Siphon\` (or `-data`) | `siphon serve`'s `queue.json`, its `token` (readable by your user only on Linux and macOS) and its instance lock. |
 | `gofile-guest.json` | `%AppData%\Siphon\` | The gofile guest account in use, reused for a day. Safe to delete. |
 
 ## What Siphon does not do

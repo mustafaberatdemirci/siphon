@@ -85,6 +85,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "tools" {
 		os.Exit(runTools(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		os.Exit(runServe(os.Args[2:]))
+	}
 	os.Exit(runCLI())
 }
 
@@ -115,7 +118,8 @@ func runCLI() int {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: siphon [flags] [url ...]\n")
 		fmt.Fprintf(os.Stderr, "       siphon doctor [flags] [site ...]\n")
-		fmt.Fprintf(os.Stderr, "       siphon tools [install [tool ...]]\n\n")
+		fmt.Fprintf(os.Stderr, "       siphon tools [install [tool ...]]\n")
+		fmt.Fprintf(os.Stderr, "       siphon serve [flags]   (the queue in a browser; siphon serve -h)\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()

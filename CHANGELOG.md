@@ -20,6 +20,15 @@ Each version's section is also its release notes on GitHub.
   app's SOCKS5 port.
 - When a site is blocked, the message says which of the two helps.
 
+**Server mode**
+
+- **`siphon serve`**: the download queue without a window, driven from a
+  browser: add links (into a subfolder), pause, resume, remove, retry,
+  downloads at once and the speed limit. A token guards the page and its
+  API; it is made on first start and printed with the address.
+- **Docker**: a `Dockerfile` for it, and each release published as
+  `ghcr.io/mustafaberatdemirci/siphon` for amd64 and arm64.
+
 **New sites**
 
 - **Google Drive**: shared files and folders (with subfolders), and Google

@@ -1,0 +1,90 @@
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c2026;
+  --muted: #646b75;
+  --border: #dde1e6;
+  --accent: #2563c9;
+  --accent-text: #ffffff;
+  --bar: #e3e7ec;
+  --done: #2f8a4c;
+  --failed: #c23b32;
+  --waiting: #b7791f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181c;
+    --surface: #1e2227;
+    --text: #e6e8eb;
+    --muted: #99a0aa;
+    --border: #2f343b;
+    --accent: #5b8ef0;
+    --accent-text: #0d1117;
+    --bar: #2c3138;
+    --done: #4fb26f;
+    --failed: #e5655c;
+    --waiting: #d99a3d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.bar {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+}
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 16px; margin: 0 0 4px; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px; margin-bottom: 16px;
+}
+.muted { color: var(--muted); }
+.center { text-align: center; padding: 32px 0; }
+.error { color: var(--failed); }
+label { display: block; font-weight: 600; margin-bottom: 4px; }
+.settings label { font-weight: 400; display: flex; align-items: center; gap: 8px; margin: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.row > input:not([type=number]) { flex: 1 1 200px; }
+.settings { gap: 8px 24px; }
+textarea, input, select, button {
+  font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+}
+textarea { width: 100%; resize: vertical; }
+input[type=number] { width: 90px; }
+button { cursor: pointer; background: var(--surface); }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.notices { list-style: none; margin: 0 0 12px; padding: 0; font-size: 13px; color: var(--muted); }
+.notices li { overflow-wrap: anywhere; }
+.jobs { list-style: none; margin: 0; padding: 0; }
+.job {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px;
+}
+.job .name { font-weight: 600; overflow-wrap: anywhere; }
+.job .dir { color: var(--muted); font-weight: 400; }
+.job .meta { grid-column: 1; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.job .buttons { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; align-items: start; }
+.job .buttons button { padding: 4px 8px; font-size: 13px; }
+.progress { grid-column: 1 / -1; height: 6px; background: var(--bar); border-radius: 3px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent); width: 0; }
+.job.done .progress > div, .job.skipped .progress > div { background: var(--done); }
+.job.failed .progress > div, .job.stopped .progress > div { background: var(--failed); }
+.job.waiting .progress > div { background: var(--waiting); }
+.state-failed, .state-stopped { color: var(--failed); }
+.state-done, .state-skipped { color: var(--done); }
+.state-waiting { color: var(--waiting); }
+code { font-size: 13px; }
+@media (max-width: 560px) {
+  .job { grid-template-columns: minmax(0, 1fr); }
+  .job .buttons { grid-column: 1; grid-row: auto; order: 1; }
+}

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Siphon</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <h1>Siphon <span id="version" class="muted"></span></h1>
+  <div class="actions" id="globalActions" hidden>
+    <button data-all="pause">Pause all</button>
+    <button data-all="resume">Resume all</button>
+    <button data-all="retry-failed">Retry failed</button>
+    <button data-all="clear-finished">Clear finished</button>
+  </div>
+</header>
+
+<main>
+  <section id="login" class="card" hidden>
+    <h2>Token</h2>
+    <p class="muted">Siphon printed it when it started, and saved it as <code>token</code> in its data folder.</p>
+    <form id="loginForm" class="row">
+      <input id="tokenInput" type="password" autocomplete="current-password" placeholder="Token" required>
+      <button type="submit" class="primary">Open</button>
+    </form>
+    <p id="loginError" class="error" hidden></p>
+  </section>
+
+  <div id="app" hidden>
+    <section class="card">
+      <form id="addForm">
+        <label for="links">Add links</label>
+        <textarea id="links" rows="3" placeholder="One link per line: mega, gofile, mediafire, pixeldrain, bunkr, cyberdrop, cyberfile, Google Drive, Dropbox, any direct file link"></textarea>
+        <div class="row">
+          <input id="folder" placeholder="Subfolder (optional)">
+          <button type="submit" class="primary">Add</button>
+        </div>
+      </form>
+      <div class="row settings">
+        <label>Downloads at once
+          <select id="maxActive"></select>
+        </label>
+        <label>Speed limit
+          <input id="speedLimit" type="number" min="0" step="0.5" placeholder="0"> MB/s
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <p id="summary" class="muted"></p>
+      <ul id="notices" class="notices"></ul>
+      <p id="empty" class="muted center" hidden>The queue is empty. Paste links above.</p>
+      <ul id="jobs" class="jobs"></ul>
+    </section>
+  </div>
+</main>
+</body>
+</html>
