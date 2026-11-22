@@ -479,6 +479,13 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 		c.Offset = 0
 		return c
 	}
+	// saving lets one save run at a time. A save syncs the whole .part, and
+	// on a slow disk that can outlast segmentStateEvery: another
+	// connection's save could then begin beside it, the two writing the same
+	// temp file, and a state left unreadable starts the download over. A
+	// save that comes due while one runs is skipped; the last one (force)
+	// waits its turn.
+	var saving sync.Mutex
 	// tick is called after every chunk write: it reports progress and
 	// periodically writes the chunk state to disk. Saving must happen WHILE
 	// DOWNLOADING; if it were only written at the end, a process that dies
@@ -507,8 +514,18 @@ func (d *Downloader) segmentedOnce(ctx context.Context, final, part, statePath s
 			lastConns, conns = c, c
 		}
 		p.mu.Unlock()
-		if doSave && syncData() == nil {
-			saveState(statePath, snap, nil)
+		if doSave {
+			if force {
+				saving.Lock()
+			} else if !saving.TryLock() {
+				doSave = false
+			}
+		}
+		if doSave {
+			if syncData() == nil {
+				saveState(statePath, snap, nil)
+			}
+			saving.Unlock()
 		}
 		if doRep && d.Progress != nil {
 			d.Progress(it, n, total)

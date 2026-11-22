@@ -388,6 +388,50 @@ func TestSegmentStateWaitsForDataSync(t *testing.T) {
 	}
 }
 
+// A save syncs the whole .part, which a slow disk can stretch past the save
+// interval: the saves run one at a time, and one that comes due meanwhile is
+// skipped. Two at once wrote the same temp file and could leave the state
+// unreadable.
+func TestSegmentStateSavesOneAtATime(t *testing.T) {
+	s := newSegServer(t, 1<<20)
+	// 32 chunks at 350 ms each over 4 connections: about 3 s of downloading,
+	// with connections writing (and due to save) all along.
+	s.delayFor = func(int64) time.Duration { return 350 * time.Millisecond }
+	out := tempDir(t)
+	d := &Downloader{Client: s.srv.Client(), Segments: 4, MinSegmentSize: 64 << 10, ChunkSize: 32 << 10}
+	it := segItem(s, "large.bin")
+	it.SHA256 = s.sha()
+
+	var calls, cur, most atomic.Int32
+	syncFile = func(f *os.File) error {
+		n := cur.Add(1)
+		defer cur.Add(-1)
+		for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+		}
+		// The first save while the connections run takes a slow disk's
+		// time: longer than the save interval.
+		if calls.Add(1) == 2 {
+			time.Sleep(1500 * time.Millisecond)
+		}
+		return f.Sync()
+	}
+	t.Cleanup(func() { syncFile = (*os.File).Sync })
+
+	res, err := d.Download(context.Background(), out, it)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if got, _ := os.ReadFile(res.Path); !bytes.Equal(got, s.body) {
+		t.Fatal("segmented download content is corrupt")
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("only %d syncs: no save came due while downloading", calls.Load())
+	}
+	if m := most.Load(); m > 1 {
+		t.Errorf("%d state saves ran at once, want one at a time", m)
+	}
+}
+
 // Hashing a finished file reads all of it, minutes for a large one: a pause
 // or quit must not wait for the end. The state stays complete, so the next
 // run only hashes again.
