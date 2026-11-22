@@ -41,17 +41,29 @@ func (e *Engine) unpackJob(j *Job) (first string, parts []string, ok bool) {
 	if part.Set != "" {
 		first, parts = "", nil
 		for _, o := range e.jobs {
-			if o.OutDir != j.OutDir || o.Dir != j.Dir || o.Path == "" {
+			if o.OutDir != j.OutDir || o.Dir != j.Dir {
 				continue
 			}
-			if k, p := extract.Of(filepath.Base(o.Path)); k == extract.None || p.Set != part.Set {
+			// A job not started yet has no path: its name says whether it
+			// is a part of the set. Passing over it used to unpack a set
+			// whose other parts were still to come.
+			name := o.Path
+			if name == "" {
+				name = o.Filename
+			}
+			k, p := extract.Of(filepath.Base(name))
+			if k == extract.None || p.Set != part.Set {
 				continue
 			}
-			if o.State != StateDone {
+			// Done, or already downloaded before (skipped): the part is there.
+			if !o.State.Finished() {
 				return "", nil, false // a part still to come; it unpacks the set when done
 			}
+			if o.Path == "" {
+				continue // finished in a queue file from before paths were kept: nothing to point at
+			}
 			parts = append(parts, o.Path)
-			if _, p := extract.Of(filepath.Base(o.Path)); p.Number == 1 {
+			if p.Number == 1 {
 				first = o.Path
 			}
 		}

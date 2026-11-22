@@ -502,7 +502,7 @@ func (e *Engine) runJob(ctx context.Context, w *run.Worker, owner *Job, j Job, i
 	e.changed(j)
 	e.scheduleSave()
 
-	outcome, resolved := e.execute(ctx, w, &j, it, haveItem)
+	outcome, resolved := e.execute(ctx, w, owner, &j, it, haveItem)
 
 	e.mu.Lock()
 	live, still := e.byID[j.ID]
@@ -682,8 +682,9 @@ func (e *Engine) notice(msg string) {
 
 // execute hands the job to the Worker; without an Item it re-resolves from
 // SourcePage. It also returns the item as it was handed over ("" URL if it
-// never got that far).
-func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Item, haveItem bool) (run.Outcome, site.Item) {
+// never got that far). owner is the queue's own Job the run is for: the
+// planned name goes into it before the download starts (planned).
+func (e *Engine) execute(ctx context.Context, w *run.Worker, owner *Job, j *Job, it site.Item, haveItem bool) (run.Outcome, site.Item) {
 	if !haveItem {
 		fresh, err := w.Resolver.ResolveOne(ctx, j.SourcePage)
 		if err != nil {
@@ -735,6 +736,7 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 			j.Path = path
 			j.Filename = filepath.Base(path)
 			it.Filename = j.Filename
+			e.planned(owner, *j)
 		}
 	}
 	if it.Size > 0 {
@@ -752,6 +754,28 @@ func (e *Engine) execute(ctx context.Context, w *run.Worker, j *Job, it site.Ite
 	// Not waiting for a file slot: a job parked inside the worker would show
 	// as downloading at 0% and hold a place another host's file could use.
 	return w.DownloadItemIfFree(ctx, j.OutDir, ledger, it, e.opt.Events), it
+}
+
+// planned puts a run's planned path and name into the queue's own job, and
+// the queue on disk, before the download starts. They used to reach the job
+// only when its run ended: the queue file had no name for a download a crash
+// cut short, and unpacking (unpack.go) didn't count a part being downloaded,
+// or not started yet, as a part of its set, so a set was unpacked as soon as
+// its first part was done, failed, and wasn't tried again.
+func (e *Engine) planned(owner *Job, j Job) {
+	e.mu.Lock()
+	live, ok := e.byID[j.ID]
+	ok = ok && live == owner
+	var snap Job
+	if ok {
+		live.Path, live.Filename, live.Name = j.Path, j.Filename, j.Name
+		snap = *live
+	}
+	e.mu.Unlock()
+	if ok {
+		e.changed(snap)
+		e.scheduleSave()
+	}
 }
 
 // takeSlot, under the lock: gives the job a file slot of its item's host (or

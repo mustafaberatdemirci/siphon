@@ -37,6 +37,24 @@ type noticeLog struct {
 
 func (n *noticeLog) add(s string) { n.mu.Lock(); n.list = append(n.list, s); n.mu.Unlock() }
 
+// all is a copy of the notices so far.
+func (n *noticeLog) all() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.list...)
+}
+
+// count is how many notices have part in them.
+func (n *noticeLog) count(part string) int {
+	c := 0
+	for _, s := range n.all() {
+		if strings.Contains(s, part) {
+			c++
+		}
+	}
+	return c
+}
+
 func (n *noticeLog) waitFor(t *testing.T, part string) string {
 	t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
@@ -129,5 +147,101 @@ func TestArchiveInPartsWaitsForEveryPart(t *testing.T) {
 	}
 	if _, _, ok := e.unpackJob(p1); ok {
 		t.Error("the same archive was to be unpacked twice")
+	}
+}
+
+// The parts of a first run have no path yet while they download or wait in
+// the queue: their names still make them parts of the set, and the set
+// waits for them.
+func TestArchiveInPartsWaitsForPartsWithoutAPath(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	h := newHarness(t, f, "", 1)
+	e := h.e
+	e.SetUnpack(true, false)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p1 := &Job{ID: "1", OutDir: "out", Dir: "Album", Filename: "Show.part1.rar", Path: filepath.Join("out", "Album", "Show.part1.rar"), State: StateDone}
+	p2 := &Job{ID: "2", OutDir: "out", Dir: "Album", Filename: "Show.part2.rar", State: StateRunning}
+	p3 := &Job{ID: "3", OutDir: "out", Dir: "Album", Filename: "Show.part3.rar", State: StateQueued}
+	for _, j := range []*Job{p1, p2, p3} {
+		e.jobs = append(e.jobs, j)
+		e.byID[j.ID] = j
+	}
+	if _, _, ok := e.unpackJob(p1); ok {
+		t.Fatal("unpacking began with a part downloading and one queued")
+	}
+	p2.State, p2.Path = StateDone, filepath.Join("out", "Album", "Show.part2.rar")
+	if _, _, ok := e.unpackJob(p2); ok {
+		t.Fatal("unpacking began with a part queued")
+	}
+	p3.State, p3.Path = StateDone, filepath.Join("out", "Album", "Show.part3.rar")
+	first, parts, ok := e.unpackJob(p3)
+	if !ok || filepath.Base(first) != "Show.part1.rar" || len(parts) != 3 {
+		t.Fatalf("with every part done: %q, %v, %v", first, parts, ok)
+	}
+}
+
+// A part the ledger already had (skipped) is there as much as one
+// downloaded now: the set is unpacked.
+func TestArchiveInPartsCountsSkippedParts(t *testing.T) {
+	f := newFakeSite(t, "a.bin")
+	h := newHarness(t, f, "", 1)
+	e := h.e
+	e.SetUnpack(true, false)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p1 := &Job{ID: "1", OutDir: "out", Dir: "Album", Filename: "Show.7z.001", Path: filepath.Join("out", "Album", "Show.7z.001"), State: StateSkipped}
+	p2 := &Job{ID: "2", OutDir: "out", Dir: "Album", Filename: "Show.7z.002", Path: filepath.Join("out", "Album", "Show.7z.002"), State: StateDone}
+	for _, j := range []*Job{p1, p2} {
+		e.jobs = append(e.jobs, j)
+		e.byID[j.ID] = j
+	}
+	first, parts, ok := e.unpackJob(p2)
+	if !ok || filepath.Base(first) != "Show.7z.001" || len(parts) != 2 {
+		t.Fatalf("with one part skipped and one done: %q, %v, %v", first, parts, ok)
+	}
+}
+
+// Through the engine: the parts download at the same time and the last one
+// is held. The set is unpacked once, when that last part is done. Before,
+// the first part to finish had the set unpacked while the others were still
+// coming (their jobs had no path yet), and it was never tried again.
+func TestArchiveInPartsUnpacksOnceTheLastPartIsDone(t *testing.T) {
+	names := []string{"Show.part1.rar", "Show.part2.rar", "Show.part3.rar"}
+	f := newFakeSite(t, names...)
+	hold := f.holdNext("Show.part3.rar")
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold) }) }
+	// Before the fake site's own cleanup (cleanups run last first): a held
+	// answer would keep its server from closing.
+	t.Cleanup(release)
+
+	h := newHarness(t, f, "", len(names))
+	var notes noticeLog
+	h.e.opt.OnNotice = notes.add
+	h.e.SetUnpack(true, false)
+	if _, err := h.e.Add(context.Background(), "album://x", h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.start()
+	defer h.stop()
+
+	h.waitState(jobByName(h.e, "Show.part1.rar").ID, StateDone, 10*time.Second)
+	h.waitState(jobByName(h.e, "Show.part2.rar").ID, StateDone, 10*time.Second)
+	if got := jobByName(h.e, "Show.part3.rar"); got.State != StateRunning {
+		t.Fatalf("the held part is %s, want running", got.State)
+	}
+	// Unpacking runs in a goroutine of its own: give it time to show.
+	time.Sleep(300 * time.Millisecond)
+	if n := notes.count("Unpacking"); n != 0 {
+		t.Fatalf("the set was unpacked with a part still downloading: %q", notes.all())
+	}
+
+	release()
+	h.waitAll(StateDone, 15*time.Second)
+	notes.waitFor(t, "Unpacking Show.part1.rar")
+	time.Sleep(300 * time.Millisecond)
+	if n := notes.count("Unpacking"); n != 1 {
+		t.Errorf("the set was unpacked %d times, want once: %q", n, notes.all())
 	}
 }
