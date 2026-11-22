@@ -9,8 +9,9 @@
 // into place once whole, so a stopped or failed unpacking leaves nothing
 // half there. What is inside is kept inside: an entry naming a parent
 // folder or an absolute path is refused, links are skipped, names are made
-// safe for Windows as downloads' are, and unpacking stops when it grows
-// past a multiple of the archive's size (an archive bomb).
+// safe for Windows as downloads' are, and an archive that unpacks to past a
+// multiple of its size (an archive bomb) is stopped: as it is written for
+// the archives Go reads, from 7-Zip's listing before it starts otherwise.
 package extract
 
 import (
@@ -31,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/mustafaberatdemirci/siphon/internal/dl"
+	"github.com/mustafaberatdemirci/siphon/internal/fsx"
 )
 
 // Kind is how an archive is read.
@@ -158,14 +160,17 @@ func Extract(ctx context.Context, first string, o Options) (string, error) {
 	}
 	defer os.RemoveAll(tmp) // empty by then when it worked
 
-	limit := fi.Size()*maxRatio + maxSlack
+	limit := archiveSize(first, fi)*maxRatio + maxSlack
 	switch kind {
 	case Zip:
 		err = unzip(ctx, first, tmp, limit)
 	case Tar, TarGz, TarBz2:
 		err = untar(ctx, first, tmp, kind, limit)
 	case SevenZip:
-		err = un7z(ctx, o.SevenZip, first, tmp)
+		err = un7z(ctx, o.SevenZip, first, tmp, limit)
+		if err == nil && xzTar(first) {
+			err = untarInner(ctx, tmp, limit)
+		}
 	}
 	if err != nil {
 		return "", err
@@ -196,13 +201,74 @@ func Extract(ctx context.Context, first string, o Options) (string, error) {
 		if name == "" {
 			name = "unpacked"
 		}
+		// The work folder becomes the archive's folder, and os.MkdirTemp
+		// made it for its owner only (0700): a media server or a share
+		// reading the download folder as another user couldn't open it.
+		// Not an error where the file system keeps no such modes (FAT).
+		_ = os.Chmod(tmp, 0o755)
 	}
 	dest := unused(filepath.Join(dir, name))
-	if err := os.Rename(from, dest); err != nil {
+	// Retried while Windows says another program has a file in it open: an
+	// antivirus scans what was just written (fsx).
+	if err := fsx.Rename(from, dest); err != nil {
 		return "", err
 	}
 	markTree(dest, o.Source)
 	return dest, nil
+}
+
+// archiveSize is what the bomb limit is a multiple of: the archive's size,
+// or for a set in parts every part of it beside the first. The first part
+// alone would hold a set of more than maxRatio parts to less than it holds.
+func archiveSize(first string, fi os.FileInfo) int64 {
+	_, part := Of(filepath.Base(first))
+	if part.Set == "" {
+		return fi.Size()
+	}
+	entries, err := os.ReadDir(filepath.Dir(first))
+	if err != nil {
+		return fi.Size()
+	}
+	var total int64
+	for _, e := range entries {
+		if _, p := Of(e.Name()); p.Set != part.Set || !e.Type().IsRegular() {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	return max(total, fi.Size())
+}
+
+// xzTar reports a tar in xz, which 7-Zip unpacks in two steps.
+func xzTar(name string) bool {
+	low := strings.ToLower(filepath.Base(name))
+	return strings.HasSuffix(low, ".tar.xz") || strings.HasSuffix(low, ".txz")
+}
+
+// untarInner finishes a tar in xz: 7-Zip takes off only the xz layer and
+// leaves the .tar that was inside it (MEASURED with 7-Zip 26.06: "7z x
+// Show.tar.xz" gives Show.tar), which then went to the download folder as
+// the archive's content. It is unpacked here like any tar, under the same
+// limit. Anything else 7-Zip left is taken as it came.
+func untarInner(ctx context.Context, root string, limit int64) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 1 || !entries[0].Type().IsRegular() || !strings.EqualFold(filepath.Ext(entries[0].Name()), ".tar") {
+		return nil
+	}
+	// Set aside first, beside the work folder: an entry of the tar may have
+	// its name.
+	inner := filepath.Join(root, entries[0].Name())
+	aside := root + ".tar"
+	if err := fsx.Rename(inner, aside); err != nil {
+		return err
+	}
+	defer os.Remove(aside)
+	return untar(ctx, aside, root, Tar, limit)
 }
 
 // unused is p, or p with " (2)", " (3)"... before its extension if p is taken.

@@ -296,6 +296,164 @@ func TestSevenZipParts(t *testing.T) {
 	}
 }
 
+// makeTar writes a plain tar of files (name -> content), folders made from
+// the names.
+func makeTar(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(files[n])), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = tw.Write([]byte(files[n]))
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sevenZip runs 7-Zip in dir.
+func sevenZip(t *testing.T, sz, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(sz, args...)
+	cmd.Dir = dir
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("7z %v: %v\n%s", args, err, b)
+	}
+}
+
+// The bomb limit of a set is a multiple of all its parts, not of the first
+// alone; partial downloads beside them and other sets don't count.
+func TestArchiveSizeOfASet(t *testing.T) {
+	dir := testutil.TempDir(t)
+	for name, size := range map[string]int{
+		"Show.part1.rar": 10, "Show.part2.rar": 20, "Show.part3.rar.part": 100, "Other.part1.rar": 1000, "Show.zip": 5,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, want := range map[string]int64{"Show.part1.rar": 30, "Show.zip": 5} {
+		p := filepath.Join(dir, name)
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := archiveSize(p, fi); got != want {
+			t.Errorf("archiveSize(%s) = %d, want %d", name, got, want)
+		}
+	}
+}
+
+// The folder several things are unpacked into opens for other users too, as
+// the download folder's other folders do: not the work folder's 0700.
+func TestUnpackedFolderIsReadableByOthers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes on Windows")
+	}
+	dir := testutil.TempDir(t)
+	p := filepath.Join(dir, "Loose files.zip")
+	makeZip(t, p, map[string]string{"a.txt": "a", "b.txt": "b"})
+	got, err := Extract(context.Background(), p, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o755 {
+		t.Errorf("the unpacked folder's mode is %o, want 755", mode)
+	}
+}
+
+// With 7-Zip on the machine: a tar in xz unpacks to what the tar holds, not
+// to the tar, and leaves nothing of the work behind.
+func TestSevenZipTarXz(t *testing.T) {
+	sz := find7z()
+	if sz == "" {
+		t.Skip("7-Zip isn't installed")
+	}
+	dir := testutil.TempDir(t)
+	src := filepath.Join(dir, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeTar(t, filepath.Join(src, "Show.tar"), map[string]string{"Show/a.txt": "A", "Show/sub/b.txt": "B"})
+	out := filepath.Join(dir, "dl")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sevenZip(t, sz, src, "a", "-txz", filepath.Join(out, "Show.tar.xz"), "Show.tar")
+
+	got, err := Extract(context.Background(), filepath.Join(out, "Show.tar.xz"), Options{SevenZip: sz})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(out, "Show") || read(t, filepath.Join(got, "sub", "b.txt")) != "B" {
+		t.Errorf("the tar.xz went to %s", got)
+	}
+	left, _ := filepath.Glob(filepath.Join(out, "*"))
+	for _, l := range left {
+		if b := filepath.Base(l); b != "Show.tar.xz" && b != "Show" {
+			t.Errorf("left behind: %s", b)
+		}
+	}
+}
+
+// With 7-Zip on the machine: an archive that lists far more than its size
+// isn't unpacked at all, and one in parts is held to all of its parts.
+func TestSevenZipBombStops(t *testing.T) {
+	sz := find7z()
+	if sz == "" {
+		t.Skip("7-Zip isn't installed")
+	}
+	oldR, oldS := maxRatio, maxSlack
+	defer func() { maxRatio, maxSlack = oldR, oldS }()
+	dir := testutil.TempDir(t)
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(src, "Show"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "Show", "zeros.bin"), make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "dl")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sevenZip(t, sz, src, "a", filepath.Join(out, "bomb.7z"), "Show")
+
+	maxRatio, maxSlack = 2, 0
+	if _, err := Extract(context.Background(), filepath.Join(out, "bomb.7z"), Options{SevenZip: sz}); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("err = %v, want ErrTooLarge", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(out, "*")); len(left) != 1 {
+		t.Errorf("a refused unpacking left %v", left)
+	}
+
+	// Stored, not compressed, in parts: it holds less than its parts weigh
+	// together, and three times what its first part does.
+	big := bytes.Repeat([]byte("siphon 7z part test "), 20000) // ~400 KB, split in 3
+	if err := os.WriteFile(filepath.Join(src, "Show", "zeros.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sevenZip(t, sz, src, "a", "-mx0", "-v150k", filepath.Join(out, "Parts.7z"), "Show")
+	maxRatio, maxSlack = 1, 0
+	if _, err := Extract(context.Background(), filepath.Join(out, "Parts.7z.001"), Options{SevenZip: sz}); err != nil {
+		t.Errorf("a set in parts within the limit of its parts: %v", err)
+	}
+}
+
 func TestArchives(t *testing.T) {
 	d := filepath.Join("out", "Album")
 	in := []string{
