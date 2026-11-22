@@ -2,6 +2,46 @@
 
 Each version's section is also its release notes on GitHub.
 
+## Unreleased
+
+**Fixes**
+
+- **Archives in parts are unpacked once every part is there.** In the
+  window and in server mode, a set such as `name.part1.rar`… or
+  `name.7z.001`… was unpacked as soon as its first part finished, while the
+  others were still downloading or waiting: 7-Zip failed on the missing
+  parts, and the set wasn't tried again when the last one came. A part that
+  was already downloaded before (skipped) now counts as there too.
+- **A `.tar.xz` is unpacked to what it holds.** 7-Zip takes off only the xz
+  layer, and the `.tar` inside used to be put next to the archive instead
+  of its files.
+- Archives that 7-Zip unpacks (7z, rar, `.tar.xz` and archives in parts) are
+  held to the archive-bomb limit too: one that lists far more than its size
+  isn't unpacked. The limit was only kept for zip and tar. A set in parts is
+  measured by all of its parts.
+- On Linux and macOS (and in the Docker image) the folder an archive of
+  several things is unpacked into can be opened by other users, a media
+  server for one, like the download folder's other folders. It was readable
+  by Siphon's user only.
+- On Windows, unpacking no longer fails when an antivirus is still scanning
+  a file it just wrote; moving it into place is retried for a moment, as a
+  finished download already is.
+- A download's file name is saved in the queue as soon as it is decided,
+  before the download starts, so a download cut short by a crash is sure to
+  go on under the same name.
+- The queue file is on the disk before it replaces the last one: a power
+  cut right after a save can't leave an empty list.
+- A download over several connections saves its progress one save at a
+  time. On a slow disk two saves could run at once and leave the progress
+  unreadable, which would start the download over.
+
+**Project**
+
+- The release writes its own version into the browser extension's
+  manifests (`browser/pack.sh <folder> <version>`). The manifests were left
+  at an older version, and once Mozilla's signing keys are set up that would
+  have failed the signing, and with it the whole release.
+
 ## 0.1.3
 
 **Blocked sites**
