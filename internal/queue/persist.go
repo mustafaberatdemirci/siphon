@@ -74,10 +74,32 @@ func save(path string, jobs []*Job) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := writeSynced(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return fsx.Rename(tmp, path)
+}
+
+// writeSynced writes data to path and has it on the disk before it returns.
+// The rename after it must not put in place of the last good queue a file
+// whose data a power cut can still take: some file systems can write the
+// rename before the data, and a cut then would leave an empty or partial
+// queue.json, the next start beginning with an empty list. One sync per
+// save is nothing next to the 500 ms between saves.
+func writeSynced(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // DefaultStatePath is the default location of the queue file: the user's
