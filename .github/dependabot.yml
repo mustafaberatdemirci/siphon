@@ -1,5 +1,8 @@
-# Weekly pull requests for newer Go modules and GitHub Actions. Fyne and its
-# many indirect modules come as one pull request, the rest one by one.
+# Weekly pull requests for newer Go modules and GitHub Actions, grouped so a
+# week brings a few, not one per module: Fyne and its many indirect modules
+# come as one pull request, the other Go modules as another, and every
+# GitHub Action as a third. (One per action brought four Docker ones at
+# once, each touching the next one's line of release.yml.)
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -13,8 +16,16 @@ updates:
           - "github.com/fyne-io/*"
           - "github.com/go-gl/*"
           - "github.com/go-text/*"
+      # A module goes to the first group that names it: Fyne's stay above.
+      go:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
