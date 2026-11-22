@@ -60,7 +60,8 @@ jobs:
           # -H=windowsgui: no console window behind the window.
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -H=windowsgui" -o "dist/$name/siphon-gui.exe" ./cmd/siphon-gui
           cp LICENSE README.md "dist/$name/"
-          sh browser/pack.sh "dist/$name/browser"
+          # The extension carries the release's version (pack.sh).
+          sh browser/pack.sh "dist/$name/browser" "${ver%%-*}"
           cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
 
       # One download for every Mac: both programs are universal binaries
@@ -113,7 +114,7 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep "$app"
           cp LICENSE README.md "dist/$name/"
-          sh browser/pack.sh "dist/$name/browser"
+          sh browser/pack.sh "dist/$name/browser" "${ver%%-*}"
           # ditto keeps the app bundle intact; a .zip is what Finder opens.
           cd dist && ditto -c -k --keepParent "$name" "$name.zip"
 
@@ -165,12 +166,13 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
+          ver="${VERSION#v}"
           name="siphon-${VERSION}-${TARGET}"
           stage=build/linux
           mkdir -p "$stage" "dist/$name"
           CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$stage/siphon" .
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$stage/siphon-gui" ./cmd/siphon-gui
-          sh browser/pack.sh "$stage/browser"
+          sh browser/pack.sh "$stage/browser" "${ver%%-*}"
           cp -R "$stage/." "dist/$name/"
           cp LICENSE README.md "dist/$name/"
           cp docs/icon.png "dist/$name/siphon.png"
@@ -222,10 +224,10 @@ jobs:
         run: |
           set -euo pipefail
           ver="${VERSION#v}"
-          sh browser/pack.sh build
+          sh browser/pack.sh build "$ver"
           got=$(jq -r .version build/firefox/manifest.json)
           if [ "$got" != "$ver" ]; then
-            echo "browser/manifest.firefox.json says $got, the tag $ver"; exit 1
+            echo "pack.sh wrote $got into the Firefox manifest, the tag is $ver"; exit 1
           fi
           npx --yes web-ext@8.3.0 sign --source-dir build/firefox --artifacts-dir build/signed \
             --channel unlisted --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET" \

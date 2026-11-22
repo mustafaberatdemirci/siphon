@@ -767,15 +767,17 @@ shared; upload it in the repository's settings (Social preview).
 
 **The browser extension** lives in `browser/`: one set of scripts and a
 manifest for each kind of browser (Chromium and Firefox read the background
-script differently). `sh browser/pack.sh <folder>` builds both into
-`<folder>/chromium` and `<folder>/firefox`, the way the release packs them.
-`npx web-ext lint --source-dir <folder>/firefox` runs Mozilla's add-on check.
-The release has Mozilla sign the Firefox one (an unlisted add-on: not in the
-store, but it installs for good) when the repository has the add-on store's
-API key as the secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`
-(addons.mozilla.org → Tools → Manage API Keys). Mozilla signs a version
-number once, so the manifest's version must be the tag's, and pre-releases
-aren't signed.
+script differently). `sh browser/pack.sh <folder> [version]` builds both
+into `<folder>/chromium` and `<folder>/firefox`, the way the release packs
+them, with the version (e.g. `1.2.3`) written into both manifests when one
+is given. `npx web-ext lint --source-dir <folder>/firefox` runs Mozilla's
+add-on check. The release has Mozilla sign the Firefox one (an unlisted
+add-on: not in the store, but it installs for good) when the repository has
+the add-on store's API key as the secrets `AMO_JWT_ISSUER` and
+`AMO_JWT_SECRET` (addons.mozilla.org → Tools → Manage API Keys). Mozilla
+signs a version number once: the release packs the extension with the tag's
+version, so the manifests in `browser/` needn't be changed for a release,
+and pre-releases aren't signed.
 
 **Translations.** The window's texts are written in English in the code and
 wrapped in `T(...)` (or `Tf(...)` with format verbs); the English text is the

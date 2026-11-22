@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Siphon",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Send links, a page's file links and downloads to Siphon.",
   "icons": {
     "128": "icon.png"
