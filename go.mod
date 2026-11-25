@@ -3,7 +3,7 @@ module github.com/mustafaberatdemirci/siphon
 go 1.27.0
 
 require (
-	fyne.io/fyne/v2 v2.8.2
+	fyne.io/fyne/v2 v2.8.3
 	github.com/BurntSushi/toml v1.6.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.25.0
